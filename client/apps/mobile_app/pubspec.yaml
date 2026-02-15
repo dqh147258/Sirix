@@ -1,0 +1,31 @@
+name: mobile_app
+description: Freeloom mobile client app.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  app_core:
+    path: ../../packages/app_core
+  feature_auth:
+    path: ../../packages/feature_auth
+  feature_device_list:
+    path: ../../packages/feature_device_list
+  feature_remote_view:
+    path: ../../packages/feature_remote_view
+  infra_api:
+    path: ../../packages/infra_api
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

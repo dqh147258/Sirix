@@ -1,0 +1,28 @@
+name: feature_remote_view
+description: Remote view feature for mobile client.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  app_core:
+    path: ../app_core
+  infra_api:
+    path: ../infra_api
+  infra_webrtc:
+    path: ../infra_webrtc
+  web_socket_channel: ^3.0.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

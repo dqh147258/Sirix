@@ -1,0 +1,71 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-freeloom}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-freeloom}
+      POSTGRES_DB: ${POSTGRES_DB:-freeloom}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-freeloom}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  coturn:
+    image: coturn/coturn:4.6
+    command: >
+      -n --log-file=stdout
+      --realm=freeloom.local
+      --lt-cred-mech
+      --user=${TURN_USERNAME:-freeloom}:${TURN_PASSWORD:-freeloom_turn_secret}
+      --listening-port=${TURN_PORT:-3478}
+      --min-port=${TURN_MIN_PORT:-49160}
+      --max-port=${TURN_MAX_PORT:-49200}
+    ports:
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}"
+      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
+      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+
+  backend-server:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      coturn:
+        condition: service_started
+    working_dir: /app
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    environment:
+      APP_ENV: dev
+      APP__SERVER__HOST: 0.0.0.0
+      APP__SERVER__PORT: 8080
+      APP__LOGGING__LEVEL: trace
+      APP__POSTGRES__URL: postgres://${POSTGRES_USER:-freeloom}:${POSTGRES_PASSWORD:-freeloom}@postgres:5432/${POSTGRES_DB:-freeloom}
+      APP__REDIS__URL: redis://redis:6379
+      APP__WEBRTC__ICE_SERVERS: '["stun:stun.l.google.com:19302","turn:coturn:3478?transport=udp"]'
+
+volumes:
+  pg_data:
+  redis_data:

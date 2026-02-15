@@ -1,0 +1,27 @@
+name: desktop_app
+description: Freeloom desktop client app.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.22.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.5.1
+  app_core:
+    path: ../../packages/app_core
+  feature_auth:
+    path: ../../packages/feature_auth
+  feature_desktop_authorize:
+    path: ../../packages/feature_desktop_authorize
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

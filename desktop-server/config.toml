@@ -1,0 +1,27 @@
+[backend]
+base_url = "http://127.0.0.1:8080"
+health_path = "/health"
+heartbeat_path = "/api/v1/desktop/devices/{device_id}/heartbeat"
+heartbeat_interval_seconds = 10
+device_id = "00000000-0000-0000-0000-000000000001"
+event_ws_path = "/api/v1/desktop/events/{device_id}/ws"
+session_decision_path = "/api/v1/desktop/sessions/{session_id}/decision"
+webrtc_signal_path = "/api/v1/webrtc/signal"
+
+[local_ws]
+host = "127.0.0.1"
+port_range_start = 9700
+port_range_end = 9710
+
+[capture]
+snapshot_interval_seconds = 5
+snapshot_width = 480
+
+[stream]
+default_profile = "p720"
+default_fps = 15
+auto_adapt = true
+
+[logging]
+level = "trace"
+json = false

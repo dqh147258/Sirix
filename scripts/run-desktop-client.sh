@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+CLIENT_DIR=$(cd "${SCRIPT_DIR}/../client" && pwd)
+
+USE_MOCK=${FREELOOM_USE_MOCK:-false}
+API_BASE_URL=${FREELOOM_API_BASE_URL:-http://127.0.0.1:8080}
+DESKTOP_HOST=${FREELOOM_DESKTOP_SERVER_HOST:-127.0.0.1}
+DESKTOP_PORT_START=${FREELOOM_DESKTOP_SERVER_PORT_START:-9700}
+DESKTOP_PORT_END=${FREELOOM_DESKTOP_SERVER_PORT_END:-9710}
+
+cd "${CLIENT_DIR}"
+flutter pub get
+flutter run \
+  -t apps/desktop_app/lib/main.dart \
+  --dart-define=FREELOOM_USE_MOCK=${USE_MOCK} \
+  --dart-define=FREELOOM_API_BASE_URL=${API_BASE_URL} \
+  --dart-define=FREELOOM_DESKTOP_SERVER_HOST=${DESKTOP_HOST} \
+  --dart-define=FREELOOM_DESKTOP_SERVER_PORT_START=${DESKTOP_PORT_START} \
+  --dart-define=FREELOOM_DESKTOP_SERVER_PORT_END=${DESKTOP_PORT_END} \
+  "$@"

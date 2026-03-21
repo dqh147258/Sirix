@@ -4,11 +4,13 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
+use crate::app::runtime_logger::RuntimeLogger;
 use crate::bootstrap::config::AppConfig;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
+    pub logger: Arc<RuntimeLogger>,
     pub runtime: Arc<RwLock<RuntimeState>>,
     pub local_events: broadcast::Sender<String>,
     pub pending_authorizations: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
@@ -19,18 +21,27 @@ pub struct RuntimeState {
     pub local_ws_port: u16,
     pub desktop_client_connections: usize,
     pub auto_approve_screen_share: bool,
+    pub logging_enabled: bool,
+    pub backend_event_stream_connected: bool,
     pub backend_last_healthy_at: Option<DateTime<Utc>>,
 }
 
 impl AppState {
     pub fn new(config: AppConfig, local_ws_port: u16) -> Self {
         let (local_events, _) = broadcast::channel(256);
+        let logger = Arc::new(RuntimeLogger::new(
+            config.backend.base_url.clone(),
+            config.backend.runtime_logs_path.clone(),
+        ));
         Self {
             config: Arc::new(config),
+            logger,
             runtime: Arc::new(RwLock::new(RuntimeState {
                 local_ws_port,
                 desktop_client_connections: 0,
                 auto_approve_screen_share: false,
+                logging_enabled: true,
+                backend_event_stream_connected: false,
                 backend_last_healthy_at: None,
             })),
             local_events,

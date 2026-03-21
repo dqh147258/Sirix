@@ -59,6 +59,43 @@ class MockBackendApiClient implements BackendApiClient {
   }
 
   @override
+  Future<DeviceSummary> registerDevice({
+    required String accessToken,
+    required String deviceName,
+    required String platform,
+    required String clientVersion,
+    String? preferredDeviceId,
+  }) async {
+    final deviceId = preferredDeviceId ?? _uuid.v4();
+    final index = _devices.indexWhere((device) => device.id == deviceId);
+
+    if (index == -1) {
+      final created = DeviceSummary(
+        id: deviceId,
+        deviceName: deviceName,
+        platform: platform,
+        clientVersion: clientVersion,
+        autoApproveScreenShare: false,
+        online: true,
+      );
+      _devices.insert(0, created);
+      return created;
+    }
+
+    final existing = _devices[index];
+    final updated = DeviceSummary(
+      id: existing.id,
+      deviceName: deviceName,
+      platform: platform,
+      clientVersion: clientVersion,
+      autoApproveScreenShare: existing.autoApproveScreenShare,
+      online: true,
+    );
+    _devices[index] = updated;
+    return updated;
+  }
+
+  @override
   Future<List<DeviceSummary>> listMyDevices({required String accessToken}) async {
     return _devices;
   }

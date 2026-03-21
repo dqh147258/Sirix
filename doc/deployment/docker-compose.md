@@ -82,7 +82,7 @@
 
 ## 6. TURN 说明
 
-- 当前 compose 启用 UDP/TCP TURN（3478 + relay 端口段）。
+- 当前 compose 启用 UDP/TCP TURN（3478 + relay 端口段，默认 `41000-41040/udp` 以避免本地临时端口冲突）。
 - TURN TLS(443) 暂未默认启用，见 `doc/TODO.md` 的网络增强项。
 
 ## 7. 生产建议

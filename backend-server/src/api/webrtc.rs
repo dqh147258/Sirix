@@ -70,6 +70,19 @@ pub async fn relay_signal(
         ));
     }
 
+    if matches!(
+        session_state,
+        SessionState::Requested | SessionState::PendingApproval
+    ) {
+        return Err(ApiError::conflict(
+            "SESSION_NOT_ACTIVE",
+            format!(
+                "session in state '{}' cannot relay webrtc signals yet",
+                session_state.as_str()
+            ),
+        ));
+    }
+
     match payload.role {
         SignalRole::Mobile => {
             let user_id = resolve_user_id(&headers, &state).await?;
@@ -148,10 +161,85 @@ pub async fn relay_signal(
         .await
         .map_err(internal_error)?;
 
+    if matches!(payload.role, SignalRole::Desktop)
+        && matches!(payload.signal_type, SignalType::Answer)
+        && session_state == SessionState::Connecting
+    {
+        promote_session_to_streaming(
+            &state,
+            payload.session_id,
+            requester_user_id,
+            target_device_id,
+        )
+        .await?;
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "session_id": payload.session_id,
     })))
+}
+
+async fn promote_session_to_streaming(
+    state: &AppState,
+    session_id: Uuid,
+    requester_user_id: Uuid,
+    target_device_id: Uuid,
+) -> ApiResult<()> {
+    let now = Utc::now();
+
+    state
+        .postgres
+        .execute(
+            "UPDATE share_sessions SET state = 'streaming', pause_deadline_at = NULL, updated_at = $2 WHERE id = $1",
+            &[&session_id, &now],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    let event_payload = serde_json::json!({
+        "state": "streaming",
+    });
+
+    state
+        .postgres
+        .execute(
+            "INSERT INTO session_events (session_id, event_type, created_at, payload) VALUES ($1, $2, $3, $4)",
+            &[&session_id, &"session.streaming_started", &now, &event_payload],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    let mobile_event = serde_json::json!({
+        "type": "session.state.changed",
+        "event_id": Uuid::new_v4().to_string(),
+        "timestamp": now,
+        "payload": {
+            "session_id": session_id,
+            "state": "streaming",
+        }
+    });
+
+    state
+        .publish_mobile_event(requester_user_id, mobile_event.to_string())
+        .await;
+
+    let desktop_event = serde_json::json!({
+        "type": "session.state.changed",
+        "event_id": Uuid::new_v4().to_string(),
+        "timestamp": now,
+        "payload": {
+            "session_id": session_id,
+            "state": "streaming",
+            "target_device_id": target_device_id,
+        }
+    });
+
+    state
+        .publish_desktop_event(target_device_id, desktop_event.to_string())
+        .await;
+
+    Ok(())
 }
 
 fn signal_type_to_event(signal_type: &SignalType) -> &'static str {

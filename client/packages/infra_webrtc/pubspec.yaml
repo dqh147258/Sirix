@@ -13,6 +13,10 @@ dependencies:
   flutter_riverpod: ^2.5.1
   app_core:
     path: ../app_core
+  infra_api:
+    path: ../infra_api
+  flutter_webrtc:
+    path: ../../third_party/flutter-webrtc
 
 dev_dependencies:
   flutter_test:

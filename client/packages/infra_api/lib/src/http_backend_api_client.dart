@@ -54,18 +54,32 @@ class HttpBackendApiClient implements BackendApiClient {
   }
 
   @override
+  Future<DeviceSummary> registerDevice({
+    required String accessToken,
+    required String deviceName,
+    required String platform,
+    required String clientVersion,
+    String? preferredDeviceId,
+  }) async {
+    final response = await _post(
+      '/api/v1/devices/register',
+      accessToken: accessToken,
+      body: {
+        'device_name': deviceName,
+        'platform': platform,
+        'client_version': clientVersion,
+        if (preferredDeviceId != null) 'preferred_device_id': preferredDeviceId,
+      },
+    );
+
+    return _deviceFromResponse(response);
+  }
+
+  @override
   Future<List<DeviceSummary>> listMyDevices({required String accessToken}) async {
     final response = await _get('/api/v1/devices/my', accessToken: accessToken);
     return (response as List<dynamic>).map((entry) {
-      final json = entry as Map<String, dynamic>;
-      return DeviceSummary(
-        id: json['id'] as String,
-        deviceName: json['device_name'] as String,
-        platform: json['platform'] as String,
-        clientVersion: json['client_version'] as String,
-        autoApproveScreenShare: json['auto_approve_screen_share'] as bool? ?? false,
-        online: json['online'] as bool? ?? false,
-      );
+      return _deviceFromResponse(entry as Map<String, dynamic>);
     }).toList(growable: false);
   }
 
@@ -271,5 +285,16 @@ class HttpBackendApiClient implements BackendApiClient {
     }
 
     return jsonDecode(response.body);
+  }
+
+  DeviceSummary _deviceFromResponse(Map<String, dynamic> json) {
+    return DeviceSummary(
+      id: json['id'] as String,
+      deviceName: json['device_name'] as String? ?? '',
+      platform: json['platform'] as String? ?? '',
+      clientVersion: json['client_version'] as String? ?? '',
+      autoApproveScreenShare: json['auto_approve_screen_share'] as bool? ?? false,
+      online: json['online'] as bool? ?? false,
+    );
   }
 }

@@ -6,6 +6,12 @@ port = 8080
 level = "trace"
 json = false
 
+[runtime]
+logging_enabled = true
+logs_root_dir = "runtime-logs"
+max_run_directories = 10
+max_lines_per_file = 5000
+
 [postgres]
 url = "postgres://freeloom:freeloom@127.0.0.1:5432/freeloom"
 

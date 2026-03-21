@@ -12,6 +12,14 @@ abstract class BackendApiClient {
     required String clientType,
   });
 
+  Future<DeviceSummary> registerDevice({
+    required String accessToken,
+    required String deviceName,
+    required String platform,
+    required String clientVersion,
+    String? preferredDeviceId,
+  });
+
   Future<List<DeviceSummary>> listMyDevices({
     required String accessToken,
   });

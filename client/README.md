@@ -56,17 +56,32 @@ flutter run -t apps/desktop_app/lib/main.dart -d macos
 ## 运行参数（--dart-define）
 
 - `FREELOOM_USE_MOCK`（默认 `true`）
-- `FREELOOM_API_BASE_URL`（默认 `http://127.0.0.1:8080`）
+- `FREELOOM_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
+- `FREELOOM_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${FREELOOM_SERVER_HOST}:8080`）
 - `FREELOOM_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
 - `FREELOOM_DESKTOP_SERVER_PORT_START`（默认 `9700`）
 - `FREELOOM_DESKTOP_SERVER_PORT_END`（默认 `9710`）
+
+说明：
+
+- 移动端默认会把 backend 指向 `192.168.0.36:8080`。
+- 若只想切换后端主机地址，优先传 `FREELOOM_SERVER_HOST`。
+- 若需要完整覆盖协议、端口或路径，再直接传 `FREELOOM_API_BASE_URL`。
 
 示例：
 
 ```bash
 flutter run -t apps/mobile_app/lib/main.dart \
   --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_API_BASE_URL=http://127.0.0.1:8080
+  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36
+```
+
+显式指定完整地址：
+
+```bash
+flutter run -t apps/mobile_app/lib/main.dart \
+  --dart-define=FREELOOM_USE_MOCK=false \
+  --dart-define=FREELOOM_API_BASE_URL=http://192.168.0.36:8080
 ```
 
 ## 当前能力（MVP）
@@ -74,5 +89,9 @@ flutter run -t apps/mobile_app/lib/main.dart \
 - 统一账号注册/登录（移动端与桌面端共用）。
 - 移动端设备列表、连接请求、会话状态监听。
 - 移动端远程查看：分辨率切换、自动码率、横竖屏切换、快照预览与多屏切换。
-- 移动端退后台 3 分钟保活后自动断开。
-- 桌面端授权页：自动授权开关、本地授权请求处理、与 desktop-server 实时联动。
+- 移动端退后台 3 分钟保活后自动断开（后端也会执行超时兜底终止）。
+- 桌面端授权页：
+  - 自动连接 desktop-server 本地 WS。
+  - 展示并使用 desktop-server 下发的 `device_id`。
+  - 用固定 `device_id` 向 backend 注册设备（幂等更新）。
+  - 自动授权开关与 backend 设备设置双向同步。

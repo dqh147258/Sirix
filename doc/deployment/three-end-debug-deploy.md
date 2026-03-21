@@ -30,6 +30,13 @@
 
 这会拉起：`postgres`、`redis`、`coturn`、`backend-server`。
 
+### backend 可配置项（在哪里改）
+
+- Docker Compose 环境变量：`backend-server/deploy/docker-compose.yml`
+  - 例如：`APP__WEBRTC__ICE_SERVERS`、`APP__SERVER__PORT`、`APP__LOGGING__LEVEL`
+- 默认配置：`backend-server/config/default.toml`
+- 环境差异配置：`backend-server/config/dev.toml`（或 `APP_ENV` 指向的文件）
+
 ## 3.2 启动 desktop-server
 
 ```bash
@@ -46,6 +53,12 @@ CARGO_HOME=/tmp/cargo-home cargo run
 - `backend.session_decision_path`
 - `backend.webrtc_signal_path`
 
+### 关键约束：device_id 对齐
+
+- `backend.device_id` 是桌面设备唯一标识。
+- desktop Flutter 会通过 `settings.sync` 读取该值，并调用 `POST /api/v1/devices/register`（`preferred_device_id`）完成幂等注册。
+- 若更换了 `backend.device_id`，会被识别成新设备。
+
 ## 3.3 启动 Flutter 客户端（从 `client/` 根目录启动）
 
 ### 移动端
@@ -60,7 +73,7 @@ CARGO_HOME=/tmp/cargo-home cargo run
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
   --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_API_BASE_URL=http://127.0.0.1:8080
+  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36
 ```
 
 ### 桌面端（macOS / Windows）
@@ -75,7 +88,7 @@ flutter run -t apps/mobile_app/lib/main.dart \
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d macos \
   --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_API_BASE_URL=http://127.0.0.1:8080 \
+  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36 \
   --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1 \
   --dart-define=FREELOOM_DESKTOP_SERVER_PORT_START=9700 \
   --dart-define=FREELOOM_DESKTOP_SERVER_PORT_END=9710
@@ -85,16 +98,18 @@ flutter run -t apps/desktop_app/lib/main.dart -d macos \
 
 1. 桌面端 Flutter 登录成功。
 2. 桌面授权页显示“已连接 desktop-server”。
-3. 移动端登录后看到同账号设备列表（在线状态正确）。
-4. 移动端点击连接：
+3. 桌面授权页显示有效的 `device_id`，并完成 backend 设备注册。
+4. 移动端登录后看到同账号设备列表（在线状态正确）。
+5. 移动端点击连接：
    - 自动授权开时直接进入；
    - 自动授权关时桌面端出现授权请求。
-5. 移动端远程查看页可：
+6. 移动端远程查看页可：
    - 切换 480P / 720P / 1080P；
    - 切换自动码率；
    - 横竖屏切换；
    - 多屏列表切换；
    - 退后台 3 分钟后自动断开。
+7. 超时后移动端收到 `session.auto_terminated` 事件。
 
 ## 5. 常见问题排查
 
@@ -117,6 +132,13 @@ flutter run -t apps/desktop_app/lib/main.dart -d macos \
 
 - 检查 `coturn` 端口和 `APP__WEBRTC__ICE_SERVERS` 配置。
 - 检查移动端/桌面端的 `webrtc.*` 事件是否都有往返。
+
+## 5.5 自动授权切换后行为不一致
+
+- 桌面端切换后应同时看到：
+  - 本地 `settings.sync` 状态变化
+  - backend `PATCH /api/v1/devices/{id}/settings` 成功
+- 若失败，优先检查 access token 和 `device_id` 归属。
 
 ## 6. 预发布与生产部署建议
 

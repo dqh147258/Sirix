@@ -25,6 +25,10 @@ dependencies:
     path: packages/feature_desktop_authorize
   infra_api:
     path: packages/infra_api
+  infra_webrtc:
+    path: packages/infra_webrtc
+  flutter_webrtc:
+    path: third_party/flutter-webrtc
 
 dev_dependencies:
   flutter_test:

@@ -36,12 +36,12 @@ services:
       --lt-cred-mech
       --user=${TURN_USERNAME:-freeloom}:${TURN_PASSWORD:-freeloom_turn_secret}
       --listening-port=${TURN_PORT:-3478}
-      --min-port=${TURN_MIN_PORT:-49160}
-      --max-port=${TURN_MAX_PORT:-49200}
+      --min-port=${TURN_MIN_PORT:-41000}
+      --max-port=${TURN_MAX_PORT:-41040}
     ports:
       - "${TURN_PORT:-3478}:${TURN_PORT:-3478}"
       - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
-      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+      - "${TURN_MIN_PORT:-41000}-${TURN_MAX_PORT:-41040}:${TURN_MIN_PORT:-41000}-${TURN_MAX_PORT:-41040}/udp"
 
   backend-server:
     build:
@@ -65,6 +65,8 @@ services:
       APP__POSTGRES__URL: postgres://${POSTGRES_USER:-freeloom}:${POSTGRES_PASSWORD:-freeloom}@postgres:5432/${POSTGRES_DB:-freeloom}
       APP__REDIS__URL: redis://redis:6379
       APP__WEBRTC__ICE_SERVERS: '["stun:stun.l.google.com:19302","turn:coturn:3478?transport=udp"]'
+    volumes:
+      - ./runtime-logs:/app/runtime-logs
 
 volumes:
   pg_data:

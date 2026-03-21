@@ -22,6 +22,7 @@ pub struct RegisterDeviceRequest {
     pub device_name: String,
     pub platform: String,
     pub client_version: String,
+    pub preferred_device_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,34 +55,123 @@ pub async fn register_device(
     let user_id = resolve_user_id(&headers, &state).await?;
 
     let now = Utc::now();
-    let device = Device {
-        id: Uuid::new_v4(),
-        user_id,
-        device_name: payload.device_name,
-        platform: payload.platform,
-        client_version: payload.client_version,
-        auto_approve_screen_share: false,
-        last_seen_at: now,
-        created_at: now,
-    };
+    let device_id = payload.preferred_device_id.unwrap_or_else(Uuid::new_v4);
 
-    state
+    let existing = state
         .postgres
-        .execute(
-            "INSERT INTO devices (id, user_id, device_name, platform, client_version, auto_approve_screen_share, last_seen_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-            &[
-                &device.id,
-                &device.user_id,
-                &device.device_name,
-                &device.platform,
-                &device.client_version,
-                &device.auto_approve_screen_share,
-                &device.last_seen_at,
-                &device.created_at,
-            ],
+        .query_opt(
+            "SELECT user_id, auto_approve_screen_share, created_at FROM devices WHERE id = $1",
+            &[&device_id],
         )
         .await
         .map_err(internal_device_error)?;
+
+    let preferred_device_id = payload.preferred_device_id;
+
+    let (device, action): (Device, &'static str) = if let Some(row) = existing {
+        let owner_user_id: Uuid = row.get("user_id");
+        let created_at: DateTime<Utc> = row.get("created_at");
+        if owner_user_id != user_id {
+            if preferred_device_id.is_none() {
+                return Err(ApiError::conflict(
+                    "DEVICE_ID_CONFLICT",
+                    "preferred device id already belongs to another user",
+                ));
+            }
+
+            state
+                .postgres
+                .execute(
+                    "UPDATE devices SET user_id = $2, device_name = $3, platform = $4, client_version = $5, auto_approve_screen_share = false, last_seen_at = $6 WHERE id = $1",
+                    &[
+                        &device_id,
+                        &user_id,
+                        &payload.device_name,
+                        &payload.platform,
+                        &payload.client_version,
+                        &now,
+                    ],
+                )
+                .await
+                .map_err(internal_device_error)?;
+
+            (
+                Device {
+                    id: device_id,
+                    user_id,
+                    device_name: payload.device_name,
+                    platform: payload.platform,
+                    client_version: payload.client_version,
+                    auto_approve_screen_share: false,
+                    last_seen_at: now,
+                    created_at,
+                },
+                "claimed",
+            )
+        } else {
+            let auto_approve_screen_share: bool = row.get("auto_approve_screen_share");
+
+            state
+                .postgres
+                .execute(
+                    "UPDATE devices SET device_name = $2, platform = $3, client_version = $4, last_seen_at = $5 WHERE id = $1",
+                    &[
+                        &device_id,
+                        &payload.device_name,
+                        &payload.platform,
+                        &payload.client_version,
+                        &now,
+                    ],
+                )
+                .await
+                .map_err(internal_device_error)?;
+
+            (
+                Device {
+                    id: device_id,
+                    user_id,
+                    device_name: payload.device_name,
+                    platform: payload.platform,
+                    client_version: payload.client_version,
+                    auto_approve_screen_share,
+                    last_seen_at: now,
+                    created_at,
+                },
+                "updated",
+            )
+        }
+    } else {
+        let created_device = Device {
+            id: device_id,
+            user_id,
+            device_name: payload.device_name,
+            platform: payload.platform,
+            client_version: payload.client_version,
+            auto_approve_screen_share: false,
+            last_seen_at: now,
+            created_at: now,
+        };
+
+        state
+            .postgres
+            .execute(
+                "INSERT INTO devices (id, user_id, device_name, platform, client_version, auto_approve_screen_share, last_seen_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+                &[
+                    &created_device.id,
+                    &created_device.user_id,
+                    &created_device.device_name,
+                    &created_device.platform,
+                    &created_device.client_version,
+                    &created_device.auto_approve_screen_share,
+                    &created_device.last_seen_at,
+                    &created_device.created_at,
+                ],
+            )
+            .await
+            .map_err(internal_device_error)?;
+
+        (created_device, "created")
+    };
 
     let screens = default_screens();
     let snapshots = build_snapshots(&screens, now);
@@ -99,7 +189,12 @@ pub async fn register_device(
         .await
         .map_err(internal_device_error)?;
 
-    info!(device_id = %device.id, user_id = %user_id, "device registered");
+    info!(
+        device_id = %device.id,
+        user_id = %user_id,
+        action,
+        "device registered"
+    );
 
     Ok(Json(DeviceResponse {
         id: device.id,

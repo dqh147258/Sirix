@@ -7,11 +7,15 @@ device_id = "00000000-0000-0000-0000-000000000001"
 event_ws_path = "/api/v1/desktop/events/{device_id}/ws"
 session_decision_path = "/api/v1/desktop/sessions/{session_id}/decision"
 webrtc_signal_path = "/api/v1/webrtc/signal"
+screen_state_path = "/api/v1/desktop/devices/{device_id}/screen-state"
 
 [local_ws]
 host = "127.0.0.1"
 port_range_start = 9700
 port_range_end = 9710
+
+[authorization]
+manual_approve_timeout_seconds = 120
 
 [capture]
 snapshot_interval_seconds = 5
@@ -23,5 +27,5 @@ default_fps = 15
 auto_adapt = true
 
 [logging]
-level = "trace"
+level = "info"
 json = false

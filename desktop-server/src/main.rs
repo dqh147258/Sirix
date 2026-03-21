@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 
 use anyhow::Context;
 use app::{state::AppState, tasks::spawn_background_tasks};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 #[tokio::main]
@@ -26,10 +26,11 @@ async fn main() -> anyhow::Result<()> {
     .context("failed to bind local ws range")?;
 
     let state = AppState::new(config.clone(), bound_port);
-    let app = api::router(state.clone())
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive());
+    let app = api::router(state.clone()).layer(CorsLayer::permissive());
 
+    install_panic_logger(state.clone());
+    install_termination_logger(state.clone());
+    state.logger.clone().spawn_flush_task();
     spawn_background_tasks(state.clone());
 
     info!(
@@ -38,14 +39,67 @@ async fn main() -> anyhow::Result<()> {
         backend_base_url = %config.backend.base_url,
         "desktop-server started"
     );
+    state.logger.info(format!(
+        "desktop-server started host={} local_ws_port={} backend_base_url={}",
+        config.local_ws.host, bound_port, config.backend.base_url
+    ));
 
     if let Err(err) = axum::serve(listener, app).await {
         error!(error = %err, "desktop-server crashed");
+        state.logger.error(format!("desktop-server crashed: {err}"));
         return Err(err.into());
     }
 
+    info!("desktop-server serve loop exited");
+    state
+        .logger
+        .warn("desktop-server serve loop exited without error".to_string());
+
     Ok(())
 }
+
+fn install_panic_logger(state: AppState) {
+    let logger = state.logger.clone();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let payload = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("unknown panic payload");
+        let location = panic_info
+            .location()
+            .map(|location| format!("{}:{}", location.file(), location.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = format!("desktop-server panic payload={payload} location={location}");
+        error!("{message}");
+        logger.error(message);
+    }));
+}
+
+#[cfg(unix)]
+fn install_termination_logger(state: AppState) {
+    tokio::spawn(async move {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+                info!("desktop-server received SIGTERM");
+                state
+                    .logger
+                    .warn("desktop-server received SIGTERM".to_string());
+            }
+            Err(err) => {
+                error!(error = %err, "failed to install SIGTERM handler");
+                state
+                    .logger
+                    .warn(format!("failed to install SIGTERM handler: {err}"));
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn install_termination_logger(_state: AppState) {}
 
 async fn bind_first_available(
     host: &str,

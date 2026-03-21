@@ -1,7 +1,7 @@
 use axum::{extract::State, http::HeaderMap, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -57,6 +57,17 @@ pub async fn create_connection_request(
         return Err(ApiError::forbidden(
             "DEVICE_NOT_OWNED",
             "current mvp allows only same-account devices",
+        ));
+    }
+
+    let target_online = state
+        .is_device_online(payload.target_device_id)
+        .await
+        .map_err(internal_connection_error)?;
+    if !target_online {
+        return Err(ApiError::conflict(
+            "DEVICE_OFFLINE",
+            "target device is offline or desktop-server heartbeat is missing",
         ));
     }
 
@@ -171,9 +182,35 @@ pub async fn create_connection_request(
         }
     });
 
-    state
+    let desktop_subscribers = state
         .publish_desktop_event(payload.target_device_id, ws_event.to_string())
         .await;
+    if !auto_approve && desktop_subscribers == 0 {
+        warn!(
+            session_id = %session_id,
+            device_id = %payload.target_device_id,
+            "connection request published without active desktop event subscribers"
+        );
+
+        reject_unroutable_request(
+            &state,
+            request_id,
+            session_id,
+            requester_user_id,
+            payload.target_device_id,
+            now,
+            "desktop event stream unavailable",
+        )
+        .await
+        .map_err(internal_connection_error)?;
+
+        return Ok(Json(CreateConnectionResponse {
+            request_id,
+            session_id,
+            status: RequestStatus::Rejected,
+            state: SessionState::Terminated,
+        }));
+    }
 
     let mobile_event = serde_json::json!({
         "type": "connection.request.created",
@@ -215,6 +252,7 @@ pub async fn create_connection_request(
         request_id = %request_id,
         session_id = %session_id,
         device_id = %payload.target_device_id,
+        desktop_subscribers,
         status = request_status.as_str(),
         state = session_state.as_str(),
         "connection request created"
@@ -233,4 +271,65 @@ fn internal_connection_error(error: impl std::fmt::Display) -> ApiError {
         "CONNECTION_INTERNAL",
         format!("connection internal error: {error}"),
     )
+}
+
+async fn reject_unroutable_request(
+    state: &AppState,
+    request_id: Uuid,
+    session_id: Uuid,
+    requester_user_id: Uuid,
+    target_device_id: Uuid,
+    now: chrono::DateTime<Utc>,
+    reason: &str,
+) -> anyhow::Result<()> {
+    state
+        .postgres
+        .execute(
+            "UPDATE connection_requests SET status = 'rejected' WHERE id = $1",
+            &[&request_id],
+        )
+        .await?;
+
+    state
+        .postgres
+        .execute(
+            "UPDATE share_sessions SET state = 'terminated', updated_at = $2 WHERE id = $1",
+            &[&session_id, &now],
+        )
+        .await?;
+
+    let rejected_payload = serde_json::json!({
+        "request_id": request_id,
+        "decision": "reject",
+        "reason": reason,
+        "state": "terminated",
+        "request_status": "rejected",
+    });
+
+    state
+        .postgres
+        .execute(
+            "INSERT INTO session_events (session_id, event_type, created_at, payload) VALUES ($1, $2, $3, $4)",
+            &[&session_id, &"session.rejected", &now, &rejected_payload],
+        )
+        .await?;
+
+    let mobile_event = serde_json::json!({
+        "type": "connection.request.rejected",
+        "event_id": Uuid::new_v4().to_string(),
+        "timestamp": now,
+        "payload": {
+            "request_id": request_id,
+            "session_id": session_id,
+            "status": "rejected",
+            "state": "terminated",
+            "reason": reason,
+            "target_device_id": target_device_id,
+        }
+    });
+    state
+        .publish_mobile_event(requester_user_id, mobile_event.to_string())
+        .await;
+
+    Ok(())
 }

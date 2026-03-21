@@ -35,8 +35,16 @@
 ## 3.2 设备管理
 
 - `POST /api/v1/devices/register`
-  - 入参：`device_name`, `platform`, `client_version`
+  - 入参：
+    - `device_name`
+    - `platform`
+    - `client_version`
+    - `preferred_device_id`（可选）
   - 返回设备信息（含 `online`）
+  - 语义：
+    - 若 `preferred_device_id` 不存在：创建新设备。
+    - 若存在且归属当前用户：执行幂等更新（设备信息 + `last_seen_at`）。
+    - 若存在但归属其他用户：返回 `DEVICE_ID_CONFLICT`。
 
 - `GET /api/v1/devices/my`
   - 返回当前账号下设备列表（含 `online`）
@@ -125,6 +133,7 @@
   - `connection.request.accepted`
   - `connection.request.rejected`
   - `session.state.changed`
+  - `session.auto_terminated`
   - `webrtc.offer`
   - `webrtc.answer`
   - `webrtc.ice_candidate`
@@ -135,6 +144,7 @@
 
 - desktop-server -> Flutter Desktop
   - `settings.sync`
+    - `{ "auto_approve_screen_share": bool, "device_id": "uuid", "local_ws_port": 9700 }`
   - `authorize.request`
   - 透传控制/信令事件：`session.control.*`、`webrtc.*`
 
@@ -157,7 +167,8 @@
 规则：
 
 - 桌面决策接口为幂等：重复提交相同决策返回 `applied=false`。
-- 移动端进入后台后保持会话 3 分钟，超时由客户端触发断开。
+- 移动端进入后台后保持会话 3 分钟；超时会触发终止。
+- 服务端有超时兜底任务：扫描 `pause_deadline_at` 过期会话并强制终止。
 
 ## 7. 错误码（当前实现）
 
@@ -165,6 +176,7 @@
 - `AUTH_TOKEN_EXPIRED`
 - `DEVICE_NOT_FOUND`
 - `DEVICE_NOT_OWNED`
+- `DEVICE_ID_CONFLICT`
 - `SESSION_NOT_FOUND`
 - `SESSION_NOT_ACTIVE`
 - `SESSION_DECISION_CONFLICT`

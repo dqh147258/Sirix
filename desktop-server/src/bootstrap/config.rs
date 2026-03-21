@@ -7,6 +7,8 @@ use toml::{map::Map, Value};
 pub struct AppConfig {
     pub backend: BackendConfig,
     pub local_ws: LocalWsConfig,
+    #[serde(default)]
+    pub authorization: AuthorizationConfig,
     pub capture: CaptureConfig,
     pub stream: StreamConfig,
     pub logging: LoggingConfig,
@@ -22,6 +24,14 @@ pub struct BackendConfig {
     pub event_ws_path: String,
     pub session_decision_path: String,
     pub webrtc_signal_path: String,
+    #[serde(default = "default_runtime_settings_path")]
+    pub runtime_settings_path: String,
+    #[serde(default = "default_runtime_logs_path")]
+    pub runtime_logs_path: String,
+    #[serde(default = "default_pending_sessions_path")]
+    pub pending_sessions_path: String,
+    #[serde(default = "default_screen_state_path")]
+    pub screen_state_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +39,12 @@ pub struct LocalWsConfig {
     pub host: String,
     pub port_range_start: u16,
     pub port_range_end: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorizationConfig {
+    #[serde(default = "default_manual_approve_timeout_seconds")]
+    pub manual_approve_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,10 +66,38 @@ pub struct LoggingConfig {
     pub json: bool,
 }
 
+impl Default for AuthorizationConfig {
+    fn default() -> Self {
+        Self {
+            manual_approve_timeout_seconds: default_manual_approve_timeout_seconds(),
+        }
+    }
+}
+
 pub fn load_config() -> anyhow::Result<AppConfig> {
     let mut merged = read_toml("config.toml")?;
     apply_env_overrides(&mut merged, "DESKTOP__")?;
     Ok(merged.try_into()?)
+}
+
+fn default_screen_state_path() -> String {
+    "/api/v1/desktop/devices/{device_id}/screen-state".to_string()
+}
+
+fn default_runtime_settings_path() -> String {
+    "/api/v1/runtime/settings".to_string()
+}
+
+fn default_runtime_logs_path() -> String {
+    "/api/v1/runtime/logs".to_string()
+}
+
+fn default_pending_sessions_path() -> String {
+    "/api/v1/desktop/devices/{device_id}/pending-sessions".to_string()
+}
+
+fn default_manual_approve_timeout_seconds() -> u64 {
+    120
 }
 
 fn read_toml(path: &str) -> anyhow::Result<Value> {

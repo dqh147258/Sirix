@@ -15,6 +15,7 @@ pub mod devices;
 pub mod error;
 pub mod health;
 pub mod mobile_events;
+pub mod runtime;
 pub mod session_events;
 pub mod sessions;
 pub mod webrtc;
@@ -22,6 +23,8 @@ pub mod webrtc;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        .route("/api/v1/runtime/settings", get(runtime::runtime_settings))
+        .route("/api/v1/runtime/logs", post(runtime::ingest_runtime_logs))
         .route("/api/v1/auth/register", post(auth::register))
         .route("/api/v1/auth/login", post(auth::login))
         .route("/api/v1/auth/refresh", post(auth::refresh))
@@ -82,6 +85,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/desktop/devices/:device_id/heartbeat",
             post(desktop_control::heartbeat),
+        )
+        .route(
+            "/api/v1/desktop/devices/:device_id/pending-sessions",
+            get(desktop_control::list_pending_sessions),
+        )
+        .route(
+            "/api/v1/desktop/devices/:device_id/screen-state",
+            post(desktop_control::update_screen_state),
         )
         .route("/api/v1/webrtc/signal", post(webrtc::relay_signal))
         .with_state(state)

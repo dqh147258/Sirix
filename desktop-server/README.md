@@ -53,6 +53,9 @@ Flutter -> desktop-server：
 desktop-server -> Flutter：
 
 - `settings.sync`
+  - `auto_approve_screen_share`
+  - `device_id`
+  - `local_ws_port`
 - `authorize.request`
 - `authorize.ack`
 - `webrtc.signal.ack`
@@ -63,3 +66,9 @@ desktop-server -> Flutter：
 - 心跳探活：请求 backend `/health` 与 heartbeat 接口。
 - 事件订阅：连接 backend 桌面事件 WS，断线自动重连。
 - 快照调度：按配置周期输出采样 tick（当前为骨架日志）。
+
+## 与 Flutter 桌面端协作说明
+
+- `device_id` 由 `desktop-server/config.toml` 提供，并在 `settings.sync` 中下发。
+- Flutter 桌面端登录后，会用该 `device_id` 向 backend 做设备注册/续活（幂等）。
+- 自动授权开关会同步到 backend 的设备设置，保证移动端发起连接时策略一致。

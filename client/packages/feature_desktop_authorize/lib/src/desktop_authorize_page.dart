@@ -1,10 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:infra_api/infra_api.dart';
+import 'package:infra_webrtc/infra_webrtc.dart';
 
 import 'desktop_authorize_view_model.dart';
 
 class DesktopAuthorizePage extends ConsumerStatefulWidget {
-  const DesktopAuthorizePage({super.key});
+  const DesktopAuthorizePage({
+    super.key,
+    required this.authSession,
+  });
+
+  final AuthSession? authSession;
 
   @override
   ConsumerState<DesktopAuthorizePage> createState() => _DesktopAuthorizePageState();
@@ -14,15 +23,29 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
   @override
   void initState() {
     super.initState();
-    Future.microtask(() {
-      ref.read(desktopAuthorizeViewModelProvider.notifier).connect();
+    Future.microtask(() async {
+      final vm = ref.read(desktopAuthorizeViewModelProvider.notifier);
+      await vm.bindAuthSession(widget.authSession);
+      await vm.connect();
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant DesktopAuthorizePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.authSession?.accessToken != widget.authSession?.accessToken) {
+      unawaited(
+        ref.read(desktopAuthorizeViewModelProvider.notifier).bindAuthSession(widget.authSession),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(desktopAuthorizeViewModelProvider);
     final vm = ref.read(desktopAuthorizeViewModelProvider.notifier);
+    final mediaState = ref.watch(desktopMediaControllerProvider);
+    final mediaController = ref.read(desktopMediaControllerProvider.notifier);
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -48,6 +71,82 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
             const SizedBox(height: 8),
             const LinearProgressIndicator(),
           ],
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    mediaState.sharing
+                        ? '真实媒体: 已共享屏幕'
+                        : mediaState.initializing
+                            ? '真实媒体: 正在建立共享'
+                            : '真实媒体: 未开始共享',
+                  ),
+                  const SizedBox(height: 8),
+                  AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        color: Colors.black,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Builder(
+                          builder: (context) {
+                            final renderer = mediaController.localRenderer;
+                            if (renderer != null &&
+                                renderer.srcObject != null &&
+                                mediaState.sharing) {
+                              return RTCVideoView(
+                                renderer,
+                                objectFit:
+                                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
+                              );
+                            }
+
+                            return const Center(
+                              child: Text(
+                                '等待桌面屏幕共享',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('device_id: ${state.deviceId ?? '-'}'),
+                  const SizedBox(height: 4),
+                  Text('local_ws_port: ${state.localWsPort?.toString() ?? '-'}'),
+                  const SizedBox(height: 4),
+                  Text('backend_registered_device: ${state.registeredDeviceId ?? '-'}'),
+                  if (state.registeringDevice) ...[
+                    const SizedBox(height: 8),
+                    const LinearProgressIndicator(minHeight: 2),
+                  ],
+                  if (state.mediaInitializing) ...[
+                    const SizedBox(height: 8),
+                    const LinearProgressIndicator(minHeight: 2),
+                  ],
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 8),
           SwitchListTile(
             title: const Text('自动授权屏幕共享'),

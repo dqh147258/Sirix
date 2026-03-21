@@ -59,9 +59,17 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
         accessToken: accessToken,
         targetDeviceId: deviceId,
       );
-      AppLogger.info('connect requested: ${session.sessionId}');
+      if (session.state == 'terminated') {
+        AppLogger.warn('connect request terminated before attach: ${session.sessionId}');
+        state = state.copyWith(
+          errorMessage: '桌面端当前不可接收连接，请确认 desktop-server 和授权页在线后重试',
+        );
+        return null;
+      }
+      AppLogger.info('connect requested: ${session.sessionId} targetDeviceId=$deviceId');
       return session;
     } catch (error) {
+      AppLogger.error('connect request failed targetDeviceId=$deviceId error=$error');
       state = state.copyWith(errorMessage: '连接请求失败: $error');
       return null;
     }

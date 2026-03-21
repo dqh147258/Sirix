@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 use crate::app::state::AppState;
 
+const AUTH_MEDIA_TRACE_TAG: &str = "[MEDIA_AUTH_TRACE]";
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum LocalWsInbound {
@@ -47,18 +49,34 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 
     let mut local_receiver = state.local_events.subscribe();
-    info!("desktop flutter client connected to local websocket");
+    info!(
+        device_id = %state.config.backend.device_id,
+        "desktop flutter client connected to local websocket"
+    );
+    state.logger.info(format!(
+        "desktop flutter client connected to local websocket device_id={}",
+        state.config.backend.device_id
+    ));
 
-    let current_auto_approve = state.runtime.read().await.auto_approve_screen_share;
-    let sync_message = serde_json::json!({
-        "type": "settings.sync",
-        "auto_approve_screen_share": current_auto_approve,
-    });
+    let sync_message = {
+        let runtime = state.runtime.read().await;
+        build_settings_sync_message(
+            &state,
+            runtime.auto_approve_screen_share,
+            runtime.local_ws_port,
+            runtime.logging_enabled,
+        )
+    };
     if socket
         .send(Message::Text(sync_message.to_string()))
         .await
         .is_err()
     {
+        let mut runtime = state.runtime.write().await;
+        runtime.desktop_client_connections = runtime.desktop_client_connections.saturating_sub(1);
+        state
+            .logger
+            .warn("failed to send initial settings sync to desktop flutter client".to_string());
         return;
     }
 
@@ -69,20 +87,36 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<LocalWsInbound>(&text) {
                             Ok(LocalWsInbound::SettingsSetAutoApprove { auto_approve_screen_share }) => {
-                                let mut runtime = state.runtime.write().await;
-                                runtime.auto_approve_screen_share = auto_approve_screen_share;
-                                let reply = serde_json::json!({
-                                    "type": "settings.sync",
-                                    "auto_approve_screen_share": runtime.auto_approve_screen_share,
-                                });
+                                let reply = {
+                                    let mut runtime = state.runtime.write().await;
+                                    runtime.auto_approve_screen_share = auto_approve_screen_share;
+                                    build_settings_sync_message(
+                                        &state,
+                                        runtime.auto_approve_screen_share,
+                                        runtime.local_ws_port,
+                                        runtime.logging_enabled,
+                                    )
+                                };
                                 if socket.send(Message::Text(reply.to_string())).await.is_err() {
                                     break;
                                 }
+                                state.logger.info(format!(
+                                    "desktop auto approve updated auto_approve_screen_share={auto_approve_screen_share}"
+                                ));
                             }
                             Ok(LocalWsInbound::AuthorizeResponse { session_id, decision }) => {
                                 let approved = decision.eq_ignore_ascii_case("approve");
+                                state.logger.info(format!(
+                                    "{AUTH_MEDIA_TRACE_TAG} local authorize response received session_id={} approved={}",
+                                    session_id, approved
+                                ));
                                 if let Some(sender) = state.pending_authorizations.lock().await.remove(&session_id) {
                                     let _ = sender.send(approved);
+                                } else {
+                                    state.logger.warn(format!(
+                                        "{AUTH_MEDIA_TRACE_TAG} authorize response received without pending session session_id={} approved={}",
+                                        session_id, approved
+                                    ));
                                 }
                                 let reply = serde_json::json!({
                                     "type": "authorize.ack",
@@ -92,6 +126,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                 if socket.send(Message::Text(reply.to_string())).await.is_err() {
                                     break;
                                 }
+                                state.logger.info(format!(
+                                    "received authorize response session_id={} approved={}",
+                                    session_id, approved
+                                ));
                             }
                             Ok(LocalWsInbound::WebrtcSignal { session_id, signal_type, sdp, candidate }) => {
                                 match relay_webrtc_signal_to_backend(
@@ -112,6 +150,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                     Err(error) => {
                                         warn!(error = %error, "relay webrtc signal failed");
+                                        state.logger.warn(format!(
+                                            "relay webrtc signal failed error={error}"
+                                        ));
                                         let reply = serde_json::json!({
                                             "type": "webrtc.signal.ack",
                                             "status": "error",
@@ -134,6 +175,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             }
                             Err(error) => {
                                 warn!(error = %error, "invalid local ws message");
+                                state
+                                    .logger
+                                    .warn(format!("invalid local ws message error={error}"));
                             }
                         }
                     }
@@ -146,6 +190,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         warn!(error = %error, "local websocket closed with error");
+                        state
+                            .logger
+                            .warn(format!("local websocket closed with error: {error}"));
                         break;
                     }
                     None => break,
@@ -160,6 +207,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     }
                     Err(error) => {
                         warn!(error = %error, "local event receiver error");
+                        state
+                            .logger
+                            .warn(format!("local event receiver error: {error}"));
                         break;
                     }
                 }
@@ -172,7 +222,29 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         runtime.desktop_client_connections = runtime.desktop_client_connections.saturating_sub(1);
     }
 
-    info!("desktop flutter client disconnected");
+    info!(
+        device_id = %state.config.backend.device_id,
+        "desktop flutter client disconnected"
+    );
+    state.logger.info(format!(
+        "desktop flutter client disconnected device_id={}",
+        state.config.backend.device_id
+    ));
+}
+
+fn build_settings_sync_message(
+    state: &AppState,
+    auto_approve: bool,
+    local_ws_port: u16,
+    logging_enabled: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "settings.sync",
+        "auto_approve_screen_share": auto_approve,
+        "device_id": state.config.backend.device_id,
+        "local_ws_port": local_ws_port,
+        "logging_enabled": logging_enabled,
+    })
 }
 
 async fn relay_webrtc_signal_to_backend(

@@ -3,10 +3,13 @@ use std::{fs, path::Path};
 use serde::Deserialize;
 use toml::{map::Map, Value};
 
+use crate::application::runtime_logging::ENABLE_RUNTIME_LOGGING;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
+    pub runtime: RuntimeConfig,
     pub postgres: PostgresConfig,
     pub redis: RedisConfig,
     pub auth: AuthConfig,
@@ -23,6 +26,18 @@ pub struct ServerConfig {
 pub struct LoggingConfig {
     pub level: String,
     pub json: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    #[serde(default = "default_logging_enabled")]
+    pub logging_enabled: bool,
+    #[serde(default = "default_logs_root_dir")]
+    pub logs_root_dir: String,
+    #[serde(default = "default_max_run_directories")]
+    pub max_run_directories: usize,
+    #[serde(default = "default_max_lines_per_file")]
+    pub max_lines_per_file: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +59,22 @@ pub struct AuthConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebrtcConfig {
     pub ice_servers: Vec<String>,
+}
+
+fn default_logging_enabled() -> bool {
+    ENABLE_RUNTIME_LOGGING
+}
+
+fn default_logs_root_dir() -> String {
+    "runtime-logs".to_string()
+}
+
+fn default_max_run_directories() -> usize {
+    10
+}
+
+fn default_max_lines_per_file() -> usize {
+    5000
 }
 
 pub fn load_config() -> anyhow::Result<AppConfig> {

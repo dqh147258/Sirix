@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:app_core/app_core.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
@@ -24,10 +25,13 @@ class DesktopLocalClient {
     for (var port = portStart; port <= portEnd; port += 1) {
       final uri = Uri.parse('ws://$host:$port$path');
       try {
+        AppLogger.trace('try desktop local ws: $uri');
         final channel = WebSocketChannel.connect(uri);
         await channel.ready.timeout(const Duration(milliseconds: 900));
+        AppLogger.info('desktop local ws connected: $uri');
         return channel;
       } catch (error) {
+        AppLogger.warn('desktop local ws connect failed: $uri error=$error');
         errors.add('$port:$error');
       }
     }

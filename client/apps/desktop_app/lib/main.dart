@@ -1,12 +1,49 @@
+import 'dart:async';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:app_core/app_core.dart';
 import 'package:feature_auth/feature_auth.dart';
 import 'package:feature_desktop_authorize/feature_desktop_authorize.dart';
+import 'package:infra_api/infra_api.dart';
 
 void main() {
-  runApp(const ProviderScope(child: DesktopApp()));
+  runZonedGuarded(
+    () {
+      WidgetsFlutterBinding.ensureInitialized();
+      AppLogger.configure(
+        source: AppLogSource.flutterDesktop,
+        baseUrl: resolvedApiBaseUrl,
+      );
+      AppLogger.info(
+        '[MEDIA_AUTH_TRACE] desktop app startup useMockBackend=$useMockBackend apiBaseUrl=$resolvedApiBaseUrl',
+      );
+      _installUnhandledErrorLogging();
+      runApp(const ProviderScope(child: DesktopApp()));
+    },
+    (error, stackTrace) {
+      AppLogger.error('uncaught zone error: $error');
+      AppLogger.error('uncaught zone stack: $stackTrace');
+    },
+  );
+}
+
+void _installUnhandledErrorLogging() {
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    AppLogger.error('flutter framework error: ${details.exceptionAsString()}');
+    if (details.stack != null) {
+      AppLogger.error('flutter framework stack: ${details.stack}');
+    }
+  };
+
+  PlatformDispatcher.instance.onError = (error, stackTrace) {
+    AppLogger.error('platform error: $error');
+    AppLogger.error('platform stack: $stackTrace');
+    return true;
+  };
 }
 
 class DesktopApp extends StatelessWidget {
@@ -54,10 +91,10 @@ class DesktopHomePage extends ConsumerWidget {
             ),
           ],
         ),
-        body: const TabBarView(
+        body: TabBarView(
           children: [
-            DesktopAuthorizePage(),
-            AuthPage(clientType: 'desktop'),
+            DesktopAuthorizePage(authSession: authState.session),
+            const AuthPage(clientType: 'desktop'),
           ],
         ),
       ),

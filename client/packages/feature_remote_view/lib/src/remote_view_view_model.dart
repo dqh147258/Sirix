@@ -10,6 +10,8 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'remote_view_state.dart';
 
+const _mediaStreamTraceTag = '[MEDIA_STREAM_TRACE]';
+
 class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
   RemoteViewViewModel({
     required BackendApiClient apiClient,
@@ -29,26 +31,51 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
   WebSocketChannel? _eventChannel;
   StreamSubscription<dynamic>? _eventSubscription;
   String? _boundAccessToken;
+  bool _initialOfferSent = false;
 
   Future<void> attachSession({
     required String sessionId,
     required String deviceId,
     required String accessToken,
+    required String initialState,
   }) async {
+    AppLogger.info(
+      'attach remote session sessionId=$sessionId deviceId=$deviceId initialState=$initialState',
+    );
     _boundAccessToken = accessToken;
+    _initialOfferSent = false;
     state = state.copyWith(
       sessionId: sessionId,
       deviceId: deviceId,
-      sessionState: 'connecting',
+      sessionState: initialState,
       loading: true,
       clearError: true,
     );
 
-    await _streamController.connect();
+    await _streamController.connect(
+      onLocalSignal: (
+        WebrtcSignalType signalType, {
+        String? sdp,
+        Map<String, dynamic>? candidate,
+      }) {
+        AppLogger.trace(
+          'send mobile webrtc signal sessionId=$sessionId signalType=${signalType.apiValue}',
+        );
+        return _apiClient.sendMobileWebrtcSignal(
+          accessToken: accessToken,
+          sessionId: sessionId,
+          signalType: signalType,
+          sdp: sdp,
+          candidate: candidate,
+        );
+      },
+    );
     _bindEventStream(accessToken: accessToken);
     await loadSnapshots(accessToken: accessToken);
     _startSnapshotRefreshTimer(accessToken);
-    await _sendInitialOffer(accessToken);
+    if (initialState != 'pending_approval') {
+      await _sendInitialOffer(accessToken);
+    }
 
     state = state.copyWith(loading: false, clearError: true);
   }
@@ -195,13 +222,13 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     );
 
     _backgroundTimer?.cancel();
-    _backgroundTimer = Timer(const Duration(minutes: 3), () async {
-      try {
-        await _apiClient.terminateSession(accessToken: accessToken, sessionId: sessionId);
-      } catch (_) {}
-      await _streamController.disconnect();
-      _clearSessionViewState();
-      state = state.copyWith(lastEventType: 'session.auto_terminated');
+    _backgroundTimer = Timer(const Duration(minutes: 3), () {
+      unawaited(() async {
+        try {
+          await _apiClient.terminateSession(accessToken: accessToken, sessionId: sessionId);
+        } catch (_) {}
+        await _handleRemoteSessionEnded(lastEventType: 'session.auto_terminated');
+      }());
     });
   }
 
@@ -237,6 +264,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     await _stopRuntimeResources();
+    await rotate(ViewOrientationMode.portrait);
     _clearSessionViewState();
   }
 
@@ -266,18 +294,26 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
           return;
         }
 
+        AppLogger.info(
+          '$_mediaStreamTraceTag mobile event received type=$eventType sessionId=${state.sessionId ?? '-'}',
+        );
+
         switch (eventType) {
           case 'connection.request.accepted':
-            _applyConnectionAccepted(payload);
+            unawaited(_applyConnectionAccepted(payload));
             break;
           case 'connection.request.rejected':
-            _applyConnectionRejected(payload);
+            unawaited(_applyConnectionRejected(payload));
             break;
           case 'session.state.changed':
-            _applySessionStateChanged(payload);
+            unawaited(_applySessionStateChanged(payload));
             break;
           case 'session.auto_terminated':
-            _clearSessionViewState();
+            unawaited(
+              _handleRemoteSessionEnded(
+                lastEventType: 'session.auto_terminated',
+              ),
+            );
             break;
           case 'webrtc.offer':
             _handleRemoteOffer(payload);
@@ -293,6 +329,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         }
       },
       onError: (error) {
+        AppLogger.error('mobile event channel error: $error');
         state = state.copyWith(errorMessage: '事件通道异常: $error');
       },
     );
@@ -300,7 +337,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
 
   Future<void> _sendInitialOffer(String accessToken) async {
     final sessionId = state.sessionId;
-    if (sessionId == null) {
+    if (sessionId == null || _initialOfferSent) {
       return;
     }
 
@@ -312,12 +349,18 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         signalType: WebrtcSignalType.offer,
         sdp: offer,
       );
+      _initialOfferSent = true;
+      AppLogger.info(
+        '$_mediaStreamTraceTag mobile initial offer sent sessionId=$sessionId length=${offer.length}',
+      );
+      AppLogger.info('initial mobile offer sent sessionId=$sessionId');
     } catch (error) {
+      AppLogger.error('initial mobile offer failed sessionId=$sessionId error=$error');
       state = state.copyWith(errorMessage: '初始化 WebRTC 失败: $error');
     }
   }
 
-  void _applyConnectionAccepted(dynamic payload) {
+  Future<void> _applyConnectionAccepted(dynamic payload) async {
     final payloadMap = _mapPayload(payload);
     if (!_isCurrentSession(payloadMap)) {
       return;
@@ -327,20 +370,29 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       sessionState: (payloadMap['state'] as String?) ?? 'connecting',
       clearError: true,
     );
+    AppLogger.info('connection accepted sessionId=${state.sessionId}');
+
+    final accessToken = _boundAccessToken;
+    if (accessToken != null) {
+      await _sendInitialOffer(accessToken);
+    }
   }
 
-  void _applyConnectionRejected(dynamic payload) {
+  Future<void> _applyConnectionRejected(dynamic payload) async {
     final payloadMap = _mapPayload(payload);
     if (!_isCurrentSession(payloadMap)) {
       return;
     }
 
     final reason = payloadMap['reason'] as String? ?? 'desktop rejected';
-    _clearSessionViewState();
-    state = state.copyWith(errorMessage: '连接被拒绝: $reason');
+    AppLogger.warn('connection rejected sessionId=${state.sessionId} reason=$reason');
+    await _handleRemoteSessionEnded(
+      errorMessage: '连接被拒绝: $reason',
+      lastEventType: 'connection.request.rejected',
+    );
   }
 
-  void _applySessionStateChanged(dynamic payload) {
+  Future<void> _applySessionStateChanged(dynamic payload) async {
     final payloadMap = _mapPayload(payload);
     if (!_isCurrentSession(payloadMap)) {
       return;
@@ -357,9 +409,14 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       autoQuality: qualityMode == null ? state.autoQuality : qualityMode != 'manual',
       qualityProfile: _qualityProfileFromApi(qualityProfileRaw) ?? state.qualityProfile,
     );
+    AppLogger.info(
+      'session state changed sessionId=${state.sessionId} nextState=${nextState ?? 'unknown'}',
+    );
 
     if (nextState == 'terminated') {
-      _clearSessionViewState();
+      await _handleRemoteSessionEnded(
+        lastEventType: 'session.state.changed',
+      );
     }
   }
 
@@ -384,7 +441,12 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         signalType: WebrtcSignalType.answer,
         sdp: answer,
       );
+      AppLogger.info(
+        '$_mediaStreamTraceTag mobile answer sent sessionId=$sessionId length=${answer.length}',
+      );
+      AppLogger.info('mobile handled remote offer sessionId=$sessionId');
     } catch (error) {
+      AppLogger.error('handle remote offer failed sessionId=$sessionId error=$error');
       state = state.copyWith(errorMessage: '处理远端 Offer 失败: $error');
     }
   }
@@ -401,6 +463,11 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     await _streamController.applyRemoteAnswer(sdp);
+    AppLogger.info(
+      '$_mediaStreamTraceTag mobile remote answer applied sessionId=${state.sessionId} length=${sdp.length}',
+    );
+    state = state.copyWith(sessionState: 'streaming', clearError: true);
+    AppLogger.info('mobile applied remote answer sessionId=${state.sessionId}');
   }
 
   Future<void> _handleRemoteCandidate(dynamic payload) async {
@@ -410,8 +477,13 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     final candidate = payloadMap['candidate'];
-    if (candidate is Map<String, dynamic>) {
-      await _streamController.addRemoteCandidate(candidate);
+    if (candidate is Map) {
+      await _streamController.addRemoteCandidate(
+        candidate.map(
+          (key, value) => MapEntry(key.toString(), value),
+        ),
+      );
+      AppLogger.trace('mobile applied remote candidate sessionId=${state.sessionId}');
     }
   }
 
@@ -453,17 +525,34 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     _eventChannel = null;
   }
 
+  Future<void> _handleRemoteSessionEnded({
+    String? errorMessage,
+    String? lastEventType,
+  }) async {
+    await _stopRuntimeResources();
+    await rotate(ViewOrientationMode.portrait);
+    _clearSessionViewState();
+    state = state.copyWith(
+      lastEventType: lastEventType,
+      errorMessage: errorMessage,
+      clearError: errorMessage == null,
+    );
+  }
+
   void _clearSessionViewState() {
     _backgroundTimer?.cancel();
     _backgroundTimer = null;
     _snapshotRefreshTimer?.cancel();
     _snapshotRefreshTimer = null;
+    _initialOfferSent = false;
 
     state = state.copyWith(
       sessionId: null,
       deviceId: null,
       sessionState: null,
+      loading: false,
       backgroundPauseDeadline: null,
+      orientationMode: ViewOrientationMode.portrait,
       snapshots: const [],
       selectedScreenId: null,
     );

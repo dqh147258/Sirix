@@ -9,7 +9,10 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::{
-    application::event_bus::EventBus,
+    application::{
+        event_bus::EventBus,
+        runtime_logging::{RuntimeLogStore, RuntimeSettings},
+    },
     bootstrap::config::AppConfig,
     domain::{ScreenInfo, ScreenSnapshot},
 };
@@ -17,14 +20,20 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
+    pub runtime_settings: Arc<RuntimeSettings>,
     pub postgres: Arc<tokio_postgres::Client>,
     pub redis: Arc<redis::Client>,
+    pub log_store: Arc<RuntimeLogStore>,
     pub desktop_event_bus: EventBus,
     pub mobile_event_bus: EventBus,
 }
 
 impl AppState {
-    pub async fn new(config: AppConfig) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: AppConfig,
+        runtime_settings: RuntimeSettings,
+        log_store: Arc<RuntimeLogStore>,
+    ) -> anyhow::Result<Self> {
         let (postgres, connection) = tokio_postgres::connect(&config.postgres.url, NoTls)
             .await
             .context("failed to connect postgres")?;
@@ -57,8 +66,10 @@ impl AppState {
 
         Ok(Self {
             config: Arc::new(config),
+            runtime_settings: Arc::new(runtime_settings),
             postgres: Arc::new(postgres),
             redis: Arc::new(redis),
+            log_store,
             desktop_event_bus: EventBus::default(),
             mobile_event_bus: EventBus::default(),
         })

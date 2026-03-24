@@ -22,11 +22,11 @@ else
   echo "[bootstrap] mobile platforms already exist"
 fi
 
-if [[ ! -d "${DESKTOP_DIR}/macos" || ! -d "${DESKTOP_DIR}/windows" ]]; then
-  echo "[bootstrap] generating desktop platforms (macos, windows)"
+if [[ ! -d "${DESKTOP_DIR}/linux" || ! -d "${DESKTOP_DIR}/macos" || ! -d "${DESKTOP_DIR}/windows" ]]; then
+  echo "[bootstrap] generating desktop platforms (linux, macos, windows)"
   (
     cd "${DESKTOP_DIR}"
-    flutter create . --platforms=macos,windows --project-name desktop_app
+    flutter create . --platforms=linux,macos,windows --project-name desktop_app
   )
 else
   echo "[bootstrap] desktop platforms already exist"

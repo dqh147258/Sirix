@@ -11,6 +11,25 @@ DESKTOP_HOST=${FREELOOM_DESKTOP_SERVER_HOST:-127.0.0.1}
 DESKTOP_PORT_START=${FREELOOM_DESKTOP_SERVER_PORT_START:-9700}
 DESKTOP_PORT_END=${FREELOOM_DESKTOP_SERVER_PORT_END:-9710}
 
+HAS_DEVICE_FLAG=false
+for arg in "$@"; do
+  if [[ "${arg}" == "-d" || "${arg}" == "--device-id" || "${arg}" == "--device" ]]; then
+    HAS_DEVICE_FLAG=true
+    break
+  fi
+done
+
+if [[ "${HAS_DEVICE_FLAG}" == false ]]; then
+  case "$(uname -s)" in
+    Darwin)
+      set -- -d macos "$@"
+      ;;
+    Linux)
+      set -- -d linux "$@"
+      ;;
+  esac
+fi
+
 cd "${CLIENT_DIR}"
 flutter pub get
 flutter run \

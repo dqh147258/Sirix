@@ -22,3 +22,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt"] }
 url = "=2.4.1"
 uuid = { version = "=1.8.0", features = ["v4", "serde"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+xcap = "0.4.1"

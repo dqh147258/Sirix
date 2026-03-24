@@ -42,16 +42,22 @@ melos bootstrap
 # 移动端
 flutter run -t apps/mobile_app/lib/main.dart
 
-# 桌面端（macOS）
+# 桌面端（macOS / Linux）
 flutter run -t apps/desktop_app/lib/main.dart -d macos
+flutter run -t apps/desktop_app/lib/main.dart -d linux
 ```
 
 ## 推荐脚本（仓库根目录）
 
 ```bash
 ./scripts/run-mobile-client.sh
-./scripts/run-desktop-client.sh -d macos
+./scripts/run-desktop-client.sh
 ```
+
+说明：
+
+- `./scripts/run-desktop-client.sh` 未显式传 `-d` 时，会按宿主机自动补 `-d macos` 或 `-d linux`。
+- Linux 首次使用前，请确认 `flutter config --enable-linux-desktop` 已开启。
 
 ## 运行参数（--dart-define）
 
@@ -91,7 +97,8 @@ flutter run -t apps/mobile_app/lib/main.dart \
 - 移动端远程查看：分辨率切换、自动码率、横竖屏切换、快照预览与多屏切换。
 - 移动端退后台 3 分钟保活后自动断开（后端也会执行超时兜底终止）。
 - 桌面端授权页：
-  - 自动连接 desktop-server 本地 WS。
-  - 展示并使用 desktop-server 下发的 `device_id`。
-  - 用固定 `device_id` 向 backend 注册设备（幂等更新）。
-  - 自动授权开关与 backend 设备设置双向同步。
+- 自动连接 desktop-server 本地 WS。
+- 展示并使用 desktop-server 下发的 `device_id`。
+- 用固定 `device_id` 向 backend 注册设备（幂等更新）。
+- 设备注册会按当前桌面系统上报 `macos`、`linux` 或 `windows`。
+- 自动授权开关与 backend 设备设置双向同步。

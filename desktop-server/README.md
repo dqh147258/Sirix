@@ -6,6 +6,7 @@ Rust 桌面代理服务，负责：
 - 执行授权决策（自动授权 / 手动授权 / 超时拒绝）。
 - 与桌面 Flutter 客户端通过本地 WebSocket 协作。
 - 心跳上报、信令上行、会话控制事件转发。
+- macOS / Linux 本机屏幕枚举与预览快照上报。
 
 ## 本地运行
 
@@ -13,6 +14,11 @@ Rust 桌面代理服务，负责：
 cd desktop-server
 CARGO_HOME=/tmp/cargo-home cargo run
 ```
+
+Linux 说明：
+
+- `desktop-server` 现已支持 Linux 桌面环境。
+- 快照与屏幕枚举依赖当前图形会话；若运行在无图形会话的纯 CLI 环境，屏幕采集会失败并输出告警日志。
 
 ## 配置文件
 
@@ -65,10 +71,11 @@ desktop-server -> Flutter：
 
 - 心跳探活：请求 backend `/health` 与 heartbeat 接口。
 - 事件订阅：连接 backend 桌面事件 WS，断线自动重连。
-- 快照调度：按配置周期输出采样 tick（当前为骨架日志）。
+- 快照调度：按配置周期采集本机屏幕列表与缩略图并上报 backend。
 
 ## 与 Flutter 桌面端协作说明
 
 - `device_id` 由 `desktop-server/config.toml` 提供，并在 `settings.sync` 中下发。
 - Flutter 桌面端登录后，会用该 `device_id` 向 backend 做设备注册/续活（幂等）。
 - 自动授权开关会同步到 backend 的设备设置，保证移动端发起连接时策略一致。
+- Linux 下 `screen_id` 会附带桌面源提示，供 Flutter 桌面端把 backend 的目标屏幕映射回本地 `desktopCapturer` 源。

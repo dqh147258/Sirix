@@ -27,6 +27,14 @@ class MockBackendApiClient implements BackendApiClient {
       autoApproveScreenShare: false,
       online: true,
     ),
+    const DeviceSummary(
+      id: 'dev-3',
+      deviceName: 'Ubuntu Workstation',
+      platform: 'linux',
+      clientVersion: '0.1.0',
+      autoApproveScreenShare: false,
+      online: true,
+    ),
   ];
 
   @override

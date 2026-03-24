@@ -45,7 +45,6 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
     final state = ref.watch(desktopAuthorizeViewModelProvider);
     final vm = ref.read(desktopAuthorizeViewModelProvider.notifier);
     final mediaState = ref.watch(desktopMediaControllerProvider);
-    final mediaController = ref.read(desktopMediaControllerProvider.notifier);
 
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -86,38 +85,11 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
                             : '真实媒体: 未开始共享',
                   ),
                   const SizedBox(height: 8),
-                  AspectRatio(
-                    aspectRatio: 16 / 9,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: Colors.black,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Builder(
-                          builder: (context) {
-                            final renderer = mediaController.localRenderer;
-                            if (renderer != null &&
-                                renderer.srcObject != null &&
-                                mediaState.sharing) {
-                              return RTCVideoView(
-                                renderer,
-                                objectFit:
-                                    RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-                              );
-                            }
-
-                            return const Center(
-                              child: Text(
-                                '等待桌面屏幕共享',
-                                style: TextStyle(color: Colors.white70),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
+                  Text('当前共享屏幕: ${mediaState.sharedScreenId ?? '-'}'),
+                  const SizedBox(height: 4),
+                  const Text(
+                    '桌面端仅负责授权与推流，不再预览本机屏幕。',
+                    style: TextStyle(color: Colors.black54),
                   ),
                 ],
               ),

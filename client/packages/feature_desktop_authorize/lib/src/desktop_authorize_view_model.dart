@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -235,6 +236,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       case 'webrtc.ice_candidate':
         unawaited(_applyRemoteCandidate(decoded));
         break;
+      case 'session.control.switch_screen':
+        unawaited(_handleScreenSwitch(decoded));
+        break;
       case 'session.control.terminate':
         unawaited(_mediaController.stop());
         break;
@@ -299,6 +303,33 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
     }
   }
 
+  Future<void> _handleScreenSwitch(Map<String, dynamic> event) async {
+    final payload = event['payload'];
+    if (payload is! Map<String, dynamic>) {
+      return;
+    }
+
+    final sessionId = payload['session_id'] as String?;
+    final screenId = payload['screen_id'] as String?;
+    if (sessionId == null || sessionId.isEmpty || screenId == null || screenId.isEmpty) {
+      return;
+    }
+
+    try {
+      AppLogger.info(
+        '$_authMediaTraceTag desktop received switch_screen sessionId=$sessionId screenId=$screenId',
+      );
+      await _mediaController.switchSharedScreen(
+        sessionId: sessionId,
+        screenId: screenId,
+      );
+      state = state.copyWith(clearError: true);
+    } catch (error) {
+      AppLogger.error('desktop switch shared screen failed: $error');
+      state = state.copyWith(errorMessage: '切换共享屏幕失败: $error');
+    }
+  }
+
   Future<void> _syncDeviceRegistration() async {
     final authSession = _authSession;
     final deviceId = state.deviceId;
@@ -318,7 +349,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       final registered = await _apiClient.registerDevice(
         accessToken: authSession.accessToken,
         deviceName: _buildDeviceName(deviceId),
-        platform: 'desktop',
+        platform: _desktopPlatform(),
         clientVersion: '0.1.0',
         preferredDeviceId: deviceId,
       );
@@ -387,7 +418,25 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
 
   String _buildDeviceName(String deviceId) {
     final suffix = deviceId.length > 8 ? deviceId.substring(0, 8) : deviceId;
-    return 'Desktop-$suffix';
+    return '${_desktopPlatformLabel()} Desktop-$suffix';
+  }
+
+  String _desktopPlatform() {
+    if (Platform.isLinux) {
+      return 'linux';
+    }
+    if (Platform.isMacOS) {
+      return 'macos';
+    }
+    if (Platform.isWindows) {
+      return 'windows';
+    }
+    return 'desktop';
+  }
+
+  String _desktopPlatformLabel() {
+    final platform = _desktopPlatform();
+    return platform[0].toUpperCase() + platform.substring(1);
   }
 
   Future<void> _closeChannel() async {

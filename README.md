@@ -146,7 +146,7 @@ cd client/macos && pod install
 推荐脚本：
 
 ```bash
-./scripts/run-desktop-client.sh -d macos
+./scripts/run-desktop-client.sh
 ```
 
 手动运行：
@@ -159,11 +159,22 @@ flutter run -t apps/desktop_app/lib/main.dart -d macos \
   --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1
 ```
 
+Linux 手动运行：
+
+```bash
+cd client
+flutter run -t apps/desktop_app/lib/main.dart -d linux \
+  --dart-define=FREELOOM_USE_MOCK=false \
+  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36 \
+  --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1
+```
+
 说明：
 
 - `FREELOOM_SERVER_HOST` 用于推导 backend 地址
 - `FREELOOM_DESKTOP_SERVER_HOST` 用于连接本地 `desktop-server`
 - 本地桌面代理默认仍应保持 `127.0.0.1`
+- `./scripts/run-desktop-client.sh` 不传 `-d` 时会按宿主机自动选择 `macos` 或 `linux`
 
 详细说明见 [client/README.md](./client/README.md)。
 

@@ -1,4 +1,4 @@
-use std::{fs, process::Command, time::Duration};
+use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::Utc;
@@ -10,6 +10,13 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::app::state::AppState;
+
+#[cfg(target_os = "linux")]
+use image::{imageops::FilterType, DynamicImage, GenericImageView};
+#[cfg(target_os = "macos")]
+use std::{fs, process::Command};
+#[cfg(target_os = "linux")]
+use xcap::Monitor;
 
 const AUTH_MEDIA_TRACE_TAG: &str = "[MEDIA_AUTH_TRACE]";
 
@@ -717,7 +724,12 @@ fn collect_local_screen_state(
         return collect_macos_screen_state(snapshot_width);
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        return collect_linux_screen_state(snapshot_width);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let screens = vec![ScreenInfoUpload {
             screen_id: "display-1".to_string(),
@@ -737,6 +749,81 @@ fn collect_local_screen_state(
 
         Ok((screens, snapshots))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_screen_state(
+    snapshot_width: u32,
+) -> anyhow::Result<(Vec<ScreenInfoUpload>, Vec<ScreenSnapshotUpload>)> {
+    let monitors = Monitor::all()?;
+    if monitors.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let captured_at = Utc::now();
+    let mut screens = Vec::with_capacity(monitors.len());
+    let mut snapshots = Vec::with_capacity(monitors.len());
+
+    for monitor in monitors {
+        let monitor_id = monitor.id()?;
+        let monitor_name = monitor.name()?;
+        let screen_id = format!(
+            "linux:{}:{}",
+            monitor_id,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(monitor_name.as_bytes())
+        );
+        let width = monitor.width()?;
+        let height = monitor.height()?;
+        let is_primary = monitor.is_primary()?;
+
+        screens.push(ScreenInfoUpload {
+            screen_id: screen_id.clone(),
+            name: if is_primary {
+                format!("{monitor_name} (Primary)")
+            } else {
+                monitor_name.clone()
+            },
+            width,
+            height,
+            is_primary,
+        });
+
+        let capture = monitor.capture_image()?;
+        let (preview_base64, preview_width, preview_height) =
+            encode_linux_monitor_preview(capture, snapshot_width.max(160))?;
+
+        snapshots.push(ScreenSnapshotUpload {
+            screen_id,
+            width: preview_width,
+            height: preview_height,
+            preview_base64,
+            captured_at,
+        });
+    }
+
+    Ok((screens, snapshots))
+}
+
+#[cfg(target_os = "linux")]
+fn encode_linux_monitor_preview(
+    capture: image::RgbaImage,
+    target_width: u32,
+) -> anyhow::Result<(String, u32, u32)> {
+    let resized = DynamicImage::ImageRgba8(capture).resize(
+        target_width.max(160),
+        u32::MAX,
+        FilterType::Triangle,
+    );
+    let (width, height) = resized.dimensions();
+    let mut encoded = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, 80);
+    encoder.encode_image(&resized)?;
+
+    Ok((
+        base64::engine::general_purpose::STANDARD.encode(encoded),
+        width,
+        height,
+    ))
 }
 
 #[cfg(target_os = "macos")]

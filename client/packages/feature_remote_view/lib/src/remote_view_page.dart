@@ -188,8 +188,10 @@ class _RemoteViewerTab extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
-        AspectRatio(
-          aspectRatio: isLandscape ? 16 / 9 : 9 / 16,
+        _AdaptiveViewerAspectRatio(
+          selectedSnapshot: selected,
+          remoteRenderer: streamController.remoteRenderer,
+          fallbackLandscape: isLandscape,
           child: viewer,
         ),
         const SizedBox(height: 10),
@@ -435,6 +437,54 @@ class _SharedScreenSurface extends StatelessWidget {
       textAlign: TextAlign.center,
       style: const TextStyle(color: Colors.white),
     );
+  }
+}
+
+class _AdaptiveViewerAspectRatio extends StatelessWidget {
+  const _AdaptiveViewerAspectRatio({
+    required this.selectedSnapshot,
+    required this.remoteRenderer,
+    required this.fallbackLandscape,
+    required this.child,
+  });
+
+  final ScreenSnapshot? selectedSnapshot;
+  final RTCVideoRenderer? remoteRenderer;
+  final bool fallbackLandscape;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final renderer = remoteRenderer;
+    if (renderer == null) {
+      return AspectRatio(
+        aspectRatio: _resolveAspectRatio(null),
+        child: child,
+      );
+    }
+
+    return ValueListenableBuilder<RTCVideoValue>(
+      valueListenable: renderer,
+      builder: (context, value, _) {
+        return AspectRatio(
+          aspectRatio: _resolveAspectRatio(value),
+          child: child,
+        );
+      },
+    );
+  }
+
+  double _resolveAspectRatio(RTCVideoValue? rendererValue) {
+    if (rendererValue != null && rendererValue.width > 0 && rendererValue.height > 0) {
+      return rendererValue.aspectRatio.clamp(0.5, 3.0);
+    }
+
+    final snapshot = selectedSnapshot;
+    if (snapshot != null && snapshot.width > 0 && snapshot.height > 0) {
+      return (snapshot.width / snapshot.height).clamp(0.5, 3.0);
+    }
+
+    return fallbackLandscape ? 16 / 9 : 9 / 16;
   }
 }
 

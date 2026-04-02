@@ -69,58 +69,63 @@ class _DesktopShellPageState extends ConsumerState<DesktopShellPage> {
     final selectedIndex = shellState.selectedIndex.clamp(0, sections.length - 1);
 
     return Scaffold(
-      body: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [Color(0xFF090C11), Color(0xFF0D1117), Color(0xFF080B10)],
-          ),
-        ),
-        child: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final horizontalPadding = constraints.maxWidth >= 1440
-                  ? 28.0
-                  : constraints.maxWidth >= 1220
-                      ? 22.0
-                      : 16.0;
-              final shellRadius = constraints.maxWidth >= 1220 ? 22.0 : 18.0;
-              final compactHeader = constraints.maxWidth < 1180;
-              final activeSection = sections[selectedIndex];
+      body: Stack(
+        children: [
+          DecoratedBox(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFF090C11), Color(0xFF0D1117), Color(0xFF080B10)],
+              ),
+            ),
+            child: SafeArea(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final horizontalPadding = constraints.maxWidth >= 1440
+                      ? 28.0
+                      : constraints.maxWidth >= 1220
+                          ? 22.0
+                          : 16.0;
+                  final shellRadius = constraints.maxWidth >= 1220 ? 22.0 : 18.0;
+                  final compactHeader = constraints.maxWidth < 1180;
+                  final activeSection = sections[selectedIndex];
 
-              return Padding(
-                padding: EdgeInsets.all(horizontalPadding),
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xF012171D),
-                    borderRadius: BorderRadius.circular(shellRadius),
-                    border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-                  ),
-                  child: Column(
-                    children: [
-                      DesktopAuthorizeBootstrap(authSession: session),
-                      _DesktopShellHeader(
-                        sections: sections,
-                        selectedIndex: selectedIndex,
-                        compact: compactHeader,
-                        username: session.username,
-                        registeredDeviceId: authorizeState.registeredDeviceId,
-                        onSelect: shellVm.selectIndex,
-                        onLogout: () {
-                          ref.read(authViewModelProvider('desktop').notifier).logout();
-                          shellVm.reset();
-                        },
+                  return Padding(
+                    padding: EdgeInsets.all(horizontalPadding),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xF012171D),
+                        borderRadius: BorderRadius.circular(shellRadius),
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
                       ),
-                      const Divider(height: 1),
-                      Expanded(child: activeSection.child),
-                    ],
-                  ),
-                ),
-              );
-            },
+                      child: Column(
+                        children: [
+                          DesktopAuthorizeBootstrap(authSession: session),
+                          _DesktopShellHeader(
+                            sections: sections,
+                            selectedIndex: selectedIndex,
+                            compact: compactHeader,
+                            username: session.username,
+                            registeredDeviceId: authorizeState.registeredDeviceId,
+                            onSelect: shellVm.selectIndex,
+                            onLogout: () {
+                              ref.read(authViewModelProvider('desktop').notifier).logout();
+                              shellVm.reset();
+                            },
+                          ),
+                          const Divider(height: 1),
+                          Expanded(child: activeSection.child),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
           ),
-        ),
+          const DesktopAuthorizeRequestOverlay(),
+        ],
       ),
     );
   }

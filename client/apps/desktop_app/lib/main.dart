@@ -134,270 +134,260 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
     return Scaffold(
       backgroundColor:
           palette.surface, // bg-surface (usually slate-900 in dark mode)
-      body: Column(
+      body: Stack(
         children: [
-          DesktopAuthorizeBootstrap(authSession: authState.session),
-          // TopNavBar
-          Container(
-            height: 56, // h-14
-            padding: const EdgeInsets.symmetric(horizontal: 24), // px-6
-            decoration: BoxDecoration(
-              color: palette.surface, // bg-slate-900
-              border: Border(
-                bottom: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
-              ),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
+          Column(
+            children: [
+              DesktopAuthorizeBootstrap(authSession: authState.session),
+              // TopNavBar
+              Container(
+                height: 56, // h-14
+                padding: const EdgeInsets.symmetric(horizontal: 24), // px-6
+                decoration: BoxDecoration(
+                  color: palette.surface, // bg-slate-900
+                  border: Border(
+                    bottom: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+                  ),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      'RemoteTerm',
-                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            fontWeight: FontWeight.bold,
-                          ),
-                    ),
-                    const SizedBox(width: 32), // gap-8
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        _TopNavBarTab(
-                            label: 'Dashboard', active: true, palette: palette),
-                        _TopNavBarTab(
-                            label: 'Sessions', active: false, palette: palette),
-                        _TopNavBarTab(
-                            label: 'Network', active: false, palette: palette),
+                        Text(
+                          'RemoteTerm',
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.bold,
+                              ),
+                        ),
+                        const SizedBox(width: 32), // gap-8
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            _TopNavBarTab(label: 'Dashboard', active: true, palette: palette),
+                            _TopNavBarTab(label: 'Sessions', active: false, palette: palette),
+                            _TopNavBarTab(label: 'Network', active: false, palette: palette),
+                          ],
+                        ),
                       ],
                     ),
-                  ],
-                ),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: palette.surfaceRaised,
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      child: Row(
-                        children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: authorizeState.registeredDeviceId != null
-                                  ? palette.primaryBright
-                                  : palette.textMuted,
-                              shape: BoxShape.circle,
-                              boxShadow:
-                                  authorizeState.registeredDeviceId != null
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: palette.surfaceRaised,
+                            borderRadius: BorderRadius.circular(999),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                          ),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: BoxDecoration(
+                                  color: authorizeState.registeredDeviceId != null
+                                      ? palette.primaryBright
+                                      : palette.textMuted,
+                                  shape: BoxShape.circle,
+                                  boxShadow: authorizeState.registeredDeviceId != null
                                       ? [
                                           BoxShadow(
-                                            color: palette.primaryBright
-                                                .withValues(alpha: 0.6),
+                                            color: palette.primaryBright.withValues(alpha: 0.6),
                                             blurRadius: 8,
                                           ),
                                         ]
                                       : null,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                (authorizeState.registeredDeviceId ?? l10n.desktopNodeActive)
+                                    .toUpperCase(),
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontFamily: 'Space Grotesk',
+                                  color: palette.primary,
+                                  letterSpacing: 1.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Icon(Icons.notifications_none_rounded, color: palette.textMuted, size: 20),
+                        const SizedBox(width: 12),
+                        Icon(Icons.help_outline_rounded, color: palette.textMuted, size: 20),
+                        const SizedBox(width: 12),
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+                            color: palette.surfaceMuted,
+                          ),
+                          child: Center(
+                            child: Text(
+                              authState.session!.username.isNotEmpty
+                                  ? authState.session!.username[0].toUpperCase()
+                                  : 'O',
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            (authorizeState.registeredDeviceId ??
-                                    l10n.desktopNodeActive)
-                                .toUpperCase(),
-                            style: TextStyle(
-                              fontSize: 10,
-                              fontFamily: 'Space Grotesk',
-                              color: palette.primary,
-                              letterSpacing: 1.5,
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              // Main Body (Content)
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // --- SIDEBAR ---
+                    Container(
+                      width: 240,
+                      decoration: BoxDecoration(
+                        color: const Color(
+                            0xFF0C0E11), // surface-container-lowest equivalent
+                        border: Border(
+                          right: BorderSide(
+                            color: Colors.white.withValues(alpha: 0.05),
+                          ),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'RemoteTerm Pro',
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w900,
+                                    fontFamily: 'Space Grotesk',
+                                    color: palette.textPrimary,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Text(
+                                  'CONNECTED: ${authorizeState.pendingRequests.length} NODES',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: palette.textMuted,
+                                    fontFamily: 'Space Grotesk',
+                                    letterSpacing: 1.2,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
+                          Expanded(
+                            child: ListView(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              children: sections.asMap().entries.map((entry) {
+                                final isActive = _navigationIndex == entry.key;
+                                return Padding(
+                                  padding: const EdgeInsets.only(bottom: 4),
+                                  child: Material(
+                                    color: Colors.transparent,
+                                    child: InkWell(
+                                      borderRadius: BorderRadius.circular(8),
+                                      onTap: () {
+                                        setState(() => _navigationIndex = entry.key);
+                                      },
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          color: isActive
+                                              ? palette.primary.withValues(alpha: 0.15)
+                                              : Colors.transparent,
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        padding: const EdgeInsets.symmetric(
+                                            horizontal: 12, vertical: 12),
+                                        child: Row(
+                                          children: [
+                                            Icon(
+                                              entry.value.icon,
+                                              size: 18,
+                                              color: isActive
+                                                  ? palette.primaryBright
+                                                  : palette.textMuted,
+                                            ),
+                                            const SizedBox(width: 12),
+                                            Text(
+                                              entry.value.label,
+                                              style: TextStyle(
+                                                color: isActive
+                                                    ? palette.primaryBright
+                                                    : palette.textMuted,
+                                                fontSize: 13,
+                                                fontWeight:
+                                                    isActive ? FontWeight.w600 : FontWeight.w500,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            child: Column(
+                              children: [
+                                _SidebarFooterItem(
+                                  icon: Icons.help_outline_rounded,
+                                  label: 'Support',
+                                  palette: palette,
+                                ),
+                                _SidebarFooterItem(
+                                  icon: Icons.history_rounded,
+                                  label: 'Logs',
+                                  palette: palette,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
                         ],
                       ),
                     ),
-                    const SizedBox(width: 16),
-                    Icon(Icons.notifications_none_rounded,
-                        color: palette.textMuted, size: 20),
-                    const SizedBox(width: 12),
-                    Icon(Icons.help_outline_rounded,
-                        color: palette.textMuted, size: 20),
-                    const SizedBox(width: 12),
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                            color: Colors.white.withValues(alpha: 0.2)),
-                        color: palette.surfaceMuted,
-                      ),
-                      child: Center(
-                        child: Text(
-                          authState.session!.username.isNotEmpty
-                              ? authState.session!.username[0].toUpperCase()
-                              : 'O',
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.bold),
+                    // --- CONTENT AREA ---
+                    Expanded(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 220),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) {
+                          return FadeTransition(
+                            opacity: animation,
+                            child: child,
+                          );
+                        },
+                        child: KeyedSubtree(
+                          key: ValueKey(_navigationIndex),
+                          child: currentSection.child,
                         ),
                       ),
                     ),
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-          // Main Body (Content)
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // --- SIDEBAR ---
-                Container(
-                  width: 240,
-                  decoration: BoxDecoration(
-                    color: const Color(
-                        0xFF0C0E11), // surface-container-lowest equivalent
-                    border: Border(
-                      right: BorderSide(
-                        color: Colors.white.withValues(alpha: 0.05),
-                      ),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'RemoteTerm Pro',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.w900,
-                                fontFamily: 'Space Grotesk',
-                                color: palette.textPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'CONNECTED: ${authorizeState.pendingRequests.length} NODES',
-                              style: TextStyle(
-                                fontSize: 10,
-                                color: palette.textMuted,
-                                fontFamily: 'Space Grotesk',
-                                letterSpacing: 1.2,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        child: ListView(
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          children: sections.asMap().entries.map((entry) {
-                            final isActive = _navigationIndex == entry.key;
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 4),
-                              child: Material(
-                                color: Colors.transparent,
-                                child: InkWell(
-                                  borderRadius: BorderRadius.circular(8),
-                                  onTap: () {
-                                    setState(
-                                        () => _navigationIndex = entry.key);
-                                  },
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      color: isActive
-                                          ? palette.primary
-                                              .withValues(alpha: 0.15)
-                                          : Colors.transparent,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 12, vertical: 12),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          entry.value.icon,
-                                          size: 18,
-                                          color: isActive
-                                              ? palette.primaryBright
-                                              : palette.textMuted,
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Text(
-                                          entry.value.label,
-                                          style: TextStyle(
-                                            color: isActive
-                                                ? palette.primaryBright
-                                                : palette.textMuted,
-                                            fontSize: 13,
-                                            fontWeight: isActive
-                                                ? FontWeight.w600
-                                                : FontWeight.w500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Column(
-                          children: [
-                            _SidebarFooterItem(
-                              icon: Icons.help_outline_rounded,
-                              label: 'Support',
-                              palette: palette,
-                            ),
-                            _SidebarFooterItem(
-                              icon: Icons.history_rounded,
-                              label: 'Logs',
-                              palette: palette,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-                  ),
-                ),
-                // --- CONTENT AREA ---
-                Expanded(
-                  child: AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 220),
-                    switchInCurve: Curves.easeOutCubic,
-                    switchOutCurve: Curves.easeInCubic,
-                    transitionBuilder: (child, animation) {
-                      return FadeTransition(
-                        opacity: animation,
-                        child: child,
-                      );
-                    },
-                    child: KeyedSubtree(
-                      key: ValueKey(_navigationIndex),
-                      child: currentSection.child,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          const DesktopAuthorizeRequestOverlay(),
         ],
       ),
     );

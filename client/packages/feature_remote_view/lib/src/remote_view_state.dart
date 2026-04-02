@@ -16,7 +16,7 @@ class RemoteViewState {
     this.sessionState,
     this.loading = false,
     this.backgroundPauseDeadline,
-    this.snapshotRefreshSeconds = 5,
+    this.snapshotRefreshSeconds = 60,
     this.orientationMode = ViewOrientationMode.portrait,
     this.autoQuality = true,
     this.qualityProfile = QualityProfile.p720,

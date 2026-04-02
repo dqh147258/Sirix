@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::info;
 use uuid::Uuid;
 
@@ -45,6 +46,11 @@ pub struct UpdateDeviceSettingsRequest {
 pub struct DeviceSettingsResponse {
     pub device_id: Uuid,
     pub auto_approve_screen_share: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeviceSnapshotsQuery {
+    pub refresh: Option<bool>,
 }
 
 pub async fn register_device(
@@ -297,15 +303,57 @@ pub async fn list_device_snapshots(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(device_id): Path<Uuid>,
+    Query(query): Query<DeviceSnapshotsQuery>,
 ) -> ApiResult<Json<Vec<ScreenSnapshot>>> {
     let user_id = resolve_user_id(&headers, &state).await?;
     ensure_device_owner(&state, device_id, user_id).await?;
 
-    if let Some(cached) = state
+    let cached_before = state
         .get_cached_snapshots(device_id)
         .await
-        .map_err(internal_device_error)?
-    {
+        .map_err(internal_device_error)?;
+
+    if query.refresh.unwrap_or(false) {
+        let previous_latest = latest_snapshot_captured_at(cached_before.as_deref());
+        let refresh_event = serde_json::json!({
+            "type": "device.snapshots.refresh",
+            "event_id": Uuid::new_v4().to_string(),
+            "timestamp": Utc::now(),
+            "payload": {
+                "device_id": device_id,
+                "reason": "mobile_snapshot_refresh",
+            }
+        });
+
+        let subscribers = state
+            .publish_desktop_event(device_id, refresh_event.to_string())
+            .await;
+
+        if subscribers > 0 {
+            for _ in 0..12 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if let Some(cached) = state
+                    .get_cached_snapshots(device_id)
+                    .await
+                    .map_err(internal_device_error)?
+                {
+                    if latest_snapshot_captured_at(Some(&cached)) > previous_latest {
+                        return Ok(Json(cached));
+                    }
+                }
+            }
+        }
+
+        if let Some(cached) = state
+            .get_cached_snapshots(device_id)
+            .await
+            .map_err(internal_device_error)?
+        {
+            return Ok(Json(cached));
+        }
+    }
+
+    if let Some(cached) = cached_before {
         return Ok(Json(cached));
     }
 
@@ -363,6 +411,10 @@ fn default_screens() -> Vec<ScreenInfo> {
             is_primary: false,
         },
     ]
+}
+
+fn latest_snapshot_captured_at(snapshots: Option<&[ScreenSnapshot]>) -> Option<DateTime<Utc>> {
+    snapshots.and_then(|items| items.iter().map(|item| item.captured_at).max())
 }
 
 fn build_snapshots(screens: &[ScreenInfo], captured_at: DateTime<Utc>) -> Vec<ScreenSnapshot> {

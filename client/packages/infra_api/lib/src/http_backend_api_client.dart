@@ -134,9 +134,11 @@ class HttpBackendApiClient implements BackendApiClient {
   Future<List<ScreenSnapshot>> listSnapshots({
     required String accessToken,
     required String deviceId,
+    bool forceRefresh = false,
   }) async {
+    final suffix = forceRefresh ? '?refresh=true' : '';
     final response = await _get(
-      '/api/v1/devices/$deviceId/snapshots',
+      '/api/v1/devices/$deviceId/snapshots$suffix',
       accessToken: accessToken,
     );
 

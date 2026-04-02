@@ -22,7 +22,6 @@ class AuthPage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(authViewModelProvider(clientType));
     final vm = ref.read(authViewModelProvider(clientType).notifier);
-    final palette = context.freeloom;
     final l10n = context.l10n;
     final isDesktop = MediaQuery.sizeOf(context).width >= 900;
 
@@ -31,6 +30,17 @@ class AuthPage extends ConsumerWidget {
         onLoginSuccess?.call();
       }
     });
+
+    if (isDesktop) {
+      return _DesktopAuthScreen(
+        clientType: clientType,
+        state: state,
+        vm: vm,
+        l10n: l10n,
+      );
+    }
+
+    final palette = context.freeloom;
 
     return Material(
       color: Colors.transparent,
@@ -138,6 +148,419 @@ class AuthPage extends ConsumerWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+class _DesktopAuthScreen extends StatelessWidget {
+  const _DesktopAuthScreen({
+    required this.clientType,
+    required this.state,
+    required this.vm,
+    required this.l10n,
+  });
+
+  final String clientType;
+  final AuthState state;
+  final AuthViewModel vm;
+  final AppLocalizations l10n;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Material(
+      color: Colors.transparent,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: RadialGradient(
+            center: const Alignment(0.18, -0.26),
+            radius: 1.18,
+            colors: [
+              const Color(0xFF162028),
+              palette.background,
+              const Color(0xFF070A0D),
+            ],
+          ),
+        ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            const _DesktopAuthBlueprintBackdrop(),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: -90,
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    width: 980,
+                    height: 240,
+                    decoration: BoxDecoration(
+                      color: palette.primaryBright.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(999),
+                      boxShadow: [
+                        BoxShadow(
+                          color: palette.primaryBright.withValues(alpha: 0.12),
+                          blurRadius: 140,
+                          spreadRadius: 20,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 460),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(32),
+                          child: BackdropFilter(
+                            filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+                            child: DecoratedBox(
+                              decoration: AppTheme.glassDecoration(
+                                context,
+                                radius: 32,
+                                fillColor: const Color(0x99181D21),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.all(32),
+                                child: state.session == null
+                                    ? _DesktopAuthForm(
+                                        clientType: clientType,
+                                        state: state,
+                                        vm: vm,
+                                        l10n: l10n,
+                                      )
+                                    : _AccountPanel(
+                                        sessionName: state.session!.username,
+                                        clientType: clientType,
+                                        l10n: l10n,
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 520),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'v4.0.2  |  CORE STABLE',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: palette.textMuted,
+                                    fontFamily: 'JetBrains Mono',
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 1.2,
+                                  ),
+                            ),
+                            Text(
+                              'AES-256-GCM',
+                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: palette.textMuted,
+                                    fontFamily: 'JetBrains Mono',
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 1.2,
+                                  ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DesktopAuthBlueprintBackdrop extends StatelessWidget {
+  const _DesktopAuthBlueprintBackdrop();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return IgnorePointer(
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: CustomPaint(
+              painter: _DotGridPainter(color: Colors.white.withValues(alpha: 0.05)),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(28),
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: palette.surface.withValues(alpha: 0.52),
+                      borderRadius: BorderRadius.circular(38),
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 20),
+                Expanded(
+                  flex: 7,
+                  child: Column(
+                    children: [
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: palette.surface.withValues(alpha: 0.44),
+                          borderRadius: BorderRadius.circular(28),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                        ),
+                        child: const SizedBox(height: 86),
+                      ),
+                      const SizedBox(height: 20),
+                      Expanded(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: palette.surface.withValues(alpha: 0.36),
+                            borderRadius: BorderRadius.circular(38),
+                            border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.all(28),
+                            child: Column(
+                              children: [
+                                Row(
+                                  children: List.generate(
+                                    4,
+                                    (index) => Expanded(
+                                      child: Padding(
+                                        padding: EdgeInsets.only(right: index == 3 ? 0 : 16),
+                                        child: DecoratedBox(
+                                          decoration: BoxDecoration(
+                                            color: palette.surfaceRaised.withValues(alpha: 0.78),
+                                            borderRadius: BorderRadius.circular(22),
+                                          ),
+                                          child: const SizedBox(height: 120),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 20),
+                                Expanded(
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      color: palette.background.withValues(alpha: 0.72),
+                                      borderRadius: BorderRadius.circular(30),
+                                      border: Border.all(color: palette.glassStroke),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DesktopAuthForm extends StatelessWidget {
+  const _DesktopAuthForm({
+    required this.clientType,
+    required this.state,
+    required this.vm,
+    required this.l10n,
+  });
+
+  final String clientType;
+  final AuthState state;
+  final AuthViewModel vm;
+  final AppLocalizations l10n;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+    final captionStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: palette.textMuted,
+          fontFamily: 'JetBrains Mono',
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.2,
+        );
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Align(
+          child: Column(
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(
+                  color: palette.primaryBright.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: palette.primaryBright.withValues(alpha: 0.24)),
+                ),
+                child: Icon(
+                  clientType == 'desktop' ? Icons.terminal_rounded : Icons.monitor_rounded,
+                  color: palette.primaryBright,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(height: 18),
+              RichText(
+                text: TextSpan(
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        fontSize: 34,
+                        letterSpacing: -1.0,
+                      ),
+                  children: [
+                    const TextSpan(text: 'RemoteTerm '),
+                    TextSpan(
+                      text: 'Pro',
+                      style: TextStyle(color: palette.primaryBright),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                l10n.secureWorkspaceEntry.toUpperCase(),
+                textAlign: TextAlign.center,
+                style: captionStyle,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 30),
+        Text(l10n.accountIdentity.toUpperCase(), style: captionStyle),
+        const SizedBox(height: 10),
+        TextField(
+          decoration: InputDecoration(
+            prefixIcon: const Icon(Icons.alternate_email_rounded),
+            hintText: l10n.usernameHint,
+          ),
+          onChanged: vm.setUsername,
+        ),
+        const SizedBox(height: 18),
+        Text(l10n.accessCredential.toUpperCase(), style: captionStyle),
+        const SizedBox(height: 10),
+        TextField(
+          decoration: InputDecoration(
+            prefixIcon: const Icon(Icons.lock_outline_rounded),
+            hintText: l10n.passwordHint,
+          ),
+          obscureText: true,
+          onChanged: vm.setPassword,
+        ),
+        if (state.errorMessage != null) ...[
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: palette.error.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: palette.error.withValues(alpha: 0.28)),
+            ),
+            child: Text(
+              state.errorMessage!,
+              style: TextStyle(color: palette.error),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            color: palette.surfaceRaised.withValues(alpha: 0.68),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: palette.primaryBright,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  l10n.desktopLoginHint,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textMuted,
+                        height: 1.45,
+                      ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 22),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: state.isLoading ? null : vm.login,
+            style: FilledButton.styleFrom(
+              backgroundColor: palette.primary,
+              foregroundColor: const Color(0xFF04110C),
+              minimumSize: const Size.fromHeight(56),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            ),
+            icon: state.isLoading
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.login_rounded),
+            label: Text(l10n.login),
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: state.isLoading ? null : vm.register,
+            style: OutlinedButton.styleFrom(
+              minimumSize: const Size.fromHeight(54),
+              side: BorderSide(color: Colors.white.withValues(alpha: 0.08)),
+              foregroundColor: palette.textPrimary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            ),
+            icon: const Icon(Icons.person_add_alt_1_rounded),
+            label: Text(l10n.register),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -80,7 +80,10 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     state = state.copyWith(loading: false, clearError: true);
   }
 
-  Future<void> loadSnapshots({required String accessToken}) async {
+  Future<void> loadSnapshots({
+    required String accessToken,
+    bool forceRefresh = false,
+  }) async {
     final deviceId = state.deviceId;
     if (deviceId == null) {
       return;
@@ -90,6 +93,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       final snapshots = await _apiClient.listSnapshots(
         accessToken: accessToken,
         deviceId: deviceId,
+        forceRefresh: forceRefresh,
       );
       state = state.copyWith(
         snapshots: snapshots,
@@ -129,6 +133,13 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
 
   void setMonitorPickerVisible(bool visible) {
     state = state.copyWith(monitorPickerVisible: visible);
+  }
+
+  Future<void> openMonitorPicker({
+    required String accessToken,
+  }) async {
+    state = state.copyWith(monitorPickerVisible: true);
+    await loadSnapshots(accessToken: accessToken, forceRefresh: true);
   }
 
   Future<void> setManualQuality({
@@ -184,7 +195,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
   Future<void> setSnapshotRefreshSeconds({
     required int seconds,
   }) async {
-    final next = seconds.clamp(2, 30);
+    final next = seconds.clamp(2, 60);
     state = state.copyWith(snapshotRefreshSeconds: next);
 
     final accessToken = _boundAccessToken;

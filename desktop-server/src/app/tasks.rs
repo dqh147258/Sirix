@@ -292,6 +292,9 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         "session.requested" => {
             handle_session_requested(state, event.payload).await;
         }
+        "device.snapshots.refresh" => {
+            handle_snapshot_refresh_requested(state, event.payload).await;
+        }
         "session.control.pause"
         | "session.control.resume"
         | "session.control.terminate"
@@ -318,6 +321,30 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         }
         _ => {
             debug!(event_type = %event.event_type, payload = %event.payload, "received backend event");
+        }
+    }
+}
+
+async fn handle_snapshot_refresh_requested(state: &AppState, payload: serde_json::Value) {
+    let Some(device_id) = payload.get("device_id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+
+    if device_id != state.config.backend.device_id {
+        return;
+    }
+
+    match publish_screen_state_to_backend(state).await {
+        Ok(()) => {
+            state.logger.info(format!(
+                "snapshot refresh request handled device_id={device_id}"
+            ));
+        }
+        Err(error) => {
+            state.logger.warn(format!(
+                "snapshot refresh request failed device_id={} error={error}",
+                device_id
+            ));
         }
     }
 }

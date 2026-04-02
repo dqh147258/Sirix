@@ -7,12 +7,49 @@ CLIENT_DIR=$(cd "${SCRIPT_DIR}/../client" && pwd)
 USE_MOCK=${FREELOOM_USE_MOCK:-false}
 SERVER_HOST=${FREELOOM_SERVER_HOST:-192.168.0.36}
 API_BASE_URL=${FREELOOM_API_BASE_URL:-http://${SERVER_HOST}:8080}
+UPDATE_DEPS=false
+ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -u|--update-deps|--pub-get)
+      UPDATE_DEPS=true
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: ./scripts/run-mobile-client.sh [--update-deps] [flutter run args...]
+
+Options:
+  -u, --update-deps, --pub-get   Run `flutter pub get` before start.
+  -h, --help                     Show this help message.
+EOF
+      exit 0
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
 
 cd "${CLIENT_DIR}"
-flutter pub get
-flutter run \
-  -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=${USE_MOCK} \
-  --dart-define=FREELOOM_SERVER_HOST=${SERVER_HOST} \
-  --dart-define=FREELOOM_API_BASE_URL=${API_BASE_URL} \
-  "$@"
+if [[ "${UPDATE_DEPS}" == true ]]; then
+  flutter pub get
+fi
+
+CMD=(
+  flutter
+  run
+  -t
+  apps/mobile_app/lib/main.dart
+  --dart-define=FREELOOM_USE_MOCK=${USE_MOCK}
+  --dart-define=FREELOOM_SERVER_HOST=${SERVER_HOST}
+  --dart-define=FREELOOM_API_BASE_URL=${API_BASE_URL}
+)
+
+if (( ${#ARGS[@]} > 0 )); then
+  CMD+=("${ARGS[@]}")
+fi
+
+exec "${CMD[@]}"

@@ -39,6 +39,7 @@ abstract class BackendApiClient {
   Future<List<ScreenSnapshot>> listSnapshots({
     required String accessToken,
     required String deviceId,
+    bool forceRefresh = false,
   });
 
   Future<void> pauseSession({

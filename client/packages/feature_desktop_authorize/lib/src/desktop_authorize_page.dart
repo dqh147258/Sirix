@@ -23,7 +23,19 @@ class DesktopAuthorizePage extends ConsumerStatefulWidget {
   ConsumerState<DesktopAuthorizePage> createState() => _DesktopAuthorizePageState();
 }
 
-class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
+class DesktopAuthorizeBootstrap extends ConsumerStatefulWidget {
+  const DesktopAuthorizeBootstrap({
+    super.key,
+    required this.authSession,
+  });
+
+  final AuthSession? authSession;
+
+  @override
+  ConsumerState<DesktopAuthorizeBootstrap> createState() => _DesktopAuthorizeBootstrapState();
+}
+
+class _DesktopAuthorizeBootstrapState extends ConsumerState<DesktopAuthorizeBootstrap> {
   @override
   void initState() {
     super.initState();
@@ -35,14 +47,24 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
   }
 
   @override
-  void didUpdateWidget(covariant DesktopAuthorizePage oldWidget) {
+  void didUpdateWidget(covariant DesktopAuthorizeBootstrap oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.authSession?.accessToken != widget.authSession?.accessToken) {
       unawaited(
-        ref.read(desktopAuthorizeViewModelProvider.notifier).bindAuthSession(widget.authSession),
+        () async {
+          final vm = ref.read(desktopAuthorizeViewModelProvider.notifier);
+          await vm.bindAuthSession(widget.authSession);
+          await vm.connect();
+        }(),
       );
     }
   }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox.shrink();
+}
+
+class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
 
   @override
   Widget build(BuildContext context) {

@@ -12,6 +12,25 @@ import 'remote_stream_controller.dart';
 
 const _mediaStreamTraceTag = '[MEDIA_STREAM_TRACE]';
 
+enum DesktopCaptureFrameRatePreset {
+  fps15,
+  fps20,
+  fps30,
+}
+
+extension DesktopCaptureFrameRatePresetValue on DesktopCaptureFrameRatePreset {
+  int get value {
+    switch (this) {
+      case DesktopCaptureFrameRatePreset.fps15:
+        return 15;
+      case DesktopCaptureFrameRatePreset.fps20:
+        return 20;
+      case DesktopCaptureFrameRatePreset.fps30:
+        return 30;
+    }
+  }
+}
+
 @immutable
 class DesktopMediaState {
   const DesktopMediaState({
@@ -63,6 +82,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
   MediaStream? _displayStream;
   LocalSignalCallback? _localSignalCallback;
   String? _sharedScreenId;
+  QualityProfile _preferredQualityProfile = QualityProfile.p720;
 
   Future<void> startAnswering({
     required String sessionId,
@@ -186,15 +206,51 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     AppLogger.info(
       '$_mediaStreamTraceTag desktop switching shared screen sessionId=$sessionId screenId=$screenId',
     );
+    await _replaceSharedStream(
+      sessionId: sessionId,
+      screenId: screenId,
+      signalLabel: 'screen.local.switched',
+    );
+  }
+
+  Future<void> setPreferredQualityProfile({
+    required String sessionId,
+    QualityProfile? profile,
+  }) async {
+    _preferredQualityProfile = profile ?? QualityProfile.p720;
+    AppLogger.info(
+      '$_mediaStreamTraceTag desktop preferred capture profile updated sessionId=$sessionId profile=${_preferredQualityProfile.name}',
+    );
+
+    if (state.sessionId != sessionId || _videoSender == null) {
+      return;
+    }
+
+    await _replaceSharedStream(
+      sessionId: sessionId,
+      screenId: _sharedScreenId,
+      signalLabel: 'quality.local.updated',
+    );
+  }
+
+  Future<void> _replaceSharedStream({
+    required String sessionId,
+    required String? screenId,
+    required String signalLabel,
+  }) async {
+    final videoSender = _videoSender;
+    if (videoSender == null) {
+      throw StateError('desktop video sender is not ready');
+    }
+
     final nextStream = await _createDisplayStream(
       sessionId: sessionId,
       screenId: screenId,
     );
-
     final nextTracks = nextStream.getVideoTracks();
     if (nextTracks.isEmpty) {
       await _disposeDisplayStream(nextStream);
-      throw StateError('desktop display stream missing video track for screenId=$screenId');
+      throw StateError('desktop display stream missing video track');
     }
 
     final previousStream = _displayStream;
@@ -204,11 +260,11 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     state = state.copyWith(
       sharing: true,
       sharedScreenId: screenId,
-      lastSignalType: 'screen.local.switched',
+      lastSignalType: signalLabel,
       lastUpdated: DateTime.now(),
     );
     AppLogger.info(
-      '$_mediaStreamTraceTag desktop shared screen switched sessionId=$sessionId screenId=$screenId trackId=${nextTracks.first.id}',
+      '$_mediaStreamTraceTag desktop shared stream replaced sessionId=$sessionId screenId=${screenId ?? '-'} trackId=${nextTracks.first.id} fps=${_captureFrameRateForProfile(_preferredQualityProfile).value} signalLabel=$signalLabel',
     );
 
     if (previousStream != null) {
@@ -265,24 +321,45 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     required String? screenId,
   }) async {
     final sourceId = screenId == null ? null : await _resolveDesktopSourceId(screenId);
+    final frameRate = _captureFrameRateForProfile(_preferredQualityProfile).value;
     final constraints = <String, dynamic>{
       'audio': false,
       'video': sourceId == null
-          ? true
+          ? {
+              'frameRate': {
+                'ideal': frameRate,
+                'max': frameRate,
+              },
+            }
           : {
               'deviceId': {'exact': sourceId},
-              'mandatory': {'frameRate': 30},
+              'frameRate': {
+                'ideal': frameRate,
+                'max': frameRate,
+              },
+              'mandatory': {'frameRate': frameRate},
             },
     };
 
     AppLogger.info(
-      '$_mediaStreamTraceTag desktop requesting display media sessionId=$sessionId screenId=${screenId ?? '-'} sourceId=${sourceId ?? 'default'}',
+      '$_mediaStreamTraceTag desktop requesting display media sessionId=$sessionId screenId=${screenId ?? '-'} sourceId=${sourceId ?? 'default'} fps=$frameRate profile=${_preferredQualityProfile.name}',
     );
     final displayStream = await navigator.mediaDevices.getDisplayMedia(constraints);
     AppLogger.info(
-      '$_mediaStreamTraceTag desktop display media acquired sessionId=$sessionId screenId=${screenId ?? '-'} sourceId=${sourceId ?? 'default'} tracks=${displayStream.getTracks().length}',
+      '$_mediaStreamTraceTag desktop display media acquired sessionId=$sessionId screenId=${screenId ?? '-'} sourceId=${sourceId ?? 'default'} tracks=${displayStream.getTracks().length} fps=$frameRate',
     );
     return displayStream;
+  }
+
+  DesktopCaptureFrameRatePreset _captureFrameRateForProfile(QualityProfile profile) {
+    switch (profile) {
+      case QualityProfile.p480:
+        return DesktopCaptureFrameRatePreset.fps15;
+      case QualityProfile.p1080:
+        return DesktopCaptureFrameRatePreset.fps30;
+      case QualityProfile.p720:
+        return DesktopCaptureFrameRatePreset.fps20;
+    }
   }
 
   Future<String> _resolveDesktopSourceId(String screenId) async {

@@ -87,34 +87,56 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
     }
 
     final remoteViewState = ref.watch(remoteViewViewModelProvider);
-    final fullscreenRemote = _index == 1 &&
+    ref.listen<RemoteViewState>(remoteViewViewModelProvider, (previous, next) {
+      if ((previous?.sessionId != null || previous?.sessionState != null) &&
+          next.sessionId == null &&
+          next.sessionState == null &&
+          mounted) {
+        setState(() {
+          _activeSession = null;
+          if (_index != 3) {
+            _index = 0;
+          }
+        });
+      }
+    });
+
+    final hasRemoteWorkspace =
+        _activeSession != null || remoteViewState.sessionId != null || remoteViewState.sessionState != null;
+    final fullscreenRemote = (_index == 0 || _index == 1) &&
         remoteViewState.sessionId != null &&
         remoteViewState.orientationMode == ViewOrientationMode.landscape;
 
     final pages = [
-      DeviceListPage(
-        accessToken: session.accessToken,
-        onConnectSession: (value) {
-          setState(() {
-            _activeSession = value;
-            _index = 1;
-          });
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (!mounted) {
-              return;
-            }
-            ref.read(remoteViewViewModelProvider.notifier).attachSession(
-                  sessionId: value.sessionId,
-                  deviceId: value.targetDeviceId,
-                  accessToken: session.accessToken,
-                  initialState: value.state,
-                );
-          });
-        },
-      ),
+      hasRemoteWorkspace
+          ? RemoteViewPage(
+              accessToken: session.accessToken,
+              connectedSession: _activeSession,
+              layout: RemoteViewLayout.workspace,
+            )
+          : DeviceListPage(
+              accessToken: session.accessToken,
+              onConnectSession: (value) {
+                setState(() {
+                  _activeSession = value;
+                });
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) {
+                    return;
+                  }
+                  ref.read(remoteViewViewModelProvider.notifier).attachSession(
+                        sessionId: value.sessionId,
+                        deviceId: value.targetDeviceId,
+                        accessToken: session.accessToken,
+                        initialState: value.state,
+                      );
+                });
+              },
+            ),
       RemoteViewPage(
         accessToken: session.accessToken,
         connectedSession: _activeSession,
+        layout: RemoteViewLayout.monitor,
       ),
       TerminalPage(
         accessToken: session.accessToken,
@@ -207,31 +229,29 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
           borderRadius: BorderRadius.circular(16),
           child: BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: NavigationBar(
-              height: 68,
-              backgroundColor: const Color(0xE61B2026),
-              selectedIndex: _index,
-              onDestinationSelected: (value) => setState(() => _index = value),
+            child: _MobileBottomNavBar(
+              currentIndex: _index,
+              onSelect: (value) => setState(() => _index = value),
               destinations: [
-                NavigationDestination(
-                  icon: const Icon(Icons.desktop_windows_outlined),
-                  selectedIcon: const Icon(Icons.desktop_windows_rounded),
+                _MobileNavDestination(
                   label: l10n.nodesNav,
+                  icon: Icons.desktop_windows_outlined,
+                  selectedIcon: Icons.desktop_windows_rounded,
                 ),
-                NavigationDestination(
-                  icon: const Icon(Icons.live_tv_outlined),
-                  selectedIcon: const Icon(Icons.live_tv_rounded),
+                _MobileNavDestination(
                   label: l10n.monitors,
+                  icon: Icons.live_tv_outlined,
+                  selectedIcon: Icons.live_tv_rounded,
                 ),
-                NavigationDestination(
-                  icon: const Icon(Icons.terminal_rounded),
-                  selectedIcon: const Icon(Icons.terminal),
+                _MobileNavDestination(
                   label: l10n.terminal,
+                  icon: Icons.terminal_rounded,
+                  selectedIcon: Icons.terminal,
                 ),
-                NavigationDestination(
-                  icon: const Icon(Icons.person_outline_rounded),
-                  selectedIcon: const Icon(Icons.person_rounded),
+                _MobileNavDestination(
                   label: l10n.account,
+                  icon: Icons.person_outline_rounded,
+                  selectedIcon: Icons.person_rounded,
                 ),
               ],
             ),
@@ -240,6 +260,125 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
       ),
     );
   }
+}
+
+class _MobileBottomNavBar extends StatelessWidget {
+  const _MobileBottomNavBar({
+    required this.currentIndex,
+    required this.onSelect,
+    required this.destinations,
+  });
+
+  final int currentIndex;
+  final ValueChanged<int> onSelect;
+  final List<_MobileNavDestination> destinations;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Container(
+      height: 74,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+      decoration: BoxDecoration(
+        color: const Color(0xE61B2026),
+        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
+      ),
+      child: Row(
+        children: [
+          for (var index = 0; index < destinations.length; index++)
+            Expanded(
+              child: _MobileBottomNavItem(
+                destination: destinations[index],
+                selected: currentIndex == index,
+                activeColor: palette.primaryBright,
+                onTap: () => onSelect(index),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MobileBottomNavItem extends StatelessWidget {
+  const _MobileBottomNavItem({
+    required this.destination,
+    required this.selected,
+    required this.activeColor,
+    required this.onTap,
+  });
+
+  final _MobileNavDestination destination;
+  final bool selected;
+  final Color activeColor;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final inactiveColor = Colors.white.withValues(alpha: 0.44);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Icon(
+              selected ? destination.selectedIcon : destination.icon,
+              size: 20,
+              color: selected ? activeColor : inactiveColor,
+            ),
+            const SizedBox(height: 5),
+            Text(
+              destination.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: selected ? activeColor : inactiveColor,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 10,
+                    letterSpacing: 0.7,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOut,
+              width: selected ? 28 : 0,
+              height: 2,
+              decoration: BoxDecoration(
+                color: activeColor,
+                borderRadius: BorderRadius.circular(999),
+                boxShadow: selected
+                    ? [
+                        BoxShadow(
+                          color: activeColor.withValues(alpha: 0.35),
+                          blurRadius: 10,
+                        ),
+                      ]
+                    : null,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileNavDestination {
+  const _MobileNavDestination({
+    required this.label,
+    required this.icon,
+    required this.selectedIcon,
+  });
+
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
 }
 
 class _MobileShellTopBar extends StatelessWidget {

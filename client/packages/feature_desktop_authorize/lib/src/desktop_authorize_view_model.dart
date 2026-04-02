@@ -239,6 +239,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       case 'session.control.switch_screen':
         unawaited(_handleScreenSwitch(decoded));
         break;
+      case 'session.control.quality_changed':
+        unawaited(_handleQualityChanged(decoded));
+        break;
       case 'session.control.terminate':
         unawaited(_mediaController.stop());
         break;
@@ -330,6 +333,33 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       state = state.copyWith(clearError: true);
     } catch (error) {
       AppLogger.error('desktop switch shared screen failed: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.switchSharedScreenFailed('$error'),
+      );
+    }
+  }
+
+  Future<void> _handleQualityChanged(Map<String, dynamic> event) async {
+    final payload = event['payload'];
+    if (payload is! Map<String, dynamic>) {
+      return;
+    }
+
+    final sessionId = payload['session_id'] as String?;
+    if (sessionId == null || sessionId.isEmpty) {
+      return;
+    }
+
+    final profile = _qualityProfileFromApi(payload['quality_profile'] as String?);
+
+    try {
+      await _mediaController.setPreferredQualityProfile(
+        sessionId: sessionId,
+        profile: profile,
+      );
+      state = state.copyWith(clearError: true);
+    } catch (error) {
+      AppLogger.error('desktop update capture profile failed: $error');
       state = state.copyWith(
         errorMessage: AppLocalizations.current.switchSharedScreenFailed('$error'),
       );
@@ -445,6 +475,19 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   String _desktopPlatformLabel() {
     final platform = _desktopPlatform();
     return platform[0].toUpperCase() + platform.substring(1);
+  }
+
+  QualityProfile? _qualityProfileFromApi(String? profile) {
+    switch (profile) {
+      case 'p480':
+        return QualityProfile.p480;
+      case 'p1080':
+        return QualityProfile.p1080;
+      case 'p720':
+        return QualityProfile.p720;
+      default:
+        return null;
+    }
   }
 
   Future<void> _closeChannel() async {

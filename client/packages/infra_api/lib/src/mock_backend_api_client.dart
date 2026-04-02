@@ -142,6 +142,7 @@ class MockBackendApiClient implements BackendApiClient {
   Future<List<ScreenSnapshot>> listSnapshots({
     required String accessToken,
     required String deviceId,
+    bool forceRefresh = false,
   }) async {
     const names = ['Display 1', 'Display 2'];
     return List.generate(names.length, (index) {

@@ -18,7 +18,7 @@ port_range_end = 9710
 manual_approve_timeout_seconds = 120
 
 [capture]
-snapshot_interval_seconds = 5
+snapshot_interval_seconds = 60
 snapshot_width = 480
 
 [stream]

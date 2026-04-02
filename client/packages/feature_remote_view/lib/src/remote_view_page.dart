@@ -12,15 +12,22 @@ import 'package:infra_webrtc/infra_webrtc.dart';
 import 'remote_view_state.dart';
 import 'remote_view_view_model.dart';
 
+enum RemoteViewLayout {
+  workspace,
+  monitor,
+}
+
 class RemoteViewPage extends ConsumerWidget {
   const RemoteViewPage({
     super.key,
     required this.accessToken,
     this.connectedSession,
+    this.layout = RemoteViewLayout.workspace,
   });
 
   final String accessToken;
   final RemoteSessionSummary? connectedSession;
+  final RemoteViewLayout layout;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -62,13 +69,22 @@ class RemoteViewPage extends ConsumerWidget {
                     ),
           )
         else
-          _RemoteConsoleView(
-            state: state,
-            streamState: streamState,
-            streamController: streamController,
-            vm: vm,
-            accessToken: accessToken,
-          ),
+          switch (layout) {
+            RemoteViewLayout.workspace => _RemoteWorkspaceView(
+                state: state,
+                streamState: streamState,
+                streamController: streamController,
+                vm: vm,
+                accessToken: accessToken,
+              ),
+            RemoteViewLayout.monitor => _RemoteMonitorView(
+                state: state,
+                streamState: streamState,
+                streamController: streamController,
+                vm: vm,
+                accessToken: accessToken,
+              ),
+          },
         if (state.monitorPickerVisible)
           _MonitorPickerOverlay(
             state: state,
@@ -294,8 +310,8 @@ class _LogLine extends StatelessWidget {
   }
 }
 
-class _RemoteConsoleView extends StatelessWidget {
-  const _RemoteConsoleView({
+class _RemoteWorkspaceView extends StatelessWidget {
+  const _RemoteWorkspaceView({
     required this.state,
     required this.streamState,
     required this.streamController,
@@ -312,74 +328,188 @@ class _RemoteConsoleView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selectedSnapshot = _selectedSnapshot(state);
+    final selectedScreenTitle = _selectedScreenTitle(context, state, selectedSnapshot);
 
-    return Stack(
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 90),
       children: [
-        ListView(
-          padding: const EdgeInsets.fromLTRB(0, 0, 0, 90),
-          children: [
-            Container(
-              height: 56,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(
-                color: const Color(0xFF10141A).withValues(alpha: 0.96),
-                border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.desktop_windows_rounded, size: 18),
-                  const SizedBox(width: 10),
-                  Text(
-                    context.l10n.remoteDesktopTitle,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const Spacer(),
-                  _LiveBadge(active: streamState.connected),
-                  const SizedBox(width: 10),
-                  IconButton(
-                    onPressed: () => vm.setMonitorPickerVisible(true),
-                    icon: const Icon(Icons.grid_view_rounded),
-                  ),
-                ],
-              ),
-            ),
-            _RemoteDisplayCard(
-              state: state,
-              streamState: streamState,
-              streamController: streamController,
-              selectedSnapshot: selectedSnapshot,
-            ),
-            SizedBox(
-              height: 360,
-              child: TerminalPage(
-                accessToken: accessToken,
-                deviceId: state.deviceId,
-                allowCreate: false,
-                showHeader: false,
-                compact: true,
-              ),
-            ),
-          ],
+        _RemoteHeader(
+          title: selectedScreenTitle,
+          subtitle: context.l10n.remoteDesktopTitle,
+          liveActive: streamState.connected,
+          onTapTitle: () => vm.openMonitorPicker(accessToken: accessToken),
         ),
-        Positioned(
-          right: 16,
-          bottom: 16,
+        _RemoteDisplayCard(
+          state: state,
+          streamState: streamState,
+          streamController: streamController,
+          selectedSnapshot: selectedSnapshot,
+          preferLiveOnly: true,
+          placeholderLabel: state.sessionId == null
+              ? null
+              : context.l10n.waitingScreenFrame(
+                  state.sessionId!,
+                  state.sessionState ?? 'connecting',
+                ),
+          onToggleFullscreen: () => vm.rotate(ViewOrientationMode.landscape),
+        ),
+        SizedBox(
+          height: 360,
+          child: TerminalPage(
+            accessToken: accessToken,
+            deviceId: state.deviceId,
+            allowCreate: false,
+            showHeader: false,
+            compact: true,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _RemoteMonitorView extends StatelessWidget {
+  const _RemoteMonitorView({
+    required this.state,
+    required this.streamState,
+    required this.streamController,
+    required this.vm,
+    required this.accessToken,
+  });
+
+  final RemoteViewState state;
+  final RemoteStreamState streamState;
+  final RemoteStreamController streamController;
+  final RemoteViewViewModel vm;
+  final String accessToken;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    final selectedSnapshot = _selectedSnapshot(state);
+    final selectedScreenTitle = _selectedScreenTitle(context, state, selectedSnapshot);
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(0, 0, 0, 90),
+      children: [
+        _RemoteHeader(
+          title: selectedScreenTitle,
+          subtitle: l10n.displayDetectedLabel(state.snapshots.length),
+          liveActive: streamState.connected,
+          onTapTitle: () => vm.openMonitorPicker(accessToken: accessToken),
+        ),
+        _RemoteDisplayCard(
+          state: state,
+          streamState: streamState,
+          streamController: streamController,
+          selectedSnapshot: selectedSnapshot,
+          preferLiveOnly: true,
+          placeholderLabel: state.sessionId == null
+              ? null
+              : l10n.waitingScreenFrame(
+                  state.sessionId!,
+                  state.sessionState ?? 'connecting',
+                ),
+          onToggleFullscreen: () => vm.rotate(ViewOrientationMode.landscape),
+        ),
+        _MonitorStrip(
+          state: state,
+          accessToken: accessToken,
+          vm: vm,
+          selectedSnapshot: selectedSnapshot,
+        ),
+      ],
+    );
+  }
+}
+
+class _RemoteHeader extends StatelessWidget {
+  const _RemoteHeader({
+    required this.title,
+    required this.subtitle,
+    required this.liveActive,
+    this.onTapTitle,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool liveActive;
+  final VoidCallback? onTapTitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+    final titleContent = Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: palette.surfaceRaised,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+          ),
+          child: Icon(Icons.desktop_windows_rounded, size: 18, color: palette.primaryBright),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
           child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _FloatingShortcut(
-                onTap: () => vm.setMonitorPickerVisible(true),
-                child: const Icon(Icons.desktop_windows_rounded, size: 22),
+              Text(
+                subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: palette.textMuted,
+                      fontFamily: 'JetBrains Mono',
+                      fontWeight: FontWeight.w700,
+                    ),
               ),
-              const SizedBox(height: 10),
-              _FloatingShortcut(
-                onTap: () => vm.rotate(ViewOrientationMode.landscape),
-                accent: true,
-                child: const Text('M1', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 12)),
+              const SizedBox(height: 2),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 18),
+                    ),
+                  ),
+                  if (onTapTitle != null) ...[
+                    const SizedBox(width: 4),
+                    Icon(Icons.keyboard_arrow_down_rounded, color: palette.primaryBright),
+                  ],
+                ],
               ),
             ],
           ),
         ),
       ],
+    );
+
+    return Container(
+      height: 64,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF10141A).withValues(alpha: 0.96),
+        border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: InkWell(
+              onTap: onTapTitle,
+              borderRadius: BorderRadius.circular(14),
+              child: titleContent,
+            ),
+          ),
+          const SizedBox(width: 12),
+          _LiveBadge(active: liveActive),
+        ],
+      ),
     );
   }
 }
@@ -390,12 +520,18 @@ class _RemoteDisplayCard extends StatelessWidget {
     required this.streamState,
     required this.streamController,
     required this.selectedSnapshot,
+    this.preferLiveOnly = false,
+    this.placeholderLabel,
+    this.onToggleFullscreen,
   });
 
   final RemoteViewState state;
   final RemoteStreamState streamState;
   final RemoteStreamController streamController;
   final ScreenSnapshot? selectedSnapshot;
+  final bool preferLiveOnly;
+  final String? placeholderLabel;
+  final VoidCallback? onToggleFullscreen;
 
   @override
   Widget build(BuildContext context) {
@@ -424,6 +560,8 @@ class _RemoteDisplayCard extends StatelessWidget {
                       child: _RemoteSurface(
                         streamController: streamController,
                         selectedSnapshot: selectedSnapshot,
+                        preferLiveOnly: preferLiveOnly,
+                        placeholderLabel: placeholderLabel,
                       ),
                     ),
                   ),
@@ -451,6 +589,15 @@ class _RemoteDisplayCard extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (onToggleFullscreen != null)
+                    Positioned(
+                      right: 14,
+                      bottom: 14,
+                      child: _GlassDisplayActionButton(
+                        icon: Icons.fullscreen_rounded,
+                        onPressed: onToggleFullscreen!,
+                      ),
+                    ),
                   Positioned(
                     left: 0,
                     right: 0,
@@ -556,10 +703,14 @@ class _RemoteSurface extends StatelessWidget {
   const _RemoteSurface({
     required this.streamController,
     required this.selectedSnapshot,
+    this.preferLiveOnly = false,
+    this.placeholderLabel,
   });
 
   final RemoteStreamController streamController;
   final ScreenSnapshot? selectedSnapshot;
+  final bool preferLiveOnly;
+  final String? placeholderLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -568,7 +719,7 @@ class _RemoteSurface extends StatelessWidget {
       return RTCVideoView(renderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain);
     }
 
-    if (selectedSnapshot != null) {
+    if (!preferLiveOnly && selectedSnapshot != null) {
       return _SnapshotPreview(snapshot: selectedSnapshot!);
     }
 
@@ -583,8 +734,28 @@ class _RemoteSurface extends StatelessWidget {
           ],
         ),
       ),
-      child: const Center(
-        child: Icon(Icons.desktop_windows_rounded, size: 72, color: Colors.white24),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.desktop_windows_rounded, size: 72, color: Colors.white24),
+              if (placeholderLabel != null) ...[
+                const SizedBox(height: 14),
+                Text(
+                  placeholderLabel!,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Colors.white60,
+                        fontFamily: 'JetBrains Mono',
+                        height: 1.5,
+                      ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -608,6 +779,7 @@ class _FullscreenRemoteViewer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final selectedSnapshot = _selectedSnapshot(state);
+    final selectedScreenTitle = _selectedScreenTitle(context, state, selectedSnapshot);
 
     return Stack(
       children: [
@@ -615,6 +787,13 @@ class _FullscreenRemoteViewer extends StatelessWidget {
           child: _RemoteSurface(
             streamController: streamController,
             selectedSnapshot: selectedSnapshot,
+            preferLiveOnly: true,
+            placeholderLabel: state.sessionId == null
+                ? null
+                : context.l10n.waitingScreenFrame(
+                    state.sessionId!,
+                    state.sessionState ?? 'connecting',
+                  ),
           ),
         ),
         Positioned(
@@ -625,13 +804,15 @@ class _FullscreenRemoteViewer extends StatelessWidget {
             child: Row(
               children: [
                 _FullscreenActionButton(
-                  icon: Icons.screen_rotation_alt_outlined,
+                  icon: Icons.fullscreen_exit_rounded,
                   onPressed: () => vm.rotate(ViewOrientationMode.portrait),
                 ),
-                const Spacer(),
-                _FullscreenActionButton(
-                  icon: Icons.grid_view_rounded,
-                  onPressed: () => vm.setMonitorPickerVisible(true),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _FullscreenTitleButton(
+                    title: selectedScreenTitle,
+                    onPressed: () => vm.openMonitorPicker(accessToken: accessToken),
+                  ),
                 ),
                 const SizedBox(width: 8),
                 _FullscreenActionButton(
@@ -678,6 +859,172 @@ class _FullscreenRemoteViewer extends StatelessWidget {
             vm: vm,
           ),
       ],
+    );
+  }
+}
+
+class _MonitorStrip extends StatelessWidget {
+  const _MonitorStrip({
+    required this.state,
+    required this.accessToken,
+    required this.vm,
+    required this.selectedSnapshot,
+  });
+
+  final RemoteViewState state;
+  final String accessToken;
+  final RemoteViewViewModel vm;
+  final ScreenSnapshot? selectedSnapshot;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+    final l10n = context.l10n;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 2, 12, 10),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0F141A),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  l10n.monitors.toUpperCase(),
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(fontSize: 16),
+                ),
+                const Spacer(),
+                Text(
+                  l10n.displayDetectedLabel(state.snapshots.length),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textMuted,
+                        fontFamily: 'JetBrains Mono',
+                      ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            if (state.snapshots.isEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  l10n.waitingScreenFrame(
+                    state.sessionId ?? '-',
+                    state.sessionState ?? 'connecting',
+                  ),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textMuted,
+                        fontFamily: 'JetBrains Mono',
+                        height: 1.5,
+                      ),
+                ),
+              )
+            else
+              SizedBox(
+                height: 170,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: state.snapshots.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 12),
+                  itemBuilder: (context, index) {
+                    final snapshot = state.snapshots[index];
+                    final active = snapshot.screenId == state.selectedScreenId ||
+                        (state.selectedScreenId == null &&
+                            selectedSnapshot != null &&
+                            snapshot.screenId == selectedSnapshot!.screenId);
+                    return _MonitorPreviewCard(
+                      snapshot: snapshot,
+                      active: active,
+                      onTap: () => vm.selectScreen(
+                        accessToken: accessToken,
+                        screenId: snapshot.screenId,
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MonitorPreviewCard extends StatelessWidget {
+  const _MonitorPreviewCard({
+    required this.snapshot,
+    required this.active,
+    required this.onTap,
+  });
+
+  final ScreenSnapshot snapshot;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        width: 188,
+        decoration: BoxDecoration(
+          color: active ? palette.primaryBright.withValues(alpha: 0.06) : const Color(0xFF151A20),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: active ? palette.primaryBright : Colors.white.withValues(alpha: 0.05),
+            width: active ? 1.3 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+                child: _SnapshotPreview(snapshot: snapshot),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    snapshot.name.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '${snapshot.width} x ${snapshot.height}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: palette.textMuted,
+                          fontFamily: 'JetBrains Mono',
+                        ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -879,57 +1226,101 @@ class _FullscreenActionButton extends StatelessWidget {
   }
 }
 
-class _FloatingShortcut extends StatelessWidget {
-  const _FloatingShortcut({
-    required this.onTap,
-    required this.child,
-    this.accent = false,
+class _FullscreenTitleButton extends StatelessWidget {
+  const _FullscreenTitleButton({
+    required this.title,
+    this.onPressed,
   });
 
-  final VoidCallback onTap;
-  final Widget child;
-  final bool accent;
+  final String title;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.freeloom;
 
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        width: 46,
-        height: 46,
-        decoration: BoxDecoration(
-          color: accent ? palette.primary : palette.surfaceRaised,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: accent ? palette.primaryBright : Colors.white.withValues(alpha: 0.06),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.28),
-              blurRadius: 16,
-              offset: const Offset(0, 10),
-            ),
-          ],
-        ),
-        child: Center(
-          child: DefaultTextStyle(
-            style: TextStyle(
-              color: accent ? const Color(0xFF07120D) : Colors.white,
-            ),
-            child: IconTheme(
-              data: IconThemeData(
-                color: accent ? const Color(0xFF07120D) : Colors.white,
+    return Material(
+      color: Colors.black54,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        onTap: onPressed,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          height: 46,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          alignment: Alignment.centerLeft,
+          child: Row(
+            children: [
+              Icon(Icons.desktop_windows_rounded, size: 18, color: palette.primaryBright),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
               ),
-              child: child,
+              if (onPressed != null) ...[
+                const SizedBox(width: 6),
+                Icon(Icons.keyboard_arrow_down_rounded, color: palette.primaryBright),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _GlassDisplayActionButton extends StatelessWidget {
+  const _GlassDisplayActionButton({
+    required this.icon,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(999),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.28),
+          borderRadius: BorderRadius.circular(999),
+          child: InkWell(
+            onTap: onPressed,
+            borderRadius: BorderRadius.circular(999),
+            child: Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+              ),
+              child: Icon(icon, color: Colors.white),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+String _selectedScreenTitle(
+  BuildContext context,
+  RemoteViewState state,
+  ScreenSnapshot? selectedSnapshot,
+) {
+  return selectedSnapshot?.name.toUpperCase() ??
+      state.selectedScreenId?.toUpperCase() ??
+      context.l10n.mainDisplayLabel;
 }
 
 class _LiveBadge extends StatelessWidget {

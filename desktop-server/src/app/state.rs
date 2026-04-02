@@ -38,6 +38,7 @@ impl AppState {
             terminal_manager: Arc::new(TerminalManager::new(
                 config.backend.base_url.clone(),
                 config.backend.device_id.clone(),
+                local_events.clone(),
             )),
             config: Arc::new(config),
             logger,

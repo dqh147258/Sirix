@@ -105,6 +105,30 @@ class TerminalSessionSummary {
   final int rows;
   final DateTime createdAt;
   final DateTime? closedAt;
+
+  TerminalSessionSummary copyWith({
+    String? title,
+    String? shell,
+    String? cwd,
+    String? state,
+    int? cols,
+    int? rows,
+    DateTime? closedAt,
+    bool clearClosedAt = false,
+  }) {
+    return TerminalSessionSummary(
+      id: id,
+      deviceId: deviceId,
+      title: title ?? this.title,
+      shell: shell ?? this.shell,
+      cwd: cwd ?? this.cwd,
+      state: state ?? this.state,
+      cols: cols ?? this.cols,
+      rows: rows ?? this.rows,
+      createdAt: createdAt,
+      closedAt: clearClosedAt ? null : (closedAt ?? this.closedAt),
+    );
+  }
 }
 
 enum WebrtcSignalType {

@@ -234,7 +234,7 @@ pub async fn list_terminals(
                     "SELECT t.id, t.device_id, t.title, t.shell, t.cwd, t.state, t.cols, t.rows, t.created_at, t.closed_at
                      FROM terminal_sessions t
                      JOIN devices d ON d.id = t.device_id
-                     WHERE d.user_id = $1 AND t.device_id = $2
+                     WHERE d.user_id = $1 AND t.device_id = $2 AND t.state <> 'closed'
                      ORDER BY t.updated_at DESC",
                     &[&user_id, &device_id],
                 )
@@ -247,7 +247,7 @@ pub async fn list_terminals(
                     "SELECT t.id, t.device_id, t.title, t.shell, t.cwd, t.state, t.cols, t.rows, t.created_at, t.closed_at
                      FROM terminal_sessions t
                      JOIN devices d ON d.id = t.device_id
-                     WHERE d.user_id = $1
+                     WHERE d.user_id = $1 AND t.state <> 'closed'
                      ORDER BY t.updated_at DESC",
                     &[&user_id],
                 )

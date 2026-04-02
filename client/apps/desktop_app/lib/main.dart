@@ -492,6 +492,7 @@ class _DesktopDashboardPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
     final palette = context.freeloom;
     return Column(children: [
       // --- PRIMARY DISPLAY ---
@@ -642,221 +643,15 @@ class _DesktopDashboardPage extends ConsumerWidget {
       // --- TERMINAL AREA ---
       Expanded(
           flex: 1,
-          child: Container(
-              color: const Color(0xFF0C0E11),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // Tabs
-                    Container(
-                        height: 40,
-                        color: const Color(0xFF1A1C1F),
-                        child: Row(children: [
-                          Container(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF333538),
-                                border: Border(
-                                    left: BorderSide(
-                                        color: palette.primaryBright,
-                                        width: 2)),
-                              ),
-                              child: Row(children: [
-                                Icon(Icons.terminal,
-                                    size: 14, color: palette.primaryBright),
-                                const SizedBox(width: 8),
-                                const Text('BASH: REMOTE-NODE-4',
-                                    style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.bold,
-                                        color: Colors.white,
-                                        letterSpacing: 1.2)),
-                                const SizedBox(width: 8),
-                                Icon(Icons.close,
-                                    size: 12, color: palette.textMuted),
-                              ])),
-                          Container(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                              child: Row(children: [
-                                Icon(Icons.storage,
-                                    size: 14, color: palette.textMuted),
-                                const SizedBox(width: 8),
-                                Text('SSH: DB-CLUSTER-PROD',
-                                    style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w500,
-                                        color: palette.textMuted,
-                                        letterSpacing: 1.2)),
-                              ])),
-                          Container(
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                              child: Row(children: [
-                                Icon(Icons.analytics,
-                                    size: 14, color: palette.textMuted),
-                                const SizedBox(width: 8),
-                                Text('PYTHON: DATA-PROC',
-                                    style: TextStyle(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w500,
-                                        color: palette.textMuted,
-                                        letterSpacing: 1.2)),
-                              ])),
-                          Padding(
-                            padding: const EdgeInsets.all(8.0),
-                            child: Icon(Icons.add,
-                                size: 16, color: palette.textMuted),
-                          )
-                        ])),
-                    // Terminal body
-                    Expanded(
-                        child: Padding(
-                            padding: const EdgeInsets.all(24.0),
-                            child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  RichText(
-                                      text: TextSpan(
-                                          style: const TextStyle(
-                                              fontFamily: 'JetBrains Mono',
-                                              fontSize: 13),
-                                          children: [
-                                        TextSpan(
-                                            text: 'remote@node-04 ',
-                                            style: TextStyle(
-                                                color: palette.primary)),
-                                        TextSpan(
-                                            text: '~ ',
-                                            style: TextStyle(
-                                                color: palette.textMuted)),
-                                        TextSpan(
-                                            text: '\$ ',
-                                            style: TextStyle(
-                                                color: palette.secondary)),
-                                        const TextSpan(
-                                            text: 'tail -f /var/log/system.log',
-                                            style:
-                                                TextStyle(color: Colors.white)),
-                                      ])),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                      '[2023-10-27 14:02:11] INFO: Initializing kernel modules...',
-                                      style: TextStyle(
-                                          color: palette.textMuted
-                                              .withValues(alpha: 0.6),
-                                          fontFamily: 'JetBrains Mono',
-                                          fontSize: 13)),
-                                  Text(
-                                      '[2023-10-27 14:02:12] DEBUG: Checking network heartbeat on eth0',
-                                      style: TextStyle(
-                                          color: palette.textMuted
-                                              .withValues(alpha: 0.6),
-                                          fontFamily: 'JetBrains Mono',
-                                          fontSize: 13)),
-                                  Text(
-                                      '[2023-10-27 14:02:12] SUCCESS: Handshake established with 192.168.1.1',
-                                      style: TextStyle(
-                                          color: palette.primaryBright
-                                              .withValues(alpha: 0.8),
-                                          fontFamily: 'JetBrains Mono',
-                                          fontSize: 13)),
-                                  Text(
-                                      '[2023-10-27 14:02:14] WARN: Memory pressure detected on node_cluster_b',
-                                      style: TextStyle(
-                                          color: palette.textMuted
-                                              .withValues(alpha: 0.6),
-                                          fontFamily: 'JetBrains Mono',
-                                          fontSize: 13)),
-                                  Text(
-                                      '[2023-10-27 14:02:15] INFO: Orchestrator syncing state with peer 0xc042',
-                                      style: TextStyle(
-                                          color: palette.textMuted
-                                              .withValues(alpha: 0.6),
-                                          fontFamily: 'JetBrains Mono',
-                                          fontSize: 13)),
-                                  const SizedBox(height: 16),
-                                  RichText(
-                                      text: TextSpan(
-                                          style: const TextStyle(
-                                              fontFamily: 'JetBrains Mono',
-                                              fontSize: 13),
-                                          children: [
-                                        TextSpan(
-                                            text: 'remote@node-04 ',
-                                            style: TextStyle(
-                                                color: palette.primary)),
-                                        TextSpan(
-                                            text: '~ ',
-                                            style: TextStyle(
-                                                color: palette.textMuted)),
-                                        TextSpan(
-                                            text: '\$ ',
-                                            style: TextStyle(
-                                                color: palette.secondary)),
-                                      ])),
-                                  Container(
-                                      width: 8,
-                                      height: 16,
-                                      color: palette.primaryBright,
-                                      margin: const EdgeInsets.only(
-                                          left: 170, top: 4))
-                                ]))),
-                    // Terminal Footer
-                    Container(
-                        height: 24,
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1E2023),
-                          border: Border(
-                              top: BorderSide(
-                                  color: Colors.white.withValues(alpha: 0.05))),
-                        ),
-                        child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Row(children: [
-                                Container(
-                                    width: 6,
-                                    height: 6,
-                                    decoration: BoxDecoration(
-                                        color: palette.primaryBright,
-                                        shape: BoxShape.circle),
-                                    margin: const EdgeInsets.only(right: 8)),
-                                const Text('CONNECTION STABLE',
-                                    style: TextStyle(
-                                        fontSize: 9,
-                                        color: Colors.white,
-                                        letterSpacing: 1.2)),
-                                const SizedBox(width: 24),
-                                Text('ENCODING: UTF-8',
-                                    style: TextStyle(
-                                        fontSize: 9,
-                                        color: palette.textMuted,
-                                        letterSpacing: 1.2)),
-                                const SizedBox(width: 24),
-                                Text('COL: 142 ROW: 45',
-                                    style: TextStyle(
-                                        fontSize: 9,
-                                        color: palette.textMuted,
-                                        letterSpacing: 1.2)),
-                              ]),
-                              Row(children: [
-                                Text('MASTER NODE',
-                                    style: TextStyle(
-                                        fontSize: 9,
-                                        color: palette.secondary,
-                                        letterSpacing: 1.2)),
-                                const SizedBox(width: 16),
-                                Text('V2.4.1-STABLE',
-                                    style: TextStyle(
-                                        fontSize: 9,
-                                        color: palette.textMuted,
-                                        letterSpacing: 1.2)),
-                              ])
-                            ]))
-                  ])))
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: TerminalPage(
+              accessToken: session.accessToken,
+              deviceId: authorizeState.registeredDeviceId,
+              showHeader: false,
+              compact: true,
+            ),
+          ))
     ]);
   }
 }
@@ -1017,5 +812,4 @@ class _InfoBlock extends StatelessWidget {
     );
   }
 }
-
 

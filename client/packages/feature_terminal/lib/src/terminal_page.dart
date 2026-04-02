@@ -1,13 +1,13 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:xterm/xterm.dart';
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
+
+import 'terminal_view_model.dart';
 
 class TerminalPage extends ConsumerStatefulWidget {
   const TerminalPage({
@@ -31,311 +31,141 @@ class TerminalPage extends ConsumerStatefulWidget {
 
 class _TerminalPageState extends ConsumerState<TerminalPage> {
   final TerminalTheme _theme = TerminalThemes.defaultTheme;
-  Terminal _terminal = Terminal(maxLines: 10000);
-  List<TerminalSessionSummary> _terminals = const [];
-  String? _activeTerminalId;
-  String? _errorMessage;
-  bool _loading = true;
-  bool _connecting = false;
-  WebSocketChannel? _channel;
-  StreamSubscription<dynamic>? _subscription;
+  final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
+  late Terminal _terminal;
+  StreamSubscription<TerminalUiEvent>? _uiSubscription;
+  late TerminalPageConfig _config;
+  bool _resetScheduled = false;
 
   @override
   void initState() {
     super.initState();
-    _bindTerminalCallbacks();
-    Future.microtask(_loadTerminals);
+    _config = _buildConfig();
+    _terminal = _createTerminal();
+    _bindViewModel(load: true, resetTerminal: false);
   }
 
   @override
   void didUpdateWidget(covariant TerminalPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.deviceId != widget.deviceId || oldWidget.accessToken != widget.accessToken) {
-      Future.microtask(_loadTerminals);
+    final nextConfig = _buildConfig();
+    if (_config == nextConfig) {
+      return;
     }
+
+    _config = nextConfig;
+    _bindViewModel(load: true, resetTerminal: true);
   }
 
   @override
   void dispose() {
-    unawaited(_detachChannel());
+    final subscription = _uiSubscription;
+    _uiSubscription = null;
+    unawaited(subscription?.cancel());
+    _focusNode.dispose();
     super.dispose();
   }
 
-  Future<void> _loadTerminals() async {
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _loading = true;
-      _errorMessage = null;
-    });
+  TerminalPageConfig _buildConfig() {
+    return TerminalPageConfig(
+      accessToken: widget.accessToken,
+      deviceId: widget.deviceId,
+      allowCreate: widget.allowCreate,
+    );
+  }
 
-    try {
-      final api = ref.read(backendApiClientProvider);
-      final terminals = await api.listTerminals(
-        accessToken: widget.accessToken,
-        deviceId: widget.deviceId,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _terminals = terminals;
-        _loading = false;
-      });
-      if (terminals.isNotEmpty) {
-        await _attachTerminal(terminals.first.id);
-      } else {
-        await _detachChannel();
-        _resetTerminal();
-      }
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _loading = false;
-        _errorMessage = AppLocalizations.current.terminalLoadFailed('$error');
-      });
+  Terminal _createTerminal() {
+    final terminal = Terminal(maxLines: 10000);
+    _bindTerminalCallbacks(terminal);
+    return terminal;
+  }
+
+  void _bindTerminalCallbacks(Terminal terminal) {
+    terminal.onOutput = (data) {
+      ref.read(terminalViewModelProvider(_config).notifier).queueInput(data);
+    };
+    terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      ref
+          .read(terminalViewModelProvider(_config).notifier)
+          .queueResize(cols: width, rows: height);
+    };
+  }
+
+  void _bindViewModel({
+    required bool load,
+    required bool resetTerminal,
+  }) {
+    final previousSubscription = _uiSubscription;
+    _uiSubscription = null;
+    unawaited(previousSubscription?.cancel());
+    final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+    _uiSubscription = viewModel.events.listen(_handleUiEvent);
+
+    if (resetTerminal) {
+      _resetTerminal(notify: false);
+    } else {
+      _bindTerminalCallbacks(_terminal);
+    }
+
+    if (load) {
+      Future.microtask(() => viewModel.load());
     }
   }
 
-  Future<void> _createTerminal() async {
-    final deviceId = widget.deviceId;
-    if (deviceId == null) {
-      return;
-    }
-    setState(() {
-      _errorMessage = null;
-    });
-
-    try {
-      final api = ref.read(backendApiClientProvider);
-      final created = await api.createTerminal(
-        accessToken: widget.accessToken,
-        targetDeviceId: deviceId,
-        cols: 120,
-        rows: 32,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _terminals = [created, ..._terminals];
-      });
-      await _attachTerminal(created.id);
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _errorMessage = AppLocalizations.current.terminalCreateFailed('$error');
-      });
-    }
-  }
-
-  Future<void> _closeActiveTerminal() async {
-    final terminalId = _activeTerminalId;
-    if (terminalId == null) {
-      return;
-    }
-    try {
-      final api = ref.read(backendApiClientProvider);
-      await api.closeTerminal(accessToken: widget.accessToken, terminalId: terminalId);
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _terminals = _terminals.where((item) => item.id != terminalId).toList(growable: false);
-        _activeTerminalId = null;
-      });
-      _resetTerminal();
-      await _detachChannel();
-      if (_terminals.isNotEmpty) {
-        await _attachTerminal(_terminals.first.id);
-      }
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _errorMessage = AppLocalizations.current.terminalCloseFailed('$error');
-      });
-    }
-  }
-
-  Future<void> _attachTerminal(String terminalId) async {
-    if (_activeTerminalId == terminalId) {
-      return;
-    }
-
-    final eventClient = ref.read(backendEventClientProvider);
-    if (eventClient == null) {
-      setState(() {
-        _activeTerminalId = terminalId;
-        _errorMessage = AppLocalizations.current.terminalStreamUnavailable;
-      });
-      return;
-    }
-
-    await _detachChannel();
-    _resetTerminal();
-    setState(() {
-      _activeTerminalId = terminalId;
-      _connecting = true;
-      _errorMessage = null;
-    });
-
-    try {
-      final channel = eventClient.connectTerminalEvents(
-        accessToken: widget.accessToken,
-        terminalId: terminalId,
-      );
-      _channel = channel;
-      _subscription = channel.stream.listen(
-        _handleSocketEvent,
-        onError: (error) {
-          if (mounted) {
-            setState(() {
-              _connecting = false;
-              _errorMessage = AppLocalizations.current.terminalStreamError('$error');
-            });
-          }
-        },
-        onDone: () {
-          if (mounted) {
-            setState(() {
-              _connecting = false;
-            });
-          }
-        },
-      );
-      if (mounted) {
-        setState(() {
-          _connecting = false;
-        });
-      }
-    } catch (error) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _connecting = false;
-        _errorMessage = AppLocalizations.current.terminalConnectFailed('$error');
-      });
-    }
-  }
-
-  Future<void> _detachChannel() async {
-    await _subscription?.cancel();
-    _subscription = null;
-    await _channel?.sink.close();
-    _channel = null;
-  }
-
-  void _handleSocketEvent(dynamic raw) {
-    final payload = BackendEventClient.decodeEvent(raw);
-    if (payload == null) {
-      return;
-    }
-
-    final type = payload['type'] as String?;
-    final body = payload['payload'] as Map<String, dynamic>?;
-    if (type == null || body == null) {
-      return;
-    }
-
-    switch (type) {
-      case 'terminal.ready':
-        final title = body['title'] as String?;
-        if (title != null && mounted) {
-          setState(() {
-            _terminals = [
-              for (final item in _terminals)
-                if (item.id == _activeTerminalId)
-                  TerminalSessionSummary(
-                    id: item.id,
-                    deviceId: item.deviceId,
-                    title: title,
-                    shell: body['shell'] as String? ?? item.shell,
-                    cwd: body['cwd'] as String? ?? item.cwd,
-                    state: body['state'] as String? ?? item.state,
-                    cols: body['cols'] as int? ?? item.cols,
-                    rows: body['rows'] as int? ?? item.rows,
-                    createdAt: item.createdAt,
-                    closedAt: item.closedAt,
-                  )
-                else
-                  item,
-            ];
-          });
-        }
+  void _handleUiEvent(TerminalUiEvent event) {
+    switch (event.type) {
+      case TerminalUiEventType.reset:
+        _resetTerminal(defer: true);
         break;
-      case 'terminal.output':
-        final data = body['data_base64'] as String?;
-        if (data == null) {
+      case TerminalUiEventType.output:
+        _terminal.write(event.text);
+        break;
+    }
+  }
+
+  void _resetTerminal({
+    bool notify = true,
+    bool defer = false,
+  }) {
+    void applyReset() {
+      _terminal = _createTerminal();
+      if (mounted && notify) {
+        setState(() {});
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _focusNode.requestFocus();
+        }
+      });
+    }
+
+    if (defer) {
+      if (_resetScheduled) {
+        return;
+      }
+      _resetScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _resetScheduled = false;
+        if (!mounted) {
           return;
         }
-        final bytes = base64Decode(data);
-        _terminal.write(const Utf8Decoder(allowMalformed: true).convert(bytes));
-        break;
-      case 'terminal.closed':
-        _terminal.write('\r\n[terminal closed]\r\n');
-        break;
-      case 'terminal.error':
-        final message = body['error_message'] as String? ?? 'unknown';
-        _terminal.write('\r\n[terminal error] $message\r\n');
-        break;
-      default:
-        break;
+        applyReset();
+      });
+      return;
     }
-  }
 
-  void _bindTerminalCallbacks() {
-    _terminal.onOutput = (data) {
-      final channel = _channel;
-      if (channel == null) {
-        return;
-      }
-      channel.sink.add(
-        jsonEncode({
-          'type': 'terminal.input',
-          'data_base64': base64Encode(utf8.encode(data)),
-        }),
-      );
-    };
-    _terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-      final channel = _channel;
-      if (channel == null) {
-        return;
-      }
-      channel.sink.add(
-        jsonEncode({
-          'type': 'terminal.resize',
-          'cols': width,
-          'rows': height,
-        }),
-      );
-    };
-  }
-
-  void _resetTerminal() {
-    _terminal = Terminal(maxLines: 10000);
-    _bindTerminalCallbacks();
-    if (mounted) {
-      setState(() {});
-    }
+    applyReset();
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.freeloom;
     final l10n = context.l10n;
-    final activeTerminal = _terminals.cast<TerminalSessionSummary?>().firstWhere(
-          (item) => item?.id == _activeTerminalId,
-          orElse: () => _terminals.isEmpty ? null : _terminals.first,
-        );
+    final state = ref.watch(terminalViewModelProvider(_config));
+    final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+    final activeTerminal = state.activeTerminal;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
+    final canCreate = widget.allowCreate && widget.deviceId != null;
 
     return Column(
       children: [
@@ -367,26 +197,26 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                 _ActionIconButton(
                   icon: Icons.refresh_rounded,
                   tooltip: l10n.refresh,
-                  onPressed: _loadTerminals,
+                  onPressed: () => unawaited(viewModel.refresh()),
                 ),
-                if (widget.allowCreate && widget.deviceId != null) ...[
+                if (canCreate) ...[
                   const SizedBox(width: 8),
                   _ActionIconButton(
                     icon: Icons.add_rounded,
                     tooltip: l10n.createTerminal,
-                    onPressed: _createTerminal,
+                    onPressed: () => unawaited(viewModel.createTerminal()),
                   ),
                 ],
                 const SizedBox(width: 8),
                 _ActionIconButton(
                   icon: Icons.close_rounded,
                   tooltip: l10n.disconnectSession,
-                  onPressed: _closeActiveTerminal,
+                  onPressed: () => unawaited(viewModel.closeActiveTerminal()),
                 ),
               ],
             ),
           ),
-        if (_errorMessage != null)
+        if (state.errorMessage != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: Container(
@@ -398,7 +228,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                 border: Border.all(color: palette.error.withValues(alpha: 0.24)),
               ),
               child: Text(
-                _errorMessage!,
+                state.errorMessage!,
                 style: TextStyle(color: palette.error),
               ),
             ),
@@ -416,28 +246,34 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
               right: BorderSide(color: palette.glassStroke),
             ),
           ),
-          child: _loading
-              ? const Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)))
+          child: state.loading
+              ? const Center(
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
               : Row(
                   children: [
                     Expanded(
                       child: ListView.separated(
                         scrollDirection: Axis.horizontal,
-                        itemCount: _terminals.length,
+                        itemCount: state.terminals.length,
                         separatorBuilder: (_, __) => const SizedBox(width: 4),
                         itemBuilder: (context, index) {
-                          final item = _terminals[index];
+                          final item = state.terminals[index];
                           return _TerminalTab(
                             summary: item,
-                            selected: item.id == _activeTerminalId,
-                            onTap: () => _attachTerminal(item.id),
+                            selected: item.id == state.activeTerminalId,
+                            onTap: () => viewModel.attachTerminal(item.id),
                           );
                         },
                       ),
                     ),
-                    if (widget.allowCreate && widget.deviceId != null)
+                    if (canCreate)
                       IconButton(
-                        onPressed: _createTerminal,
+                        onPressed: () => unawaited(viewModel.createTerminal()),
                         icon: const Icon(Icons.add, size: 18),
                         splashRadius: 18,
                       ),
@@ -462,23 +298,24 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                   Expanded(
                     child: Stack(
                       children: [
-                        if (_terminals.isEmpty && !_loading)
-                          _TerminalEmptyState(canCreate: widget.allowCreate && widget.deviceId != null),
+                        if (state.terminals.isEmpty && !state.loading)
+                          _TerminalEmptyState(canCreate: canCreate),
                         Positioned.fill(
                           child: IgnorePointer(
-                            ignoring: _terminals.isEmpty,
+                            ignoring: state.terminals.isEmpty,
                             child: Padding(
                               padding: const EdgeInsets.fromLTRB(14, 16, 14, 8),
                               child: TerminalView(
                                 _terminal,
                                 theme: _theme,
+                                focusNode: _focusNode,
                                 autofocus: true,
                                 backgroundOpacity: 0,
                               ),
                             ),
                           ),
                         ),
-                        if (_connecting)
+                        if (state.connecting)
                           Positioned(
                             top: 14,
                             right: 14,
@@ -501,32 +338,10 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                       ],
                     ),
                   ),
-                  Container(
-                    height: 24,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF11161C),
-                      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(18)),
-                      border: Border(top: BorderSide(color: palette.glassStroke)),
-                    ),
-                    child: Row(
-                      children: [
-                        _StatusText(
-                          color: palette.primaryBright,
-                          text: l10n.terminalStable,
-                        ),
-                        const SizedBox(width: 16),
-                        _StatusText(text: 'UTF-8'),
-                        const SizedBox(width: 16),
-                        _StatusText(
-                          text: activeTerminal == null
-                              ? '--'
-                              : 'COL ${activeTerminal.cols}  ROW ${activeTerminal.rows}',
-                        ),
-                        const Spacer(),
-                        _StatusText(text: statusLabel),
-                      ],
-                    ),
+                  _TerminalFooter(
+                    activeTerminal: activeTerminal,
+                    compact: widget.compact,
+                    statusLabel: statusLabel,
                   ),
                 ],
               ),
@@ -618,8 +433,8 @@ class _TerminalTab extends StatelessWidget {
                 style: TextStyle(
                   color: selected ? palette.textPrimary : palette.textSecondary,
                   fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  fontFamily: 'JetBrains Mono',
+                  fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                  letterSpacing: 1.2,
                 ),
               ),
             ),
@@ -631,9 +446,7 @@ class _TerminalTab extends StatelessWidget {
 }
 
 class _TerminalEmptyState extends StatelessWidget {
-  const _TerminalEmptyState({
-    required this.canCreate,
-  });
+  const _TerminalEmptyState({required this.canCreate});
 
   final bool canCreate;
 
@@ -648,20 +461,18 @@ class _TerminalEmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.terminal, size: 42, color: palette.primaryBright),
-            const SizedBox(height: 14),
-            Text(
-              l10n.noTerminalSession,
-              style: Theme.of(context).textTheme.titleLarge,
+            Icon(
+              Icons.terminal_rounded,
+              size: 42,
+              color: palette.textMuted,
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
             Text(
-              canCreate ? l10n.noTerminalSessionHint : l10n.terminalTargetMissing,
+              canCreate ? l10n.terminalCapabilityHint : l10n.terminalStreamUnavailable,
               textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: palette.textMuted,
-                height: 1.5,
-              ),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: palette.textSecondary,
+                  ),
             ),
           ],
         ),
@@ -670,28 +481,72 @@ class _TerminalEmptyState extends StatelessWidget {
   }
 }
 
-class _StatusText extends StatelessWidget {
-  const _StatusText({
-    this.color,
-    required this.text,
+class _TerminalFooter extends StatelessWidget {
+  const _TerminalFooter({
+    required this.activeTerminal,
+    required this.compact,
+    required this.statusLabel,
   });
 
-  final Color? color;
-  final String text;
+  final TerminalSessionSummary? activeTerminal;
+  final bool compact;
+  final String statusLabel;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.freeloom;
+    final l10n = context.l10n;
 
+    return Container(
+      height: compact ? 28 : 24,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF11161C),
+        borderRadius: const BorderRadius.vertical(bottom: Radius.circular(18)),
+        border: Border(top: BorderSide(color: palette.glassStroke)),
+      ),
+      child: Row(
+        children: [
+          _StatusText(
+            color: palette.primaryBright,
+            text: l10n.terminalStable,
+          ),
+          const SizedBox(width: 16),
+          const _StatusText(text: 'UTF-8'),
+          const SizedBox(width: 16),
+          _StatusText(
+            text: activeTerminal == null
+                ? '--'
+                : 'COL ${activeTerminal!.cols}  ROW ${activeTerminal!.rows}',
+          ),
+          const Spacer(),
+          _StatusText(text: statusLabel),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusText extends StatelessWidget {
+  const _StatusText({
+    required this.text,
+    this.color,
+  });
+
+  final String text;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
     return Text(
       text,
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: color ?? palette.textMuted,
-            fontSize: 9,
-            fontWeight: FontWeight.w700,
-            fontFamily: 'JetBrains Mono',
-            letterSpacing: 0.6,
-          ),
+      style: TextStyle(
+        color: color ?? palette.textMuted,
+        fontSize: 10,
+        fontWeight: FontWeight.w500,
+        letterSpacing: 1.2,
+      ),
     );
   }
 }

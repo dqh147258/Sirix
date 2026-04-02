@@ -34,6 +34,21 @@ enum LocalWsInbound {
         sdp: Option<String>,
         candidate: Option<serde_json::Value>,
     },
+    #[serde(rename = "terminal.list", alias = "terminal_list")]
+    TerminalList,
+    #[serde(rename = "terminal.attach", alias = "terminal_attach")]
+    TerminalAttach { terminal_id: String },
+    #[serde(rename = "terminal.input", alias = "terminal_input")]
+    TerminalInput {
+        terminal_id: String,
+        data_base64: String,
+    },
+    #[serde(rename = "terminal.resize", alias = "terminal_resize")]
+    TerminalResize {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -161,6 +176,68 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                         if socket.send(Message::Text(reply.to_string())).await.is_err() {
                                             break;
                                         }
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalList) => {
+                                let reply = serde_json::json!({
+                                    "type": "terminal.list",
+                                    "payload": {
+                                        "terminals": state.terminal_manager.list_snapshots().await,
+                                    }
+                                });
+                                if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalAttach { terminal_id }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Some(snapshot) = state.terminal_manager.get_snapshot(terminal_id).await {
+                                            let reply = serde_json::json!({
+                                                "type": "terminal.ready",
+                                                "payload": snapshot,
+                                            });
+                                            if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal attach id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalInput { terminal_id, data_base64 }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state.terminal_manager.write_input(terminal_id, &data_base64).await {
+                                            warn!(terminal_id = %terminal_id, error = %error, "local terminal input failed");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal input id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalResize { terminal_id, cols, rows }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state.terminal_manager.resize(terminal_id, cols, rows).await {
+                                            warn!(terminal_id = %terminal_id, error = %error, "local terminal resize failed");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal resize id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
                                     }
                                 }
                             }

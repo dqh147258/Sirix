@@ -67,19 +67,19 @@
 
 `client/packages/infra_api/lib/src/providers.dart` 使用以下 `--dart-define`：
 
-- `FREELOOM_USE_MOCK`（默认 `true`）
-- `FREELOOM_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
-- `FREELOOM_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${FREELOOM_SERVER_HOST}:8080`）
-- `FREELOOM_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
-- `FREELOOM_DESKTOP_SERVER_PORT_START`（默认 `9700`）
-- `FREELOOM_DESKTOP_SERVER_PORT_END`（默认 `9710`）
+- `SIRIX_USE_MOCK`（默认 `true`）
+- `SIRIX_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
+- `SIRIX_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${SIRIX_SERVER_HOST}:8080`）
+- `SIRIX_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
+- `SIRIX_DESKTOP_SERVER_PORT_START`（默认 `9700`）
+- `SIRIX_DESKTOP_SERVER_PORT_END`（默认 `9710`）
 
 示例：
 
 ```bash
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36
 ```
 
 ## 4. 用户流程（当前实现）
@@ -104,5 +104,5 @@ flutter run -t apps/mobile_app/lib/main.dart \
 - 桌面端无授权弹窗：检查桌面 Flutter 是否已连接 `desktop-server` 本地 WS。
 - 自动授权设置不一致：检查桌面端是否已完成设备注册，并确认 `PATCH /devices/{id}/settings` 返回 2xx。
 - 连接卡住：检查 `coturn` 端口映射、`APP__WEBRTC__ICE_SERVERS` 配置。
-- 事件不同步：检查移动端是否使用了 `FREELOOM_USE_MOCK=false`。
+- 事件不同步：检查移动端是否使用了 `SIRIX_USE_MOCK=false`。
 - macOS / iOS 原生编译缺少 WebRTC：重新执行 `cd client/ios && pod install`、`cd client/macos && pod install`，确认 `Podfile.lock` 中出现 `flutter_webrtc`、`path_provider_foundation`、`WebRTC-SDK`。

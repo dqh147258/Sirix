@@ -151,7 +151,7 @@ class _MobileShellBootstrapScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Scaffold(
       backgroundColor: const Color(0xFF090C11),

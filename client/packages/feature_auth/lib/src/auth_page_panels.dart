@@ -13,7 +13,7 @@ class _AccountPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final scheme = Theme.of(context).textTheme;
 
     return Column(
@@ -61,7 +61,7 @@ class _MobileBrandHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Column(
@@ -117,7 +117,7 @@ class _AuthFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Column(

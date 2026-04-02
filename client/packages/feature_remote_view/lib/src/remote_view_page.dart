@@ -111,7 +111,7 @@ class _RemoteIdleView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Padding(
@@ -189,7 +189,7 @@ class _PendingAuthorizationView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return ListView(
@@ -299,7 +299,7 @@ class _LogLine extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),

@@ -7,9 +7,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
 
-import 'src/shell/freeloom_shell_app.dart';
+import 'src/shell/sirix_shell_app.dart';
 
-export 'src/shell/freeloom_shell_app.dart';
+export 'src/shell/sirix_shell_app.dart';
 
 void main() {
   runZonedGuarded(
@@ -22,7 +22,7 @@ void main() {
       };
       AppLogger.configure(source: source, baseUrl: resolvedApiBaseUrl);
       _installUnhandledErrorLogging();
-      runApp(const ProviderScope(child: FreeloomShellApp()));
+      runApp(const ProviderScope(child: SirixShellApp()));
     },
     (error, stackTrace) {
       AppLogger.error('uncaught zone error: $error');

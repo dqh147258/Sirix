@@ -74,7 +74,7 @@
 
 建议新增:
 
-- `AppTheme.darkFreeloom()`
+- `AppTheme.darkSirix()`
 - `ThemeExtension` 或等价品牌 token:
   - 背景色
   - surface 系列
@@ -90,12 +90,12 @@
 
 建议新增共用样式组件:
 
-- `FreeloomGlassPanel`
-- `FreeloomPrimaryButton`
-- `FreeloomSecondaryButton`
-- `FreeloomStatusChip`
-- `FreeloomSectionCard`
-- `FreeloomBackdrop`
+- `SirixGlassPanel`
+- `SirixPrimaryButton`
+- `SirixSecondaryButton`
+- `SirixStatusChip`
+- `SirixSectionCard`
+- `SirixBackdrop`
 
 ## 4.2 半透明/模糊效果可行性
 
@@ -146,7 +146,7 @@
 
 - 用中文产品语义，不直接复用示例中的英文黑客风文案
 - 例如可使用:
-  - 标题: `Freeloom Console`
+  - 标题: `Sirix Console`
   - 副标题: `安全远程协作入口`
 
 实现位置:

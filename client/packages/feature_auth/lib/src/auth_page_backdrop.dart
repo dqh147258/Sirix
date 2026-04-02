@@ -5,7 +5,7 @@ class _DesktopAuthBlueprintBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return IgnorePointer(
       child: Stack(
@@ -103,7 +103,7 @@ class _AuthBackdrop extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Stack(
       children: [

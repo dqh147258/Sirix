@@ -142,7 +142,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
     final state = ref.watch(terminalViewModelProvider(_config));
     final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
@@ -356,7 +356,7 @@ class _ActionIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Tooltip(
       message: tooltip,
@@ -393,7 +393,7 @@ class _TerminalTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return InkWell(
       onTap: onTap,
@@ -460,7 +460,7 @@ class _TerminalEmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Center(
@@ -502,7 +502,7 @@ class _TerminalFooter extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Container(
@@ -546,7 +546,7 @@ class _StatusText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     return Text(
       text,
       style: TextStyle(

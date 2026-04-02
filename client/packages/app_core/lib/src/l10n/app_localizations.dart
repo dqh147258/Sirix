@@ -27,9 +27,9 @@ class AppLocalizations {
 
   bool get isZh => locale.languageCode.toLowerCase().startsWith('zh');
 
-  String get freeloom => isZh ? 'Freeloom' : 'Freeloom';
-  String get desktopTitle => isZh ? 'Freeloom Console' : 'Freeloom Console';
-  String get mobileTitle => isZh ? 'Freeloom Remote' : 'Freeloom Remote';
+  String get sirix => isZh ? 'Sirix' : 'Sirix';
+  String get desktopTitle => isZh ? 'Sirix Console' : 'Sirix Console';
+  String get mobileTitle => isZh ? 'Sirix Remote' : 'Sirix Remote';
   String get loginPanelTitle => isZh ? '欢迎回来' : 'Welcome back';
   String get loginPanelSubtitle =>
       isZh ? '输入凭据后即可进入远程工作台。' : 'Enter your credentials to access the workspace.';
@@ -39,7 +39,7 @@ class AppLocalizations {
       isZh ? '移动端远程工作台入口' : 'Mobile remote workspace entry';
   String get accountIdentity => isZh ? '账号标识' : 'Account identity';
   String get accessCredential => isZh ? '访问凭据' : 'Access credential';
-  String get usernameHint => isZh ? 'operator@freeloom.local' : 'operator@freeloom.local';
+  String get usernameHint => isZh ? 'operator@sirix.local' : 'operator@sirix.local';
   String get passwordHint => isZh ? '请输入密码' : 'Enter your password';
   String get login => isZh ? '登录' : 'Sign in';
   String get register => isZh ? '注册' : 'Register';

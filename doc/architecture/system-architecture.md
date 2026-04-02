@@ -258,7 +258,7 @@ level = "trace"
 json = false
 
 [postgres]
-url = "postgres://freeloom:freeloom@postgres:5432/freeloom"
+url = "postgres://sirix:sirix@postgres:5432/sirix"
 
 [redis]
 url = "redis://redis:6379"
@@ -311,4 +311,4 @@ level = "trace"
 - `[backend].session_decision_path`
 - `[backend].webrtc_signal_path`
 
-这使得在网关/反向代理增加前缀（如 `/freeloom/api/...`）时，无需重新编译 `desktop-server`。
+这使得在网关/反向代理增加前缀（如 `/sirix/api/...`）时，无需重新编译 `desktop-server`。

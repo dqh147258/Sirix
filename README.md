@@ -1,6 +1,6 @@
-# Freeloom
+# Sirix
 
-Freeloom 是一个三部分协作的远程协助系统：
+Sirix 是一个三部分协作的远程协助系统：
 
 - `backend-server/`：Rust 控制平面，负责账号、设备、会话、事件流、WebRTC 信令。
 - `desktop-server/`：Rust 桌面代理，负责本地桌面侧心跳、事件订阅、本地 WS、授权决策、信令转发。
@@ -11,7 +11,7 @@ Freeloom 是一个三部分协作的远程协助系统：
 ## 目录说明
 
 ```text
-Freeloom/
+Sirix/
   backend-server/   # 后端服务
   desktop-server/   # 桌面后端服务
   client/           # Flutter 客户端（移动端 + 桌面端）
@@ -107,7 +107,7 @@ desktop-server/config.toml
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false
+  --dart-define=SIRIX_USE_MOCK=false
 ```
 
 当前默认后端地址会指向：
@@ -121,8 +121,8 @@ http://192.168.0.36:8080
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.50
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.50
 ```
 
 若要直接指定完整 API 地址：
@@ -130,8 +130,8 @@ flutter run -t apps/mobile_app/lib/main.dart \
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_API_BASE_URL=http://192.168.0.50:8080
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_API_BASE_URL=http://192.168.0.50:8080
 ```
 
 ### 3.2 桌面端
@@ -154,9 +154,9 @@ cd client/macos && pod install
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d macos \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36 \
-  --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
+  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1
 ```
 
 Linux 手动运行：
@@ -164,15 +164,15 @@ Linux 手动运行：
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d linux \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36 \
-  --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
+  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1
 ```
 
 说明：
 
-- `FREELOOM_SERVER_HOST` 用于推导 backend 地址
-- `FREELOOM_DESKTOP_SERVER_HOST` 用于连接本地 `desktop-server`
+- `SIRIX_SERVER_HOST` 用于推导 backend 地址
+- `SIRIX_DESKTOP_SERVER_HOST` 用于连接本地 `desktop-server`
 - 本地桌面代理默认仍应保持 `127.0.0.1`
 - `./scripts/run-desktop-client.sh` 不传 `-d` 时会按宿主机自动选择 `macos` 或 `linux`
 

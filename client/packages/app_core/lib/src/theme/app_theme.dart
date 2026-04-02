@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 @immutable
-class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
-  const FreeloomTheme({
+class SirixTheme extends ThemeExtension<SirixTheme> {
+  const SirixTheme({
     required this.background,
     required this.surface,
     required this.surfaceRaised,
@@ -33,7 +33,7 @@ class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
   final Color textMuted;
   final Color error;
 
-  static const dark = FreeloomTheme(
+  static const dark = SirixTheme(
     background: Color(0xFF0C1117),
     surface: Color(0xFF121A22),
     surfaceRaised: Color(0xFF18222C),
@@ -50,11 +50,11 @@ class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
   );
 
   @override
-  ThemeExtension<FreeloomTheme> lerp(covariant ThemeExtension<FreeloomTheme>? other, double t) {
-    if (other is! FreeloomTheme) {
+  ThemeExtension<SirixTheme> lerp(covariant ThemeExtension<SirixTheme>? other, double t) {
+    if (other is! SirixTheme) {
       return this;
     }
-    return FreeloomTheme(
+    return SirixTheme(
       background: Color.lerp(background, other.background, t) ?? background,
       surface: Color.lerp(surface, other.surface, t) ?? surface,
       surfaceRaised: Color.lerp(surfaceRaised, other.surfaceRaised, t) ?? surfaceRaised,
@@ -72,7 +72,7 @@ class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
   }
 
   @override
-  FreeloomTheme copyWith({
+  SirixTheme copyWith({
     Color? background,
     Color? surface,
     Color? surfaceRaised,
@@ -87,7 +87,7 @@ class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
     Color? textMuted,
     Color? error,
   }) {
-    return FreeloomTheme(
+    return SirixTheme(
       background: background ?? this.background,
       surface: surface ?? this.surface,
       surfaceRaised: surfaceRaised ?? this.surfaceRaised,
@@ -105,15 +105,15 @@ class FreeloomTheme extends ThemeExtension<FreeloomTheme> {
   }
 }
 
-extension FreeloomThemeContext on BuildContext {
-  FreeloomTheme get freeloom => Theme.of(this).extension<FreeloomTheme>() ?? FreeloomTheme.dark;
+extension SirixThemeContext on BuildContext {
+  SirixTheme get sirix => Theme.of(this).extension<SirixTheme>() ?? SirixTheme.dark;
 }
 
 class AppTheme {
   AppTheme._();
 
-  static ThemeData darkFreeloom() {
-    const palette = FreeloomTheme.dark;
+  static ThemeData darkSirix() {
+    const palette = SirixTheme.dark;
     final baseTextTheme = GoogleFonts.interTextTheme(
       Typography.whiteCupertino.apply(
         bodyColor: palette.textPrimary,
@@ -236,7 +236,7 @@ class AppTheme {
     );
   }
 
-  static ThemeData light() => darkFreeloom();
+  static ThemeData light() => darkSirix();
 
   static BoxDecoration glassDecoration(
     BuildContext context, {
@@ -244,7 +244,7 @@ class AppTheme {
     Color? fillColor,
     Border? border,
   }) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     return BoxDecoration(
       color: fillColor ?? palette.glassFill,
       borderRadius: BorderRadius.circular(radius),

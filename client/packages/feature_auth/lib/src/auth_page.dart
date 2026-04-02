@@ -44,7 +44,7 @@ class AuthPage extends ConsumerWidget {
       );
     }
 
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Material(
       color: Colors.transparent,
@@ -165,7 +165,7 @@ class _DesktopAuthScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Material(
       color: Colors.transparent,

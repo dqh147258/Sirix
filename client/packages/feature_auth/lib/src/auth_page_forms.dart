@@ -15,7 +15,7 @@ class _DesktopAuthForm extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final captionStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
           color: palette.textMuted,
           fontFamily: 'JetBrains Mono',
@@ -195,7 +195,7 @@ class _AuthForm extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final monoStyle = TextStyle(
       fontFamily: 'JetBrains Mono',
       color: palette.textSecondary,

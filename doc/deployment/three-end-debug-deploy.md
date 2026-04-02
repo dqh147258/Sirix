@@ -1,6 +1,6 @@
 # 三端调试与部署指南（client / desktop-server / backend-server）
 
-本文档是 Freeloom 三端联调与部署的独立说明，覆盖本地开发、问题排查、预发布与生产部署。
+本文档是 Sirix 三端联调与部署的独立说明，覆盖本地开发、问题排查、预发布与生产部署。
 
 ## 1. 目录与职责
 
@@ -72,8 +72,8 @@ CARGO_HOME=/tmp/cargo-home cargo run
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36
 ```
 
 ### 桌面端（macOS / Windows）
@@ -87,11 +87,11 @@ flutter run -t apps/mobile_app/lib/main.dart \
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d macos \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36 \
-  --dart-define=FREELOOM_DESKTOP_SERVER_HOST=127.0.0.1 \
-  --dart-define=FREELOOM_DESKTOP_SERVER_PORT_START=9700 \
-  --dart-define=FREELOOM_DESKTOP_SERVER_PORT_END=9710
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
+  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=9700 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=9710
 ```
 
 ## 4. 三端功能验收清单（MVP）

@@ -54,9 +54,9 @@ class MobileApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Freeloom Mobile',
+      title: 'Sirix Mobile',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkFreeloom(),
+      theme: AppTheme.darkSirix(),
       supportedLocales: AppLocalizations.supportedLocales,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       home: const MobileHomePage(),
@@ -87,7 +87,7 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
   Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('mobile'));
     final session = authState.session;
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     if (!authState.initialized || authState.isInitializing) {
@@ -244,7 +244,7 @@ class _MobileAuthBootstrapScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Scaffold(
       backgroundColor: const Color(0xFF111316),
@@ -287,7 +287,7 @@ class _MobileBottomNavBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       decoration: BoxDecoration(
@@ -402,7 +402,7 @@ class _MobileShellTopBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       height: 64,
@@ -460,7 +460,7 @@ class _MobileAccountPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return ListView(

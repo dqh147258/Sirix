@@ -117,7 +117,7 @@ class _MonitorStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Padding(
@@ -213,7 +213,7 @@ class _MonitorPreviewCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return InkWell(
       onTap: onTap,
@@ -281,7 +281,7 @@ class _MonitorPickerOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Positioned.fill(
@@ -476,7 +476,7 @@ class _FullscreenTitleButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Material(
       color: Colors.black54,

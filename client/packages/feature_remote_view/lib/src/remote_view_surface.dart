@@ -21,7 +21,7 @@ class _RemoteDisplayCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Padding(
@@ -159,7 +159,7 @@ class _MetricColumn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Column(
       mainAxisSize: MainAxisSize.min,

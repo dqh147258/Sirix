@@ -1049,12 +1049,12 @@ fn collect_macos_screen_state(
 #[cfg(target_os = "macos")]
 fn capture_macos_display_preview(display_index: u32, target_width: u32) -> anyhow::Result<String> {
     let capture_path = std::env::temp_dir().join(format!(
-        "freeloom-display-{}-{}.jpg",
+        "sirix-display-{}-{}.jpg",
         display_index,
         Uuid::new_v4()
     ));
     let resized_path = std::env::temp_dir().join(format!(
-        "freeloom-display-{}-{}-resized.jpg",
+        "sirix-display-{}-{}-resized.jpg",
         display_index,
         Uuid::new_v4()
     ));

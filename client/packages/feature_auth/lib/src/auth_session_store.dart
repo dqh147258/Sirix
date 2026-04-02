@@ -40,7 +40,7 @@ class AuthSessionStore {
 
   Future<File> _sessionFile(String clientType) async {
     final baseDirectory = await _baseDirectory();
-    return File('${baseDirectory.path}/freeloom/auth_session_$clientType.json');
+    return File('${baseDirectory.path}/sirix/auth_session_$clientType.json');
   }
 
   Future<Directory> _baseDirectory() async {

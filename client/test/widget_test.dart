@@ -5,9 +5,9 @@ import 'package:client/main.dart';
 
 void main() {
   testWidgets('shell app boots', (WidgetTester tester) async {
-    await tester.pumpWidget(const ProviderScope(child: FreeloomShellApp()));
+    await tester.pumpWidget(const ProviderScope(child: SirixShellApp()));
 
-    expect(find.byType(FreeloomShellApp), findsOneWidget);
+    expect(find.byType(SirixShellApp), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

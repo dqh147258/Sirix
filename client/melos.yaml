@@ -1,4 +1,4 @@
-name: freeloom_client
+name: sirix_client
 
 packages:
   - apps/**

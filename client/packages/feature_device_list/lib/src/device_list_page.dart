@@ -33,7 +33,7 @@ class _DeviceListPageState extends ConsumerState<DeviceListPage> {
   Widget build(BuildContext context) {
     final state = ref.watch(deviceListViewModelProvider);
     final vm = ref.read(deviceListViewModelProvider.notifier);
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return RefreshIndicator(
@@ -191,7 +191,7 @@ class _NodeCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Container(
@@ -399,7 +399,7 @@ class _StatusBadgeState extends State<_StatusBadge>
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     if (!widget.online) {
       return Container(
@@ -493,7 +493,7 @@ class _EmptyDeviceCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       padding: const EdgeInsets.all(18),

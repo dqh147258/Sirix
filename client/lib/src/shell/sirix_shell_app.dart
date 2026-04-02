@@ -6,8 +6,8 @@ import 'package:app_core/app_core.dart';
 import 'desktop_shell_page.dart';
 import 'mobile_shell_page.dart';
 
-class FreeloomShellApp extends StatelessWidget {
-  const FreeloomShellApp({super.key});
+class SirixShellApp extends StatelessWidget {
+  const SirixShellApp({super.key});
 
   bool get _useDesktopShell {
     if (kIsWeb) {
@@ -22,9 +22,9 @@ class FreeloomShellApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: _useDesktopShell ? 'Freeloom Desktop' : 'Freeloom Mobile',
+      title: _useDesktopShell ? 'Sirix Desktop' : 'Sirix Mobile',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkFreeloom(),
+      theme: AppTheme.darkSirix(),
       supportedLocales: AppLocalizations.supportedLocales,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       home: _useDesktopShell ? const DesktopShellPage() : const MobileShellPage(),

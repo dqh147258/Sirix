@@ -62,10 +62,10 @@ if ! command -v flutter >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! DEVICES_JSON=$(cd "${CLIENT_DIR}" && flutter devices --machine 2>/tmp/freeloom_flutter_devices.err); then
+if ! DEVICES_JSON=$(cd "${CLIENT_DIR}" && flutter devices --machine 2>/tmp/sirix_flutter_devices.err); then
   echo "Failed to query Flutter devices. Run \`cd client && flutter devices\` manually to inspect the environment." >&2
-  if [[ -s /tmp/freeloom_flutter_devices.err ]]; then
-    cat /tmp/freeloom_flutter_devices.err >&2
+  if [[ -s /tmp/sirix_flutter_devices.err ]]; then
+    cat /tmp/sirix_flutter_devices.err >&2
   fi
   exit 1
 fi

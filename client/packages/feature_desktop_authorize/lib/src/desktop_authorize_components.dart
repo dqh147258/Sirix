@@ -15,7 +15,7 @@ class _StatusCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return SizedBox(
       width: 280,
@@ -77,7 +77,7 @@ class _MetaPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -119,7 +119,7 @@ class _AuthorizeModal extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Column(
@@ -290,7 +290,7 @@ class _DetailGrid extends StatelessWidget {
                 Text(
                   item.$1,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: context.freeloom.textMuted,
+                        color: context.sirix.textMuted,
                         fontFamily: 'JetBrains Mono',
                       ),
                 ),

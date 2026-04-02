@@ -1,4 +1,4 @@
-# Freeloom Client
+# Sirix Client
 
 Flutter 客户端采用 Melos 多模块组织，分移动端与桌面端双入口。
 
@@ -61,33 +61,33 @@ flutter run -t apps/desktop_app/lib/main.dart -d linux
 
 ## 运行参数（--dart-define）
 
-- `FREELOOM_USE_MOCK`（默认 `true`）
-- `FREELOOM_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
-- `FREELOOM_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${FREELOOM_SERVER_HOST}:8080`）
-- `FREELOOM_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
-- `FREELOOM_DESKTOP_SERVER_PORT_START`（默认 `9700`）
-- `FREELOOM_DESKTOP_SERVER_PORT_END`（默认 `9710`）
+- `SIRIX_USE_MOCK`（默认 `true`）
+- `SIRIX_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
+- `SIRIX_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${SIRIX_SERVER_HOST}:8080`）
+- `SIRIX_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
+- `SIRIX_DESKTOP_SERVER_PORT_START`（默认 `9700`）
+- `SIRIX_DESKTOP_SERVER_PORT_END`（默认 `9710`）
 
 说明：
 
 - 移动端默认会把 backend 指向 `192.168.0.36:8080`。
-- 若只想切换后端主机地址，优先传 `FREELOOM_SERVER_HOST`。
-- 若需要完整覆盖协议、端口或路径，再直接传 `FREELOOM_API_BASE_URL`。
+- 若只想切换后端主机地址，优先传 `SIRIX_SERVER_HOST`。
+- 若需要完整覆盖协议、端口或路径，再直接传 `SIRIX_API_BASE_URL`。
 
 示例：
 
 ```bash
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_SERVER_HOST=192.168.0.36
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_SERVER_HOST=192.168.0.36
 ```
 
 显式指定完整地址：
 
 ```bash
 flutter run -t apps/mobile_app/lib/main.dart \
-  --dart-define=FREELOOM_USE_MOCK=false \
-  --dart-define=FREELOOM_API_BASE_URL=http://192.168.0.36:8080
+  --dart-define=SIRIX_USE_MOCK=false \
+  --dart-define=SIRIX_API_BASE_URL=http://192.168.0.36:8080
 ```
 
 ## 当前能力（MVP）

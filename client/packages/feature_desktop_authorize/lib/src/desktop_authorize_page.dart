@@ -72,7 +72,7 @@ class _DesktopAuthorizePageState extends ConsumerState<DesktopAuthorizePage> {
     final state = ref.watch(desktopAuthorizeViewModelProvider);
     final vm = ref.read(desktopAuthorizeViewModelProvider.notifier);
     final mediaState = ref.watch(desktopMediaControllerProvider);
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Stack(

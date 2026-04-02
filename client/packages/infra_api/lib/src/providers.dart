@@ -6,25 +6,25 @@ import 'desktop_local_client.dart';
 import 'http_backend_api_client.dart';
 import 'mock_backend_api_client.dart';
 
-const _useMock = bool.fromEnvironment('FREELOOM_USE_MOCK', defaultValue: false);
+const _useMock = bool.fromEnvironment('SIRIX_USE_MOCK', defaultValue: false);
 const _serverHost = String.fromEnvironment(
-  'FREELOOM_SERVER_HOST',
+  'SIRIX_SERVER_HOST',
   defaultValue: '192.168.0.36',
 );
 const _apiBaseUrl = String.fromEnvironment(
-  'FREELOOM_API_BASE_URL',
+  'SIRIX_API_BASE_URL',
   defaultValue: '',
 );
 const _desktopLocalHost = String.fromEnvironment(
-  'FREELOOM_DESKTOP_SERVER_HOST',
+  'SIRIX_DESKTOP_SERVER_HOST',
   defaultValue: '127.0.0.1',
 );
 const _desktopLocalPortStart = int.fromEnvironment(
-  'FREELOOM_DESKTOP_SERVER_PORT_START',
+  'SIRIX_DESKTOP_SERVER_PORT_START',
   defaultValue: 9700,
 );
 const _desktopLocalPortEnd = int.fromEnvironment(
-  'FREELOOM_DESKTOP_SERVER_PORT_END',
+  'SIRIX_DESKTOP_SERVER_PORT_END',
   defaultValue: 9710,
 );
 const useMockBackend = _useMock;

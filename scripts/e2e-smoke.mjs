@@ -4,10 +4,10 @@ import { createRequire } from 'node:module';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const apiBaseUrl = process.env.FREELOOM_API_BASE_URL ?? 'http://127.0.0.1:8080';
-const desktopWsUrl = process.env.FREELOOM_DESKTOP_LOCAL_WS_URL ?? 'ws://127.0.0.1:9700/ws';
+const apiBaseUrl = process.env.SIRIX_API_BASE_URL ?? 'http://127.0.0.1:8080';
+const desktopWsUrl = process.env.SIRIX_DESKTOP_LOCAL_WS_URL ?? 'ws://127.0.0.1:9700/ws';
 const require = createRequire(import.meta.url);
-const wsImplSpecifier = process.env.FREELOOM_WS_IMPL ?? 'ws';
+const wsImplSpecifier = process.env.SIRIX_WS_IMPL ?? 'ws';
 const WsImplModule = require(wsImplSpecifier);
 const WsImpl = WsImplModule.WebSocket ?? WsImplModule.default ?? WsImplModule;
 
@@ -15,8 +15,8 @@ if (!WsImpl) {
   throw new Error('failed to load WebSocket implementation');
 }
 
-const username = process.env.FREELOOM_E2E_USERNAME ?? 'smoke_e2e';
-const password = process.env.FREELOOM_E2E_PASSWORD ?? 'password123';
+const username = process.env.SIRIX_E2E_USERNAME ?? 'smoke_e2e';
+const password = process.env.SIRIX_E2E_PASSWORD ?? 'password123';
 
 function log(step, detail) {
   const suffix = detail == null ? '' : ` ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`;
@@ -204,7 +204,7 @@ async function main() {
       session_id: connection.session_id,
       role: 'mobile',
       signal_type: 'offer',
-      sdp: 'v=0\no=mobile 1 2 IN IP4 127.0.0.1\ns=freeloom\nt=0 0\na=group:BUNDLE 0\n',
+      sdp: 'v=0\no=mobile 1 2 IN IP4 127.0.0.1\ns=sirix\nt=0 0\na=group:BUNDLE 0\n',
     },
   });
 
@@ -217,7 +217,7 @@ async function main() {
     type: 'webrtc.signal',
     session_id: connection.session_id,
     signal_type: 'answer',
-    sdp: 'v=0\no=desktop 1 2 IN IP4 127.0.0.1\ns=freeloom\nt=0 0\na=group:BUNDLE 0\n',
+    sdp: 'v=0\no=desktop 1 2 IN IP4 127.0.0.1\ns=sirix\nt=0 0\na=group:BUNDLE 0\n',
   });
 
   const answerEvent = await mobileWs.waitFor(

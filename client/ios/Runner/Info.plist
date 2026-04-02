@@ -25,9 +25,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>Freeloom 需要访问摄像头以支持实时媒体能力。</string>
+	<string>Sirix 需要访问摄像头以支持实时媒体能力。</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Freeloom 需要访问麦克风以支持实时媒体能力。</string>
+	<string>Sirix 需要访问麦克风以支持实时媒体能力。</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

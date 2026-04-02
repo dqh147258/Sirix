@@ -53,9 +53,9 @@ class DesktopApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Freeloom Desktop',
+      title: 'Sirix Desktop',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.darkFreeloom(),
+      theme: AppTheme.darkSirix(),
       supportedLocales: AppLocalizations.supportedLocales,
       localizationsDelegates: AppLocalizations.localizationsDelegates,
       home: const DesktopHomePage(),
@@ -85,7 +85,7 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
   Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('desktop'));
     final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
     if (!authState.initialized || authState.isInitializing) {
       return const _DesktopAuthBootstrapScreen();
@@ -409,7 +409,7 @@ class _DesktopAuthBootstrapScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Scaffold(
       backgroundColor: palette.surface,
@@ -464,7 +464,7 @@ class _SidebarFooterItem extends StatelessWidget {
 
   final IconData icon;
   final String label;
-  final FreeloomTheme palette;
+  final SirixTheme palette;
 
   @override
   Widget build(BuildContext context) {
@@ -507,7 +507,7 @@ class _TopNavBarTab extends StatelessWidget {
       {required this.label, required this.active, required this.palette});
   final String label;
   final bool active;
-  final FreeloomTheme palette;
+  final SirixTheme palette;
 
   @override
   Widget build(BuildContext context) {
@@ -539,7 +539,7 @@ class _DesktopDashboardPage extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
-    final palette = context.freeloom;
+    final palette = context.sirix;
     return Column(children: [
       // --- PRIMARY DISPLAY ---
       Expanded(
@@ -711,7 +711,7 @@ class _DesktopAccountPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final l10n = context.l10n;
 
     return Padding(
@@ -819,7 +819,7 @@ class _InfoBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       padding: const EdgeInsets.all(20),

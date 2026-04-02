@@ -128,7 +128,7 @@ class _RemoteHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final titleContent = Row(
       children: [
         Container(
@@ -213,7 +213,7 @@ class _LiveBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),

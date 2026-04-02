@@ -1,5 +1,5 @@
 name: infra_webrtc
-description: WebRTC abstraction layer for Freeloom.
+description: WebRTC abstraction layer for Sirix.
 publish_to: none
 version: 0.1.0
 

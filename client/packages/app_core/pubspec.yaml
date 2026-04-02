@@ -1,5 +1,5 @@
 name: app_core
-description: Core utilities for Freeloom client apps.
+description: Core utilities for Sirix client apps.
 publish_to: none
 version: 0.1.0
 

@@ -131,7 +131,7 @@ class _DesktopShellBootstrapScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Scaffold(
       backgroundColor: const Color(0xFF090C11),
@@ -166,7 +166,7 @@ class _DesktopShellHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
     final navChildren = [
       for (var index = 0; index < sections.length; index++)
         _DesktopNavChip(
@@ -238,7 +238,7 @@ class _DesktopBrandRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Row(
       children: [
@@ -287,7 +287,7 @@ class _DesktopStatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -337,7 +337,7 @@ class _DesktopNavChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = context.freeloom;
+    final palette = context.sirix;
 
     return Padding(
       padding: const EdgeInsets.only(right: 10),
@@ -408,7 +408,7 @@ class _DesktopAccountPage extends StatelessWidget {
                 context.l10n.desktopAccountReady,
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: context.freeloom.textMuted,
+                      color: context.sirix.textMuted,
                     ),
               ),
               const SizedBox(height: 20),

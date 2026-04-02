@@ -65,7 +65,12 @@ fn install_panic_logger(state: AppState) {
             .payload()
             .downcast_ref::<&str>()
             .copied()
-            .or_else(|| panic_info.payload().downcast_ref::<String>().map(String::as_str))
+            .or_else(|| {
+                panic_info
+                    .payload()
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+            })
             .unwrap_or("unknown panic payload");
         let location = panic_info
             .location()

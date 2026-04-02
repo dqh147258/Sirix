@@ -19,6 +19,8 @@ dependencies:
     path: packages/feature_auth
   feature_device_list:
     path: packages/feature_device_list
+  feature_terminal:
+    path: packages/feature_terminal
   feature_remote_view:
     path: packages/feature_remote_view
   feature_desktop_authorize:

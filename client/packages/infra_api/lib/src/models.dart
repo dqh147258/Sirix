@@ -80,6 +80,33 @@ class ScreenSnapshot {
   final String previewBase64;
 }
 
+@immutable
+class TerminalSessionSummary {
+  const TerminalSessionSummary({
+    required this.id,
+    required this.deviceId,
+    required this.title,
+    required this.shell,
+    required this.cwd,
+    required this.state,
+    required this.cols,
+    required this.rows,
+    required this.createdAt,
+    this.closedAt,
+  });
+
+  final String id;
+  final String deviceId;
+  final String title;
+  final String shell;
+  final String cwd;
+  final String state;
+  final int cols;
+  final int rows;
+  final DateTime createdAt;
+  final DateTime? closedAt;
+}
+
 enum WebrtcSignalType {
   offer,
   answer,

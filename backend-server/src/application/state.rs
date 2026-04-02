@@ -26,6 +26,7 @@ pub struct AppState {
     pub log_store: Arc<RuntimeLogStore>,
     pub desktop_event_bus: EventBus,
     pub mobile_event_bus: EventBus,
+    pub terminal_event_bus: EventBus,
 }
 
 impl AppState {
@@ -72,6 +73,7 @@ impl AppState {
             log_store,
             desktop_event_bus: EventBus::default(),
             mobile_event_bus: EventBus::default(),
+            terminal_event_bus: EventBus::default(),
         })
     }
 
@@ -102,6 +104,21 @@ impl AppState {
     pub async fn publish_mobile_event(&self, user_id: Uuid, payload: String) -> usize {
         self.mobile_event_bus
             .publish(&format!("user:{user_id}"), payload)
+            .await
+    }
+
+    pub async fn subscribe_terminal_events(
+        &self,
+        terminal_id: Uuid,
+    ) -> tokio::sync::broadcast::Receiver<String> {
+        self.terminal_event_bus
+            .subscribe(&format!("terminal:{terminal_id}"))
+            .await
+    }
+
+    pub async fn publish_terminal_event(&self, terminal_id: Uuid, payload: String) -> usize {
+        self.terminal_event_bus
+            .publish(&format!("terminal:{terminal_id}"), payload)
             .await
     }
 

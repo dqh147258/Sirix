@@ -98,7 +98,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         clearError: true,
       );
     } catch (error) {
-      state = state.copyWith(errorMessage: '加载屏幕快照失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.loadSnapshotsFailed('$error'));
     }
   }
 
@@ -117,10 +117,18 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         sessionId: sessionId,
         screenId: screenId,
       );
-      state = state.copyWith(selectedScreenId: screenId, clearError: true);
+      state = state.copyWith(
+        selectedScreenId: screenId,
+        monitorPickerVisible: false,
+        clearError: true,
+      );
     } catch (error) {
-      state = state.copyWith(errorMessage: '切换屏幕失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.switchScreenFailed('$error'));
     }
+  }
+
+  void setMonitorPickerVisible(bool visible) {
+    state = state.copyWith(monitorPickerVisible: visible);
   }
 
   Future<void> setManualQuality({
@@ -147,7 +155,9 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         clearError: true,
       );
     } catch (error) {
-      state = state.copyWith(errorMessage: '更新分辨率失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.updateResolutionFailed('$error'),
+      );
     }
   }
 
@@ -167,7 +177,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       );
       state = state.copyWith(autoQuality: true, clearError: true);
     } catch (error) {
-      state = state.copyWith(errorMessage: '切换自动码率失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.autoQualityFailed('$error'));
     }
   }
 
@@ -210,7 +220,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     try {
       await _apiClient.pauseSession(accessToken: accessToken, sessionId: sessionId);
     } catch (error) {
-      state = state.copyWith(errorMessage: '暂停会话失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.pauseSessionFailed('$error'));
       return;
     }
 
@@ -249,7 +259,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         clearError: true,
       );
     } catch (error) {
-      state = state.copyWith(errorMessage: '恢复会话失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.resumeSessionFailed('$error'));
     }
   }
 
@@ -330,7 +340,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       },
       onError: (error) {
         AppLogger.error('mobile event channel error: $error');
-        state = state.copyWith(errorMessage: '事件通道异常: $error');
+        state = state.copyWith(errorMessage: AppLocalizations.current.eventChannelError('$error'));
       },
     );
   }
@@ -356,7 +366,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       AppLogger.info('initial mobile offer sent sessionId=$sessionId');
     } catch (error) {
       AppLogger.error('initial mobile offer failed sessionId=$sessionId error=$error');
-      state = state.copyWith(errorMessage: '初始化 WebRTC 失败: $error');
+      state = state.copyWith(errorMessage: AppLocalizations.current.initWebrtcFailed('$error'));
     }
   }
 
@@ -387,7 +397,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     final reason = payloadMap['reason'] as String? ?? 'desktop rejected';
     AppLogger.warn('connection rejected sessionId=${state.sessionId} reason=$reason');
     await _handleRemoteSessionEnded(
-      errorMessage: '连接被拒绝: $reason',
+      errorMessage: AppLocalizations.current.connectionRejected(reason),
       lastEventType: 'connection.request.rejected',
     );
   }
@@ -447,7 +457,9 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       AppLogger.info('mobile handled remote offer sessionId=$sessionId');
     } catch (error) {
       AppLogger.error('handle remote offer failed sessionId=$sessionId error=$error');
-      state = state.copyWith(errorMessage: '处理远端 Offer 失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.handleRemoteOfferFailed('$error'),
+      );
     }
   }
 
@@ -555,6 +567,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       orientationMode: ViewOrientationMode.portrait,
       snapshots: const [],
       selectedScreenId: null,
+      monitorPickerVisible: false,
     );
   }
 

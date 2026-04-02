@@ -76,4 +76,24 @@ abstract class BackendApiClient {
     String? sdp,
     Map<String, dynamic>? candidate,
   });
+
+  Future<TerminalSessionSummary> createTerminal({
+    required String accessToken,
+    required String targetDeviceId,
+    required int cols,
+    required int rows,
+    String? cwd,
+    String? shell,
+    String? title,
+  });
+
+  Future<List<TerminalSessionSummary>> listTerminals({
+    required String accessToken,
+    String? deviceId,
+  });
+
+  Future<void> closeTerminal({
+    required String accessToken,
+    required String terminalId,
+  });
 }

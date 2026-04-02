@@ -22,6 +22,7 @@ class RemoteViewState {
     this.qualityProfile = QualityProfile.p720,
     this.snapshots = const [],
     this.selectedScreenId,
+    this.monitorPickerVisible = false,
     this.lastEventType,
     this.errorMessage,
   });
@@ -39,6 +40,7 @@ class RemoteViewState {
   final QualityProfile qualityProfile;
   final List<ScreenSnapshot> snapshots;
   final String? selectedScreenId;
+  final bool monitorPickerVisible;
   final String? lastEventType;
   final String? errorMessage;
 
@@ -54,6 +56,7 @@ class RemoteViewState {
     QualityProfile? qualityProfile,
     List<ScreenSnapshot>? snapshots,
     Object? selectedScreenId = _unset,
+    bool? monitorPickerVisible,
     Object? lastEventType = _unset,
     String? errorMessage,
     bool clearError = false,
@@ -74,6 +77,7 @@ class RemoteViewState {
       selectedScreenId: identical(selectedScreenId, _unset)
           ? this.selectedScreenId
           : selectedScreenId as String?,
+      monitorPickerVisible: monitorPickerVisible ?? this.monitorPickerVisible,
       lastEventType: identical(lastEventType, _unset) ? this.lastEventType : lastEventType as String?,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     );

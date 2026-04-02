@@ -10,6 +10,7 @@ class MockBackendApiClient implements BackendApiClient {
 
   final Uuid _uuid = const Uuid();
   final Map<String, AuthSession> _users = {};
+  final List<TerminalSessionSummary> _terminals = [];
   final List<DeviceSummary> _devices = [
     const DeviceSummary(
       id: 'dev-1',
@@ -199,4 +200,48 @@ class MockBackendApiClient implements BackendApiClient {
     String? sdp,
     Map<String, dynamic>? candidate,
   }) async {}
+
+  @override
+  Future<TerminalSessionSummary> createTerminal({
+    required String accessToken,
+    required String targetDeviceId,
+    required int cols,
+    required int rows,
+    String? cwd,
+    String? shell,
+    String? title,
+  }) async {
+    final terminal = TerminalSessionSummary(
+      id: _uuid.v4(),
+      deviceId: targetDeviceId,
+      title: title ?? 'Terminal',
+      shell: shell ?? '/bin/zsh',
+      cwd: cwd ?? '~',
+      state: 'active',
+      cols: cols,
+      rows: rows,
+      createdAt: DateTime.now(),
+    );
+    _terminals.insert(0, terminal);
+    return terminal;
+  }
+
+  @override
+  Future<List<TerminalSessionSummary>> listTerminals({
+    required String accessToken,
+    String? deviceId,
+  }) async {
+    if (deviceId == null) {
+      return _terminals;
+    }
+    return _terminals.where((item) => item.deviceId == deviceId).toList(growable: false);
+  }
+
+  @override
+  Future<void> closeTerminal({
+    required String accessToken,
+    required String terminalId,
+  }) async {
+    _terminals.removeWhere((item) => item.id == terminalId);
+  }
 }

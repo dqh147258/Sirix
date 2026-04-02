@@ -19,6 +19,8 @@ dependencies:
     path: ../../packages/feature_device_list
   feature_remote_view:
     path: ../../packages/feature_remote_view
+  feature_terminal:
+    path: ../../packages/feature_terminal
   infra_api:
     path: ../../packages/infra_api
 

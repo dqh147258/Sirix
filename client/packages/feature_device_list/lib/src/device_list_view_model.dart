@@ -18,7 +18,7 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
     } catch (error) {
       state = state.copyWith(
         loading: false,
-        errorMessage: '设备列表加载失败: $error',
+        errorMessage: '${AppLocalizations.current.deviceListLoadFailed}: $error',
       );
     }
   }
@@ -46,7 +46,9 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
       ];
       state = state.copyWith(devices: devices, clearError: true);
     } catch (error) {
-      state = state.copyWith(errorMessage: '更新设备设置失败: $error');
+      state = state.copyWith(
+        errorMessage: '${AppLocalizations.current.updateDeviceSettingsFailed}: $error',
+      );
     }
   }
 
@@ -62,7 +64,7 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
       if (session.state == 'terminated') {
         AppLogger.warn('connect request terminated before attach: ${session.sessionId}');
         state = state.copyWith(
-          errorMessage: '桌面端当前不可接收连接，请确认 desktop-server 和授权页在线后重试',
+          errorMessage: AppLocalizations.current.desktopUnavailableHint,
         );
         return null;
       }
@@ -70,7 +72,9 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
       return session;
     } catch (error) {
       AppLogger.error('connect request failed targetDeviceId=$deviceId error=$error');
-      state = state.copyWith(errorMessage: '连接请求失败: $error');
+      state = state.copyWith(
+        errorMessage: '${AppLocalizations.current.connectRequestFailed}: $error',
+      );
       return null;
     }
   }

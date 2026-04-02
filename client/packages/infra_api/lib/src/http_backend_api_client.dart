@@ -227,6 +227,51 @@ class HttpBackendApiClient implements BackendApiClient {
     );
   }
 
+  @override
+  Future<TerminalSessionSummary> createTerminal({
+    required String accessToken,
+    required String targetDeviceId,
+    required int cols,
+    required int rows,
+    String? cwd,
+    String? shell,
+    String? title,
+  }) async {
+    final response = await _post(
+      '/api/v1/terminals',
+      accessToken: accessToken,
+      body: {
+        'target_device_id': targetDeviceId,
+        'cols': cols,
+        'rows': rows,
+        if (cwd != null) 'cwd': cwd,
+        if (shell != null) 'shell': shell,
+        if (title != null) 'title': title,
+      },
+    );
+    return _terminalFromResponse(response);
+  }
+
+  @override
+  Future<List<TerminalSessionSummary>> listTerminals({
+    required String accessToken,
+    String? deviceId,
+  }) async {
+    final suffix = deviceId == null ? '' : '?device_id=$deviceId';
+    final response = await _get('/api/v1/terminals$suffix', accessToken: accessToken);
+    return (response as List<dynamic>)
+        .map((entry) => _terminalFromResponse(entry as Map<String, dynamic>))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<void> closeTerminal({
+    required String accessToken,
+    required String terminalId,
+  }) async {
+    await _post('/api/v1/terminals/$terminalId/close', accessToken: accessToken);
+  }
+
   Future<dynamic> _get(
     String path, {
     String? accessToken,
@@ -295,6 +340,23 @@ class HttpBackendApiClient implements BackendApiClient {
       clientVersion: json['client_version'] as String? ?? '',
       autoApproveScreenShare: json['auto_approve_screen_share'] as bool? ?? false,
       online: json['online'] as bool? ?? false,
+    );
+  }
+
+  TerminalSessionSummary _terminalFromResponse(Map<String, dynamic> json) {
+    return TerminalSessionSummary(
+      id: json['id'] as String,
+      deviceId: json['device_id'] as String,
+      title: json['title'] as String? ?? 'Terminal',
+      shell: json['shell'] as String? ?? '',
+      cwd: json['cwd'] as String? ?? '',
+      state: json['state'] as String? ?? 'opening',
+      cols: json['cols'] as int? ?? 80,
+      rows: json['rows'] as int? ?? 24,
+      createdAt: DateTime.tryParse(json['created_at'] as String? ?? '') ?? DateTime.now(),
+      closedAt: json['closed_at'] == null
+          ? null
+          : DateTime.tryParse(json['closed_at'] as String? ?? ''),
     );
   }
 }

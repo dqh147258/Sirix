@@ -1,5 +1,5 @@
-name: app_core
-description: Core utilities for Freeloom client apps.
+name: feature_terminal
+description: Shared terminal feature for Freeloom desktop and mobile apps.
 publish_to: none
 version: 0.1.0
 
@@ -10,10 +10,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_localizations:
-    sdk: flutter
   flutter_riverpod: ^2.5.1
-  google_fonts: ^6.2.1
+  app_core:
+    path: ../app_core
+  infra_api:
+    path: ../infra_api
+  web_socket_channel: ^3.0.1
+  xterm: ^4.0.0
 
 dev_dependencies:
   flutter_test:

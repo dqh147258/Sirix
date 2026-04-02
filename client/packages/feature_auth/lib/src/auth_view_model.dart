@@ -25,7 +25,7 @@ class AuthViewModel extends BaseViewModel<AuthState> {
 
   Future<void> login() async {
     if (state.username.trim().isEmpty || state.password.isEmpty) {
-      state = state.copyWith(errorMessage: '请输入用户名和密码');
+      state = state.copyWith(errorMessage: AppLocalizations.current.enterUsernamePassword);
       return;
     }
 
@@ -41,14 +41,14 @@ class AuthViewModel extends BaseViewModel<AuthState> {
     } catch (error) {
       state = state.copyWith(
         isLoading: false,
-        errorMessage: '登录失败: $error',
+        errorMessage: AppLocalizations.current.loginFailed('$error'),
       );
     }
   }
 
   Future<void> register() async {
     if (state.username.trim().isEmpty || state.password.length < 8) {
-      state = state.copyWith(errorMessage: '用户名不能为空，密码至少8位');
+      state = state.copyWith(errorMessage: AppLocalizations.current.registerValidation);
       return;
     }
 
@@ -63,7 +63,7 @@ class AuthViewModel extends BaseViewModel<AuthState> {
     } catch (error) {
       state = state.copyWith(
         isLoading: false,
-        errorMessage: '注册失败: $error',
+        errorMessage: AppLocalizations.current.registerFailed('$error'),
       );
     }
   }

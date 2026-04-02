@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS session_events (
     payload JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+CREATE TABLE IF NOT EXISTS terminal_sessions (
+    id UUID PRIMARY KEY,
+    device_id UUID NOT NULL,
+    creator_user_id UUID NOT NULL,
+    title TEXT NOT NULL,
+    shell TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    state TEXT NOT NULL,
+    cols INTEGER NOT NULL,
+    rows INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    closed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS terminal_session_participants (
+    id BIGSERIAL PRIMARY KEY,
+    session_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    client_type TEXT NOT NULL,
+    joined_at TIMESTAMPTZ NOT NULL
+);
+
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'devices_user_id_fkey') THEN
@@ -103,6 +126,38 @@ BEGIN
             REFERENCES share_sessions(id)
             ON DELETE CASCADE;
     END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'terminal_sessions_device_id_fkey') THEN
+        ALTER TABLE terminal_sessions
+            ADD CONSTRAINT terminal_sessions_device_id_fkey
+            FOREIGN KEY (device_id)
+            REFERENCES devices(id)
+            ON DELETE CASCADE;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'terminal_sessions_creator_user_id_fkey') THEN
+        ALTER TABLE terminal_sessions
+            ADD CONSTRAINT terminal_sessions_creator_user_id_fkey
+            FOREIGN KEY (creator_user_id)
+            REFERENCES users(id)
+            ON DELETE CASCADE;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'terminal_session_participants_session_id_fkey') THEN
+        ALTER TABLE terminal_session_participants
+            ADD CONSTRAINT terminal_session_participants_session_id_fkey
+            FOREIGN KEY (session_id)
+            REFERENCES terminal_sessions(id)
+            ON DELETE CASCADE;
+    END IF;
+
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'terminal_session_participants_user_id_fkey') THEN
+        ALTER TABLE terminal_session_participants
+            ADD CONSTRAINT terminal_session_participants_user_id_fkey
+            FOREIGN KEY (user_id)
+            REFERENCES users(id)
+            ON DELETE CASCADE;
+    END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_devices_user_id ON devices(user_id);
@@ -123,3 +178,12 @@ CREATE INDEX IF NOT EXISTS idx_share_sessions_updated_at ON share_sessions(updat
 
 CREATE INDEX IF NOT EXISTS idx_session_events_session_id_created_at
     ON session_events(session_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_device_id
+    ON terminal_sessions(device_id);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_creator_user_id
+    ON terminal_sessions(creator_user_id);
+CREATE INDEX IF NOT EXISTS idx_terminal_sessions_updated_at
+    ON terminal_sessions(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_terminal_session_participants_session_id
+    ON terminal_session_participants(session_id, joined_at DESC);

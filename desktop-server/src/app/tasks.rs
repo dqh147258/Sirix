@@ -297,11 +297,24 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         | "session.control.terminate"
         | "session.control.switch_screen"
         | "session.control.quality_changed"
+        | "terminal.ready"
         | "webrtc.offer"
         | "webrtc.answer"
         | "webrtc.ice_candidate" => {
             let _ = state.local_events.send(raw.to_string());
             debug!(event_type = %event.event_type, "forwarded backend event to desktop client");
+        }
+        "terminal.create" => {
+            handle_terminal_create(state, event.payload).await;
+        }
+        "terminal.input" => {
+            handle_terminal_input(state, event.payload).await;
+        }
+        "terminal.resize" => {
+            handle_terminal_resize(state, event.payload).await;
+        }
+        "terminal.close" => {
+            handle_terminal_close(state, event.payload).await;
         }
         _ => {
             debug!(event_type = %event.event_type, payload = %event.payload, "received backend event");
@@ -502,6 +515,115 @@ async fn handle_session_requested(state: &AppState, payload: serde_json::Value) 
             decision_source,
             wait_started_at.elapsed().as_millis()
         ));
+    }
+}
+
+async fn handle_terminal_create(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let Some(terminal_id) = terminal_id else {
+        return;
+    };
+
+    let shell = payload
+        .get("shell")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let cwd = payload
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let title = payload
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let cols = payload
+        .get("cols")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(120)
+        .clamp(20, 400) as u16;
+    let rows = payload
+        .get("rows")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(32)
+        .clamp(10, 200) as u16;
+
+    let result = state
+        .terminal_manager
+        .create_terminal(terminal_id, shell, cwd, title, cols, rows)
+        .await;
+    if let Err(error) = result {
+        warn!(terminal_id = %terminal_id, error = %error, "create terminal failed");
+        let _ = state
+            .terminal_manager
+            .update_state(
+                terminal_id,
+                "error",
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(error.to_string()),
+            )
+            .await;
+    }
+}
+
+async fn handle_terminal_input(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let data = payload
+        .get("data_base64")
+        .and_then(serde_json::Value::as_str);
+    let (Some(terminal_id), Some(data)) = (terminal_id, data) else {
+        return;
+    };
+
+    if let Err(error) = state.terminal_manager.write_input(terminal_id, data).await {
+        warn!(terminal_id = %terminal_id, error = %error, "terminal input failed");
+    }
+}
+
+async fn handle_terminal_resize(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let cols = payload
+        .get("cols")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(120)
+        .clamp(20, 400) as u16;
+    let rows = payload
+        .get("rows")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(32)
+        .clamp(10, 200) as u16;
+    let Some(terminal_id) = terminal_id else {
+        return;
+    };
+
+    if let Err(error) = state.terminal_manager.resize(terminal_id, cols, rows).await {
+        warn!(terminal_id = %terminal_id, error = %error, "terminal resize failed");
+    }
+}
+
+async fn handle_terminal_close(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let Some(terminal_id) = terminal_id else {
+        return;
+    };
+
+    if let Err(error) = state.terminal_manager.close(terminal_id).await {
+        warn!(terminal_id = %terminal_id, error = %error, "terminal close failed");
     }
 }
 

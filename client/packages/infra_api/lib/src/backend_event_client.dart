@@ -23,6 +23,24 @@ class BackendEventClient {
     );
   }
 
+  WebSocketChannel connectTerminalEvents({
+    required String accessToken,
+    required String terminalId,
+  }) {
+    final wsBase = _baseUrl.startsWith('https://')
+        ? _baseUrl.replaceFirst('https://', 'wss://')
+        : _baseUrl.replaceFirst('http://', 'ws://');
+
+    final uri = Uri.parse('$wsBase/api/v1/terminals/$terminalId/ws');
+    return IOWebSocketChannel.connect(
+      uri,
+      protocols: const [],
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+      },
+    );
+  }
+
   static Map<String, dynamic>? decodeEvent(dynamic raw) {
     if (raw is String) {
       final decoded = jsonDecode(raw);

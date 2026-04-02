@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
-use crate::app::runtime_logger::RuntimeLogger;
+use crate::app::{runtime_logger::RuntimeLogger, terminal::manager::TerminalManager};
 use crate::bootstrap::config::AppConfig;
 
 #[derive(Clone)]
@@ -14,6 +14,7 @@ pub struct AppState {
     pub runtime: Arc<RwLock<RuntimeState>>,
     pub local_events: broadcast::Sender<String>,
     pub pending_authorizations: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    pub terminal_manager: Arc<TerminalManager>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +35,10 @@ impl AppState {
             config.backend.runtime_logs_path.clone(),
         ));
         Self {
+            terminal_manager: Arc::new(TerminalManager::new(
+                config.backend.base_url.clone(),
+                config.backend.device_id.clone(),
+            )),
             config: Arc::new(config),
             logger,
             runtime: Arc::new(RwLock::new(RuntimeState {

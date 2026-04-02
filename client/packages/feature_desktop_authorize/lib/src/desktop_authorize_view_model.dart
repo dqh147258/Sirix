@@ -62,7 +62,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       state = state.copyWith(
         connecting: false,
         connected: false,
-        errorMessage: '连接 desktop-server 失败: $error',
+        errorMessage: AppLocalizations.current.connectDesktopFailed('$error'),
       );
       _scheduleReconnect();
     }
@@ -101,7 +101,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   }) {
     final channel = _channel;
     if (channel == null) {
-      state = state.copyWith(errorMessage: '本地连接已断开，无法提交授权');
+      state = state.copyWith(errorMessage: AppLocalizations.current.localConnectionUnavailable);
       return;
     }
 
@@ -136,7 +136,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
         AppLogger.error('desktop local websocket error: $error');
         state = state.copyWith(
           connected: false,
-          errorMessage: '本地连接异常: $error',
+          errorMessage: AppLocalizations.current.localConnectionError('$error'),
         );
         if (!_closingChannel) {
           _scheduleReconnect();
@@ -277,7 +277,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       state = state.copyWith(clearError: true);
     } catch (error) {
       AppLogger.error('desktop media start answering failed: $error');
-      state = state.copyWith(errorMessage: '启动屏幕共享失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.startScreenShareFailed('$error'),
+      );
     }
   }
 
@@ -299,7 +301,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       AppLogger.trace('desktop remote candidate applied');
     } catch (error) {
       AppLogger.error('apply remote candidate failed: $error');
-      state = state.copyWith(errorMessage: '应用远端候选失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.applyRemoteCandidateFailed('$error'),
+      );
     }
   }
 
@@ -326,7 +330,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       state = state.copyWith(clearError: true);
     } catch (error) {
       AppLogger.error('desktop switch shared screen failed: $error');
-      state = state.copyWith(errorMessage: '切换共享屏幕失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.switchSharedScreenFailed('$error'),
+      );
     }
   }
 
@@ -375,7 +381,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       AppLogger.error('desktop device registration failed: $error');
       state = state.copyWith(
         registeringDevice: false,
-        errorMessage: '设备注册失败: $error',
+        errorMessage: AppLocalizations.current.deviceRegistrationFailed('$error'),
       );
     } finally {
       _syncingRegistration = false;
@@ -412,7 +418,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       AppLogger.info('desktop auto approve synced value=${updated.autoApproveScreenShare}');
     } catch (error) {
       AppLogger.error('sync auto approve to backend failed: $error');
-      state = state.copyWith(errorMessage: '同步自动授权设置失败: $error');
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.syncAutoApproveFailed('$error'),
+      );
     }
   }
 

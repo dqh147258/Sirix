@@ -13,6 +13,8 @@ dependencies:
   flutter_riverpod: ^2.5.1
   app_core:
     path: ../app_core
+  feature_terminal:
+    path: ../feature_terminal
   infra_api:
     path: ../infra_api
   infra_webrtc:

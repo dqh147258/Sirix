@@ -18,6 +18,7 @@ pub mod mobile_events;
 pub mod runtime;
 pub mod session_events;
 pub mod sessions;
+pub mod terminals;
 pub mod webrtc;
 
 pub fn router(state: AppState) -> Router {
@@ -71,6 +72,18 @@ pub fn router(state: AppState) -> Router {
             post(sessions::update_quality),
         )
         .route(
+            "/api/v1/terminals",
+            post(terminals::create_terminal).get(terminals::list_terminals),
+        )
+        .route(
+            "/api/v1/terminals/:terminal_id/close",
+            post(terminals::close_terminal),
+        )
+        .route(
+            "/api/v1/terminals/:terminal_id/ws",
+            get(terminals::terminal_events_ws),
+        )
+        .route(
             "/api/v1/desktop/events/:device_id/ws",
             get(desktop_events::desktop_events_ws),
         )
@@ -93,6 +106,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/desktop/devices/:device_id/screen-state",
             post(desktop_control::update_screen_state),
+        )
+        .route(
+            "/api/v1/desktop/terminals/:terminal_id/state",
+            post(terminals::update_terminal_state),
+        )
+        .route(
+            "/api/v1/desktop/terminals/:terminal_id/output",
+            post(terminals::ingest_terminal_output),
         )
         .route("/api/v1/webrtc/signal", post(webrtc::relay_signal))
         .with_state(state)

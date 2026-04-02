@@ -17,6 +17,12 @@ dependencies:
     path: ../../packages/feature_auth
   feature_desktop_authorize:
     path: ../../packages/feature_desktop_authorize
+  feature_terminal:
+    path: ../../packages/feature_terminal
+  infra_api:
+    path: ../../packages/infra_api
+  infra_webrtc:
+    path: ../../packages/infra_webrtc
 
 dev_dependencies:
   flutter_test:

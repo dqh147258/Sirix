@@ -38,6 +38,8 @@ enum LocalWsInbound {
     TerminalList,
     #[serde(rename = "terminal.attach", alias = "terminal_attach")]
     TerminalAttach { terminal_id: String },
+    #[serde(rename = "terminal.close", alias = "terminal_close")]
+    TerminalClose { terminal_id: String },
     #[serde(rename = "terminal.input", alias = "terminal_input")]
     TerminalInput {
         terminal_id: String,
@@ -201,11 +203,43 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                             if socket.send(Message::Text(reply.to_string())).await.is_err() {
                                                 break;
                                             }
+
+                                            if let Some(data_base64) = state
+                                                .terminal_manager
+                                                .get_output_snapshot_base64(terminal_id)
+                                                .await
+                                            {
+                                                let reply = serde_json::json!({
+                                                    "type": "terminal.snapshot",
+                                                    "payload": {
+                                                        "terminal_id": terminal_id,
+                                                        "data_base64": data_base64,
+                                                    }
+                                                });
+                                                if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     Err(error) => {
                                         state.logger.warn(format!(
                                             "invalid terminal attach id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalClose { terminal_id }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state.terminal_manager.close(terminal_id).await {
+                                            warn!(terminal_id = %terminal_id, error = %error, "local terminal close failed");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal close id terminal_id={} error={error}",
                                             terminal_id
                                         ));
                                     }

@@ -131,6 +131,18 @@ class DesktopLocalClient {
     );
   }
 
+  void sendTerminalClose({
+    required WebSocketChannel channel,
+    required String terminalId,
+  }) {
+    channel.sink.add(
+      jsonEncode({
+        'type': 'terminal.close',
+        'terminal_id': terminalId,
+      }),
+    );
+  }
+
   void sendTerminalInput({
     required WebSocketChannel channel,
     required String terminalId,

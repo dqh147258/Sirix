@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     io::{Read, Write},
     path::PathBuf,
@@ -20,15 +20,18 @@ use uuid::Uuid;
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
+type SharedReplayBuffer = Arc<Mutex<TerminalReplayBuffer>>;
 
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
 const TERMINAL_OUTPUT_MAX_BATCH_BYTES: usize = 16 * 1024;
+const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
 
 struct TerminalSessionHandle {
     master: SharedMaster,
     writer: SharedWriter,
     child: SharedChild,
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
+    replay_buffer: SharedReplayBuffer,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +44,44 @@ struct TerminalSessionMetadata {
     rows: u16,
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Default)]
+struct TerminalReplayBuffer {
+    bytes: VecDeque<u8>,
+}
+
+impl TerminalReplayBuffer {
+    fn append(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        if chunk.len() >= TERMINAL_OUTPUT_REPLAY_MAX_BYTES {
+            self.bytes.clear();
+            self.bytes.extend(
+                chunk[chunk.len() - TERMINAL_OUTPUT_REPLAY_MAX_BYTES..]
+                    .iter()
+                    .copied(),
+            );
+            return;
+        }
+
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(TERMINAL_OUTPUT_REPLAY_MAX_BYTES);
+        for _ in 0..overflow {
+            let _ = self.bytes.pop_front();
+        }
+
+        self.bytes.extend(chunk.iter().copied());
+    }
+
+    fn snapshot(&self) -> Vec<u8> {
+        self.bytes.iter().copied().collect()
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -119,6 +160,7 @@ impl TerminalManager {
             created_at: Utc::now(),
             closed_at: None,
         }));
+        let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
 
         self.sessions.write().await.insert(
             terminal_id,
@@ -127,6 +169,7 @@ impl TerminalManager {
                 writer: writer.clone(),
                 child: child.clone(),
                 metadata: metadata.clone(),
+                replay_buffer: replay_buffer.clone(),
             },
         );
 
@@ -155,6 +198,8 @@ impl TerminalManager {
                 device_id,
                 local_events,
                 terminal_id,
+                metadata,
+                replay_buffer,
                 runtime_handle,
             );
         });
@@ -243,6 +288,9 @@ impl TerminalManager {
         for (terminal_id, handle) in sessions.iter() {
             if let Ok(metadata) = handle.metadata.lock() {
                 let metadata = metadata.clone();
+                if metadata.state == "closed" {
+                    continue;
+                }
                 items.push(LocalTerminalSnapshot {
                     terminal_id: *terminal_id,
                     device_id: self.device_id.clone(),
@@ -257,8 +305,19 @@ impl TerminalManager {
                 });
             }
         }
-        items.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        items.sort_by(|left, right| left.created_at.cmp(&right.created_at));
         items
+    }
+
+    pub async fn get_output_snapshot_base64(&self, terminal_id: Uuid) -> Option<String> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions.get(&terminal_id)?;
+        let replay = handle.replay_buffer.lock().ok()?;
+        let snapshot = replay.snapshot();
+        if snapshot.is_empty() {
+            return None;
+        }
+        Some(BASE64.encode(snapshot))
     }
 
     pub async fn update_state(
@@ -318,6 +377,8 @@ fn stream_terminal_output(
     device_id: String,
     local_events: broadcast::Sender<String>,
     terminal_id: Uuid,
+    metadata: Arc<Mutex<TerminalSessionMetadata>>,
+    replay_buffer: SharedReplayBuffer,
     runtime: tokio::runtime::Handle,
 ) {
     let (tx, rx) = mpsc::sync_channel::<std::io::Result<Option<Vec<u8>>>>(32);
@@ -350,6 +411,7 @@ fn stream_terminal_output(
                         &device_id,
                         &local_events,
                         terminal_id,
+                        &replay_buffer,
                         &mut pending,
                         &runtime,
                     ) {
@@ -374,10 +436,15 @@ fn stream_terminal_output(
                     &device_id,
                     &local_events,
                     terminal_id,
+                    &replay_buffer,
                     &mut pending,
                     &runtime,
                 ) {
                     warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
+                }
+                if let Ok(mut metadata) = metadata.lock() {
+                    metadata.state = "closed".to_string();
+                    metadata.closed_at = Some(Utc::now());
                 }
                 let _ = update_terminal_remote_state(
                     &client,
@@ -406,9 +473,13 @@ fn stream_terminal_output(
                     &device_id,
                     &local_events,
                     terminal_id,
+                    &replay_buffer,
                     &mut pending,
                     &runtime,
                 );
+                if let Ok(mut metadata) = metadata.lock() {
+                    metadata.state = "error".to_string();
+                }
                 let _ = update_terminal_remote_state(
                     &client,
                     &backend_base_url,
@@ -437,6 +508,7 @@ fn stream_terminal_output(
                     &device_id,
                     &local_events,
                     terminal_id,
+                    &replay_buffer,
                     &mut pending,
                     &runtime,
                 ) {
@@ -460,6 +532,7 @@ fn stream_terminal_output(
                     &device_id,
                     &local_events,
                     terminal_id,
+                    &replay_buffer,
                     &mut pending,
                     &runtime,
                 );
@@ -475,6 +548,7 @@ fn flush_terminal_output(
     device_id: &str,
     local_events: &broadcast::Sender<String>,
     terminal_id: Uuid,
+    replay_buffer: &SharedReplayBuffer,
     pending: &mut Vec<u8>,
     runtime: &tokio::runtime::Handle,
 ) -> anyhow::Result<()> {
@@ -482,7 +556,12 @@ fn flush_terminal_output(
         return Ok(());
     }
 
-    let payload = BASE64.encode(&pending[..]);
+    let snapshot = pending.clone();
+    if let Ok(mut replay) = replay_buffer.lock() {
+        replay.append(&snapshot);
+    }
+
+    let payload = BASE64.encode(&snapshot);
     pending.clear();
     let _ = local_events.send(
         json!({

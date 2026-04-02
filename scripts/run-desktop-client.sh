@@ -37,7 +37,7 @@ EOF
 done
 
 HAS_DEVICE_FLAG=false
-for arg in "${ARGS[@]}"; do
+for arg in "${ARGS[@]+"${ARGS[@]}"}"; do
   if [[ "${arg}" == "-d" || "${arg}" == "--device-id" || "${arg}" == "--device" ]]; then
     HAS_DEVICE_FLAG=true
     break
@@ -47,10 +47,10 @@ done
 if [[ "${HAS_DEVICE_FLAG}" == false ]]; then
   case "$(uname -s)" in
     Darwin)
-      ARGS=(-d macos "${ARGS[@]}")
+      ARGS=(-d macos "${ARGS[@]+"${ARGS[@]}"}")
       ;;
     Linux)
-      ARGS=(-d linux "${ARGS[@]}")
+      ARGS=(-d linux "${ARGS[@]+"${ARGS[@]}"}")
       ;;
   esac
 fi

@@ -1,5 +1,8 @@
 # Agents Notes
 
+## 任务相关
+- 任务完成记得调用通知相关的MCP工具
+
 ## Backend Server Docker Compose 日志
 
 - `backend-server/deploy/docker-compose.yml` 中，`backend-server` 服务将应用运行日志挂载到 `backend-server/deploy/runtime-logs/`（容器内路径 `/app/runtime-logs`）。

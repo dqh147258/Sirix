@@ -43,19 +43,24 @@ class TerminalPageConfig {
 }
 
 enum TerminalUiEventType {
-  reset,
+  snapshot,
   output,
 }
 
 @immutable
 class TerminalUiEvent {
-  const TerminalUiEvent.reset()
-      : type = TerminalUiEventType.reset,
-        text = '';
+  const TerminalUiEvent.snapshot({
+    required this.terminalId,
+    required this.text,
+  }) : type = TerminalUiEventType.snapshot;
 
-  const TerminalUiEvent.output(this.text) : type = TerminalUiEventType.output;
+  const TerminalUiEvent.output({
+    required this.terminalId,
+    required this.text,
+  }) : type = TerminalUiEventType.output;
 
   final TerminalUiEventType type;
+  final String terminalId;
   final String text;
 }
 
@@ -77,13 +82,13 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   final TerminalPageConfig _config;
   final StreamController<TerminalUiEvent> _events =
       StreamController<TerminalUiEvent>.broadcast();
-  final StringBuffer _pendingInput = StringBuffer();
 
   WebSocketChannel? _channel;
   _TerminalTransport? _transport;
   StreamSubscription<dynamic>? _channelSubscription;
   Timer? _inputTimer;
   Timer? _resizeTimer;
+  _QueuedInput? _pendingInput;
   _QueuedResize? _pendingResize;
   bool _hasLoaded = false;
   bool _loadingInFlight = false;
@@ -115,7 +120,6 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
           await createTerminal(autoCreated: true);
         } else {
           await _detachChannel();
-          _events.add(const TerminalUiEvent.reset());
         }
         return;
       }
@@ -173,13 +177,13 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
         cols: _preferredCols,
         rows: _preferredRows,
       );
-      final terminals = [created, ...state.terminals];
+      final terminals = [...state.terminals, created];
       state = state.copyWith(
         terminals: terminals,
         activeTerminalId: created.id,
         clearError: true,
       );
-      await attachTerminal(created.id, resetViewport: true);
+      await attachTerminal(created.id);
     } catch (error) {
       if (autoCreated) {
         AppLogger.warn('auto terminal create failed deviceId=$deviceId error=$error');
@@ -198,29 +202,40 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
+    await closeTerminal(terminalId);
+  }
+
+  Future<void> closeTerminal(String terminalId) async {
+    final terminalsBeforeClose = state.terminals;
+    final closingActive = state.activeTerminalId == terminalId;
+
     try {
-      await _apiClient.closeTerminal(
-        accessToken: _config.accessToken,
-        terminalId: terminalId,
-      );
-      final remaining = state.terminals
+      await _requestTerminalClose(terminalId);
+      final remaining = terminalsBeforeClose
           .where((item) => item.id != terminalId)
           .toList(growable: false);
-      final nextActiveId = remaining.isEmpty ? null : remaining.first.id;
+      final nextActiveId = closingActive
+          ? _resolveNextTerminalAfterClose(
+              terminalId: terminalId,
+              terminalsBeforeClose: terminalsBeforeClose,
+              remaining: remaining,
+            )
+          : state.activeTerminalId;
       state = state.copyWith(
         terminals: remaining,
         activeTerminalId: nextActiveId,
-        clearActiveTerminalId: nextActiveId == null,
+        clearActiveTerminalId: closingActive && nextActiveId == null,
         clearError: true,
       );
 
-      await _detachChannel();
-      _events.add(const TerminalUiEvent.reset());
+      if (closingActive) {
+        await _detachChannel();
 
-      if (nextActiveId != null) {
-        await attachTerminal(nextActiveId);
-      } else if (_shouldCreateDefaultTerminal) {
-        await createTerminal(autoCreated: true);
+        if (nextActiveId != null) {
+          await attachTerminal(nextActiveId);
+        } else if (_shouldCreateDefaultTerminal) {
+          await createTerminal(autoCreated: true);
+        }
       }
     } catch (error) {
       state = state.copyWith(
@@ -229,19 +244,43 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
   }
 
+  Future<void> _requestTerminalClose(String terminalId) async {
+    if (_shouldUseDesktopLocalTransport) {
+      final localClient = _desktopLocalClient;
+      if (localClient != null) {
+        try {
+          final channel = await _connectDesktopLocalChannel();
+          localClient.sendTerminalClose(
+            channel: channel,
+            terminalId: terminalId,
+          );
+          return;
+        } catch (error, stackTrace) {
+          AppLogger.warn('desktop local terminal close failed terminalId=$terminalId error=$error');
+          AppLogger.warn('desktop local terminal close stack: $stackTrace');
+        }
+      }
+    }
+
+    await _apiClient.closeTerminal(
+      accessToken: _config.accessToken,
+      terminalId: terminalId,
+    );
+  }
+
   Future<void> attachTerminal(
-    String terminalId, {
-    bool resetViewport = true,
-  }) async {
+    String terminalId,
+  ) async {
     final alreadyAttached =
         state.activeTerminalId == terminalId && _channel != null && !state.connecting;
     if (alreadyAttached) {
       return;
     }
 
-    await _detachChannel();
-    if (resetViewport) {
-      _events.add(const TerminalUiEvent.reset());
+    if (_transport == _TerminalTransport.desktopLocal) {
+      _flushPendingOutboundOperations();
+    } else {
+      await _detachChannel();
     }
     state = state.copyWith(
       activeTerminalId: terminalId,
@@ -307,12 +346,22 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
   }
 
-  void queueInput(String data) {
+  void queueInput({
+    required String terminalId,
+    required String data,
+  }) {
     if (data.isEmpty) {
       return;
     }
 
-    _pendingInput.write(data);
+    var pendingInput = _pendingInput;
+    if (pendingInput == null || pendingInput.terminalId != terminalId) {
+      _flushPendingInput();
+      pendingInput = _QueuedInput(terminalId: terminalId);
+      _pendingInput = pendingInput;
+    }
+
+    pendingInput.buffer.write(data);
     if (_shouldFlushInputImmediately(data)) {
       _flushPendingInput();
       return;
@@ -323,6 +372,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   void queueResize({
+    required String terminalId,
     required int cols,
     required int rows,
   }) {
@@ -330,13 +380,8 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
-    final activeTerminalId = state.activeTerminalId;
-    if (activeTerminalId == null) {
-      return;
-    }
-
     _pendingResize = _QueuedResize(
-      terminalId: activeTerminalId,
+      terminalId: terminalId,
       cols: cols,
       rows: rows,
     );
@@ -346,12 +391,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   Future<void> _detachChannel() async {
-    _flushPendingInput();
-    _flushPendingResize();
-    _inputTimer?.cancel();
-    _inputTimer = null;
-    _resizeTimer?.cancel();
-    _resizeTimer = null;
+    _flushPendingOutboundOperations();
 
     final channel = _channel;
     final subscription = _channelSubscription;
@@ -360,6 +400,15 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     _channelSubscription = null;
     await subscription?.cancel();
     await channel?.sink.close();
+  }
+
+  void _flushPendingOutboundOperations() {
+    _flushPendingInput();
+    _flushPendingResize();
+    _inputTimer?.cancel();
+    _inputTimer = null;
+    _resizeTimer?.cancel();
+    _resizeTimer = null;
   }
 
   void _handleSocketEvent(WebSocketChannel channel, dynamic raw) {
@@ -382,56 +431,97 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       case 'terminal.ready':
         _handleTerminalReady(body);
         break;
+      case 'terminal.snapshot':
+        _handleTerminalSnapshot(body);
+        break;
       case 'terminal.output':
-        if (!_isEventForActiveTerminal(body)) {
-          return;
-        }
-        final data = body['data_base64'] as String?;
-        if (data == null) {
-          return;
-        }
-        final bytes = base64Decode(data);
-        _events.add(
-          TerminalUiEvent.output(
-            const Utf8Decoder(allowMalformed: true).convert(bytes),
-          ),
-        );
+        _handleTerminalOutput(body);
         break;
       case 'terminal.closed':
-        if (!_isEventForActiveTerminal(body)) {
-          return;
-        }
-        _updateActiveTerminalState('closed');
-        _events.add(const TerminalUiEvent.output('\r\n[terminal closed]\r\n'));
+        _handleTerminalClosed(body);
         break;
       case 'terminal.error':
-        if (!_isEventForActiveTerminal(body)) {
-          return;
-        }
-        final message = body['error_message'] as String? ?? 'unknown';
-        _updateActiveTerminalState('error');
-        state = state.copyWith(
-          errorMessage: AppLocalizations.current.terminalStreamError(message),
-        );
-        _events.add(TerminalUiEvent.output('\r\n[terminal error] $message\r\n'));
+        _handleTerminalError(body);
         break;
       default:
         break;
     }
   }
 
-  bool _isEventForActiveTerminal(Map<String, dynamic> body) {
-    final eventTerminalId = body['terminal_id'] as String?;
-    final activeTerminalId = state.activeTerminalId;
-    if (eventTerminalId == null || activeTerminalId == null) {
-      return true;
+  void _handleTerminalOutput(Map<String, dynamic> body) {
+    final terminalId = _resolveEventTerminalId(body);
+    final text = _decodeEventText(body);
+    if (terminalId == null || text == null) {
+      return;
     }
-    return eventTerminalId == activeTerminalId;
+
+    _events.add(TerminalUiEvent.output(
+      terminalId: terminalId,
+      text: text,
+    ));
+  }
+
+  void _handleTerminalSnapshot(Map<String, dynamic> body) {
+    final terminalId = _resolveEventTerminalId(body);
+    final text = _decodeEventText(body);
+    if (terminalId == null) {
+      return;
+    }
+
+    _events.add(TerminalUiEvent.snapshot(
+      terminalId: terminalId,
+      text: text ?? '',
+    ));
+  }
+
+  void _handleTerminalClosed(Map<String, dynamic> body) {
+    final terminalId = _resolveEventTerminalId(body);
+    if (terminalId == null) {
+      return;
+    }
+
+    _updateTerminalStateById(terminalId, 'closed');
+    _events.add(TerminalUiEvent.output(
+      terminalId: terminalId,
+      text: '\r\n[terminal closed]\r\n',
+    ));
+  }
+
+  void _handleTerminalError(Map<String, dynamic> body) {
+    final terminalId = _resolveEventTerminalId(body);
+    if (terminalId == null) {
+      return;
+    }
+
+    final message = body['error_message'] as String? ?? 'unknown';
+    _updateTerminalStateById(terminalId, 'error');
+    if (terminalId == state.activeTerminalId) {
+      state = state.copyWith(
+        errorMessage: AppLocalizations.current.terminalStreamError(message),
+      );
+    }
+    _events.add(TerminalUiEvent.output(
+      terminalId: terminalId,
+      text: '\r\n[terminal error] $message\r\n',
+    ));
+  }
+
+  String? _resolveEventTerminalId(Map<String, dynamic> body) {
+    return body['terminal_id'] as String? ?? state.activeTerminalId;
+  }
+
+  String? _decodeEventText(Map<String, dynamic> body) {
+    final data = body['data_base64'] as String?;
+    if (data == null) {
+      return null;
+    }
+
+    final bytes = base64Decode(data);
+    return const Utf8Decoder(allowMalformed: true).convert(bytes);
   }
 
   void _handleTerminalReady(Map<String, dynamic> body) {
-    final terminalId =
-        body['terminal_id'] as String? ?? state.activeTerminalId ?? '';
+    final terminalId = _resolveEventTerminalId(body) ?? '';
     if (terminalId.isEmpty) {
       return;
     }
@@ -473,13 +563,28 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     return terminals.first.id;
   }
 
-  void _updateActiveTerminalState(String nextState) {
-    final activeTerminalId = state.activeTerminalId;
-    if (activeTerminalId == null) {
-      return;
+  String? _resolveNextTerminalAfterClose({
+    required String terminalId,
+    required List<TerminalSessionSummary> terminalsBeforeClose,
+    required List<TerminalSessionSummary> remaining,
+  }) {
+    if (remaining.isEmpty) {
+      return null;
     }
+
+    final closedIndex =
+        terminalsBeforeClose.indexWhere((terminal) => terminal.id == terminalId);
+    if (closedIndex < 0) {
+      return remaining.first.id;
+    }
+
+    final nextIndex = closedIndex.clamp(0, remaining.length - 1).toInt();
+    return remaining[nextIndex].id;
+  }
+
+  void _updateTerminalStateById(String terminalId, String nextState) {
     _updateTerminalSummary(
-      activeTerminalId,
+      terminalId,
       (terminal) => terminal.copyWith(state: nextState),
     );
   }
@@ -547,19 +652,15 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     _inputTimer?.cancel();
     _inputTimer = null;
 
-    final data = _pendingInput.toString();
-    if (data.isEmpty) {
+    final pendingInput = _pendingInput;
+    _pendingInput = null;
+    final data = pendingInput?.buffer.toString() ?? '';
+    if (data.isEmpty || pendingInput == null) {
       return;
     }
-    _pendingInput.clear();
 
     final channel = _channel;
     if (channel == null) {
-      return;
-    }
-
-    final activeTerminalId = state.activeTerminalId;
-    if (activeTerminalId == null) {
       return;
     }
 
@@ -567,7 +668,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     if (_transport == _TerminalTransport.desktopLocal) {
       _desktopLocalClient?.sendTerminalInput(
         channel: channel,
-        terminalId: activeTerminalId,
+        terminalId: pendingInput.terminalId,
         dataBase64: payload,
       );
       return;
@@ -686,6 +787,13 @@ class _QueuedResize {
   final String terminalId;
   final int cols;
   final int rows;
+}
+
+class _QueuedInput {
+  _QueuedInput({required this.terminalId});
+
+  final String terminalId;
+  final StringBuffer buffer = StringBuffer();
 }
 
 enum _TerminalTransport {

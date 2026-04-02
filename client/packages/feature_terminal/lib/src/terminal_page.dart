@@ -32,17 +32,15 @@ class TerminalPage extends ConsumerStatefulWidget {
 class _TerminalPageState extends ConsumerState<TerminalPage> {
   final TerminalTheme _theme = TerminalThemes.defaultTheme;
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
-  late Terminal _terminal;
+  final Map<String, Terminal> _terminalCache = <String, Terminal>{};
   StreamSubscription<TerminalUiEvent>? _uiSubscription;
   late TerminalPageConfig _config;
-  bool _resetScheduled = false;
 
   @override
   void initState() {
     super.initState();
     _config = _buildConfig();
-    _terminal = _createTerminal();
-    _bindViewModel(load: true, resetTerminal: false);
+    _bindViewModel(load: true);
   }
 
   @override
@@ -54,7 +52,8 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     }
 
     _config = nextConfig;
-    _bindViewModel(load: true, resetTerminal: true);
+    _terminalCache.clear();
+    _bindViewModel(load: true);
   }
 
   @override
@@ -74,38 +73,42 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     );
   }
 
-  Terminal _createTerminal() {
+  Terminal _createTerminal(String terminalId) {
     final terminal = Terminal(maxLines: 10000);
-    _bindTerminalCallbacks(terminal);
+    _bindTerminalCallbacks(terminal, terminalId);
     return terminal;
   }
 
-  void _bindTerminalCallbacks(Terminal terminal) {
+  Terminal _terminalFor(String terminalId) {
+    return _terminalCache.putIfAbsent(terminalId, () => _createTerminal(terminalId));
+  }
+
+  void _bindTerminalCallbacks(Terminal terminal, String terminalId) {
     terminal.onOutput = (data) {
-      ref.read(terminalViewModelProvider(_config).notifier).queueInput(data);
+      ref.read(terminalViewModelProvider(_config).notifier).queueInput(
+            terminalId: terminalId,
+            data: data,
+          );
     };
     terminal.onResize = (width, height, pixelWidth, pixelHeight) {
       ref
           .read(terminalViewModelProvider(_config).notifier)
-          .queueResize(cols: width, rows: height);
+          .queueResize(
+            terminalId: terminalId,
+            cols: width,
+            rows: height,
+          );
     };
   }
 
   void _bindViewModel({
     required bool load,
-    required bool resetTerminal,
   }) {
     final previousSubscription = _uiSubscription;
     _uiSubscription = null;
     unawaited(previousSubscription?.cancel());
     final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
     _uiSubscription = viewModel.events.listen(_handleUiEvent);
-
-    if (resetTerminal) {
-      _resetTerminal(notify: false);
-    } else {
-      _bindTerminalCallbacks(_terminal);
-    }
 
     if (load) {
       Future.microtask(() => viewModel.load());
@@ -114,47 +117,27 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
 
   void _handleUiEvent(TerminalUiEvent event) {
     switch (event.type) {
-      case TerminalUiEventType.reset:
-        _resetTerminal(defer: true);
+      case TerminalUiEventType.snapshot:
+        final terminal = _createTerminal(event.terminalId);
+        if (event.text.isNotEmpty) {
+          terminal.write(event.text);
+        }
+        _terminalCache[event.terminalId] = terminal;
+        if (event.terminalId == ref.read(terminalViewModelProvider(_config)).activeTerminalId &&
+            mounted) {
+          setState(() {});
+        }
         break;
       case TerminalUiEventType.output:
-        _terminal.write(event.text);
+        final terminal = _terminalFor(event.terminalId);
+        terminal.write(event.text);
         break;
     }
   }
 
-  void _resetTerminal({
-    bool notify = true,
-    bool defer = false,
-  }) {
-    void applyReset() {
-      _terminal = _createTerminal();
-      if (mounted && notify) {
-        setState(() {});
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _focusNode.requestFocus();
-        }
-      });
-    }
-
-    if (defer) {
-      if (_resetScheduled) {
-        return;
-      }
-      _resetScheduled = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _resetScheduled = false;
-        if (!mounted) {
-          return;
-        }
-        applyReset();
-      });
-      return;
-    }
-
-    applyReset();
+  void _pruneTerminalCache(Iterable<String> terminalIds) {
+    final allowed = terminalIds.toSet();
+    _terminalCache.removeWhere((key, _) => !allowed.contains(key));
   }
 
   @override
@@ -163,7 +146,10 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final l10n = context.l10n;
     final state = ref.watch(terminalViewModelProvider(_config));
     final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+    _pruneTerminalCache(state.terminals.map((item) => item.id));
     final activeTerminal = state.activeTerminal;
+    final activeTerminalId = state.activeTerminalId;
+    final terminal = activeTerminalId == null ? null : _terminalFor(activeTerminalId);
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;
 
@@ -267,6 +253,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                             summary: item,
                             selected: item.id == state.activeTerminalId,
                             onTap: () => viewModel.attachTerminal(item.id),
+                            onClose: () => unawaited(viewModel.closeTerminal(item.id)),
                           );
                         },
                       ),
@@ -305,13 +292,16 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                             ignoring: state.terminals.isEmpty,
                             child: Padding(
                               padding: const EdgeInsets.fromLTRB(14, 16, 14, 8),
-                              child: TerminalView(
-                                _terminal,
-                                theme: _theme,
-                                focusNode: _focusNode,
-                                autofocus: true,
-                                backgroundOpacity: 0,
-                              ),
+                              child: terminal == null
+                                  ? const SizedBox.shrink()
+                                  : TerminalView(
+                                      terminal,
+                                      key: ValueKey(activeTerminalId),
+                                      theme: _theme,
+                                      focusNode: _focusNode,
+                                      autofocus: true,
+                                      backgroundOpacity: 0,
+                                    ),
                             ),
                           ),
                         ),
@@ -393,11 +383,13 @@ class _TerminalTab extends StatelessWidget {
     required this.summary,
     required this.selected,
     required this.onTap,
+    required this.onClose,
   });
 
   final TerminalSessionSummary summary;
   final bool selected;
   final VoidCallback onTap;
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
@@ -435,6 +427,22 @@ class _TerminalTab extends StatelessWidget {
                   fontSize: 10,
                   fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                   letterSpacing: 1.2,
+                ),
+              ),
+            ),
+            const SizedBox(width: 4),
+            Tooltip(
+              message: context.l10n.disconnectSession,
+              child: InkWell(
+                onTap: onClose,
+                borderRadius: BorderRadius.circular(999),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Icon(
+                    Icons.close_rounded,
+                    size: 14,
+                    color: selected ? palette.textPrimary : palette.textMuted,
+                  ),
                 ),
               ),
             ),

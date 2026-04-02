@@ -101,8 +101,9 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
       }
     });
 
-    final hasRemoteWorkspace =
-        _activeSession != null || remoteViewState.sessionId != null || remoteViewState.sessionState != null;
+    final hasRemoteWorkspace = _activeSession != null ||
+        remoteViewState.sessionId != null ||
+        remoteViewState.sessionState != null;
     final fullscreenRemote = (_index == 0 || _index == 1) &&
         remoteViewState.sessionId != null &&
         remoteViewState.orientationMode == ViewOrientationMode.landscape;
@@ -160,103 +161,67 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
     }
 
     return Scaffold(
-      body: DecoratedBox(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              const Color(0xFF0A0D11),
-              palette.background,
-              const Color(0xFF080B10),
+      backgroundColor: const Color(0xFF111316),
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: CustomPaint(
+              painter:
+                  _DotGridPainter(color: Colors.white.withValues(alpha: 0.08)),
+            ),
+          ),
+          Positioned(
+            top: -100,
+            right: -80,
+            child:
+                _GlowBlob(color: palette.primaryBright.withValues(alpha: 0.08)),
+          ),
+          Positioned(
+            bottom: -120,
+            left: -70,
+            child: _GlowBlob(color: palette.secondary.withValues(alpha: 0.08)),
+          ),
+          Column(
+            children: [
+              SafeArea(
+                bottom: false,
+                child: _MobileShellTopBar(
+                  username: session.username,
+                  onOpenAccount: () => setState(() => _index = 3),
+                ),
+              ),
+              Expanded(
+                child: pages[_index],
+              ),
             ],
           ),
-        ),
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: CustomPaint(
-                painter: _DotGridPainter(color: Colors.white.withValues(alpha: 0.08)),
-              ),
-            ),
-            Positioned(
-              top: -100,
-              right: -80,
-              child: _GlowBlob(color: palette.primaryBright.withValues(alpha: 0.08)),
-            ),
-            Positioned(
-              bottom: -120,
-              left: -70,
-              child: _GlowBlob(color: palette.secondary.withValues(alpha: 0.08)),
-            ),
-            SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  children: [
-                    _MobileShellTopBar(
-                      username: session.username,
-                      onOpenAccount: () => setState(() => _index = 3),
-                    ),
-                    const SizedBox(height: 10),
-                    Expanded(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-                          child: DecoratedBox(
-                            decoration: AppTheme.glassDecoration(
-                              context,
-                              radius: 18,
-                              fillColor: const Color(0xE611151A),
-                              border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
-                            ),
-                            child: pages[_index],
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
+        ],
       ),
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-            child: _MobileBottomNavBar(
-              currentIndex: _index,
-              onSelect: (value) => setState(() => _index = value),
-              destinations: [
-                _MobileNavDestination(
-                  label: l10n.nodesNav,
-                  icon: Icons.desktop_windows_outlined,
-                  selectedIcon: Icons.desktop_windows_rounded,
-                ),
-                _MobileNavDestination(
-                  label: l10n.monitors,
-                  icon: Icons.live_tv_outlined,
-                  selectedIcon: Icons.live_tv_rounded,
-                ),
-                _MobileNavDestination(
-                  label: l10n.terminal,
-                  icon: Icons.terminal_rounded,
-                  selectedIcon: Icons.terminal,
-                ),
-                _MobileNavDestination(
-                  label: l10n.account,
-                  icon: Icons.person_outline_rounded,
-                  selectedIcon: Icons.person_rounded,
-                ),
-              ],
-            ),
+      bottomNavigationBar: _MobileBottomNavBar(
+        currentIndex: _index,
+        onSelect: (value) => setState(() => _index = value),
+        destinations: [
+          _MobileNavDestination(
+            label: l10n.nodesNav,
+            icon: Icons.desktop_windows_outlined,
+            selectedIcon: Icons.desktop_windows_rounded,
           ),
-        ),
+          _MobileNavDestination(
+            label: l10n.monitors,
+            icon: Icons.live_tv_outlined,
+            selectedIcon: Icons.live_tv_rounded,
+          ),
+          _MobileNavDestination(
+            label: l10n.terminal,
+            icon: Icons.terminal_rounded,
+            selectedIcon: Icons.terminal,
+          ),
+          _MobileNavDestination(
+            label: l10n.account,
+            icon: Icons.person_outline_rounded,
+            selectedIcon: Icons.person_rounded,
+          ),
+        ],
       ),
     );
   }
@@ -278,24 +243,41 @@ class _MobileBottomNavBar extends StatelessWidget {
     final palette = context.freeloom;
 
     return Container(
-      height: 74,
-      padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
       decoration: BoxDecoration(
-        color: const Color(0xE61B2026),
-        border: Border(top: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
+        color: const Color(0xE61E2023),
+        border: Border(
+            top: BorderSide(
+                color: const Color(0xFF3B4B37).withValues(alpha: 0.15))),
+        boxShadow: const [
+          BoxShadow(
+            color: Colors.black45,
+            blurRadius: 48,
+            offset: Offset(0, -24),
+          ),
+        ],
       ),
-      child: Row(
-        children: [
-          for (var index = 0; index < destinations.length; index++)
-            Expanded(
-              child: _MobileBottomNavItem(
-                destination: destinations[index],
-                selected: currentIndex == index,
-                activeColor: palette.primaryBright,
-                onTap: () => onSelect(index),
+      child: ClipRect(
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: SafeArea(
+            top: false,
+            child: SizedBox(
+              height: 64,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  for (var index = 0; index < destinations.length; index++)
+                    _MobileBottomNavItem(
+                      destination: destinations[index],
+                      selected: currentIndex == index,
+                      activeColor: palette.primaryBright,
+                      onTap: () => onSelect(index),
+                    ),
+                ],
               ),
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
@@ -320,46 +302,27 @@ class _MobileBottomNavItem extends StatelessWidget {
 
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
+      splashColor: Colors.transparent,
+      highlightColor: Colors.transparent,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               selected ? destination.selectedIcon : destination.icon,
-              size: 20,
+              size: 26,
               color: selected ? activeColor : inactiveColor,
             ),
-            const SizedBox(height: 5),
-            Text(
-              destination.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: selected ? activeColor : inactiveColor,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 10,
-                    letterSpacing: 0.7,
-                  ),
-            ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              curve: Curves.easeOut,
-              width: selected ? 28 : 0,
+              width: 32,
               height: 2,
               decoration: BoxDecoration(
-                color: activeColor,
+                color: selected ? activeColor : Colors.transparent,
                 borderRadius: BorderRadius.circular(999),
-                boxShadow: selected
-                    ? [
-                        BoxShadow(
-                          color: activeColor.withValues(alpha: 0.35),
-                          blurRadius: 10,
-                        ),
-                      ]
-                    : null,
               ),
             ),
           ],
@@ -395,36 +358,40 @@ class _MobileShellTopBar extends StatelessWidget {
     final palette = context.freeloom;
 
     return Container(
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 14),
-      decoration: BoxDecoration(
-        color: const Color(0xFF12171D).withValues(alpha: 0.96),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
-      ),
+      height: 64,
+      width: double.infinity,
+      color: const Color(0xFF111316),
+      padding: const EdgeInsets.symmetric(horizontal: 24),
       child: Row(
         children: [
-          Icon(Icons.connected_tv_rounded, color: palette.primaryBright, size: 18),
-          const SizedBox(width: 10),
+          Icon(Icons.terminal_rounded, color: palette.primaryBright, size: 24),
+          const SizedBox(width: 12),
           Text(
             'HYPERSYNC PRO',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 24),
+            style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2.0,
+                  color: palette.primaryBright,
+                  fontFamily: 'Space Grotesk',
+                ),
           ),
           const Spacer(),
           InkWell(
             onTap: onOpenAccount,
             borderRadius: BorderRadius.circular(999),
             child: Container(
-              width: 30,
-              height: 30,
+              width: 32,
+              height: 32,
               decoration: BoxDecoration(
-                color: palette.surfaceRaised,
+                border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Center(
                 child: Text(
                   username.isEmpty ? 'F' : username[0].toUpperCase(),
-                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w700, fontSize: 14),
                 ),
               ),
             ),
@@ -452,11 +419,18 @@ class _MobileAccountPage extends StatelessWidget {
     return ListView(
       padding: const EdgeInsets.all(18),
       children: [
-        Text(l10n.account, style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontSize: 30)),
+        Text(l10n.account,
+            style: Theme.of(context)
+                .textTheme
+                .headlineMedium
+                ?.copyWith(fontSize: 30)),
         const SizedBox(height: 8),
         Text(
           l10n.mobileAccountReady,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: palette.textMuted),
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: 18),
         Container(
@@ -473,7 +447,9 @@ class _MobileAccountPage extends StatelessWidget {
                 backgroundColor: palette.primaryBright.withValues(alpha: 0.15),
                 child: Text(
                   username.isEmpty ? 'F' : username[0].toUpperCase(),
-                  style: TextStyle(color: palette.primaryBright, fontWeight: FontWeight.bold),
+                  style: TextStyle(
+                      color: palette.primaryBright,
+                      fontWeight: FontWeight.bold),
                 ),
               ),
               const SizedBox(height: 12),
@@ -482,7 +458,10 @@ class _MobileAccountPage extends StatelessWidget {
               Text(
                 l10n.mobileWorkspaceEntry,
                 textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: palette.textMuted),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: palette.textMuted),
               ),
               const SizedBox(height: 18),
               SizedBox(
@@ -546,5 +525,6 @@ class _DotGridPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _DotGridPainter oldDelegate) => oldDelegate.color != color;
+  bool shouldRepaint(covariant _DotGridPainter oldDelegate) =>
+      oldDelegate.color != color;
 }

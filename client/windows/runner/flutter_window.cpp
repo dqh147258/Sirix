@@ -4,6 +4,17 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+namespace {
+
+constexpr int kMinWindowWidth = 1100;
+constexpr int kMinWindowHeight = 720;
+
+int ScaleForWindow(int value, HWND hwnd) {
+  return MulDiv(value, GetDpiForWindow(hwnd), 96);
+}
+
+}  // namespace
+
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
@@ -62,6 +73,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   }
 
   switch (message) {
+    case WM_GETMINMAXINFO: {
+      auto* minmax_info = reinterpret_cast<MINMAXINFO*>(lparam);
+      minmax_info->ptMinTrackSize.x = ScaleForWindow(kMinWindowWidth, hwnd);
+      minmax_info->ptMinTrackSize.y = ScaleForWindow(kMinWindowHeight, hwnd);
+      return 0;
+    }
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;

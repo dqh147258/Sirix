@@ -23,12 +23,7 @@ class HttpBackendApiClient implements BackendApiClient {
         'password': password,
       },
     );
-    return AuthSession(
-      userId: json['user_id'] as String,
-      username: json['username'] as String,
-      accessToken: json['access_token'] as String,
-      refreshToken: json['refresh_token'] as String,
-    );
+    return AuthSession.fromJson(json);
   }
 
   @override
@@ -45,12 +40,20 @@ class HttpBackendApiClient implements BackendApiClient {
         'client_type': clientType,
       },
     );
-    return AuthSession(
-      userId: json['user_id'] as String,
-      username: json['username'] as String,
-      accessToken: json['access_token'] as String,
-      refreshToken: json['refresh_token'] as String,
+    return AuthSession.fromJson(json);
+  }
+
+  @override
+  Future<AuthSession> refresh({
+    required String refreshToken,
+  }) async {
+    final json = await _post(
+      '/api/v1/auth/refresh',
+      body: {
+        'refresh_token': refreshToken,
+      },
     );
+    return AuthSession.fromJson(json);
   }
 
   @override

@@ -74,11 +74,22 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
   int _navigationIndex = 0;
 
   @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      return ref.read(authViewModelProvider('desktop').notifier).initialize();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('desktop'));
     final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
     final palette = context.freeloom;
     final l10n = context.l10n;
+    if (!authState.initialized || authState.isInitializing) {
+      return const _DesktopAuthBootstrapScreen();
+    }
     if (!authState.isAuthenticated) {
       return const AuthPage(clientType: 'desktop');
     }
@@ -388,6 +399,41 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _DesktopAuthBootstrapScreen extends StatelessWidget {
+  const _DesktopAuthBootstrapScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Scaffold(
+      backgroundColor: palette.surface,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.4,
+                color: palette.primaryBright,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Checking desktop session...',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: palette.textSecondary,
+                  ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -812,4 +858,3 @@ class _InfoBlock extends StatelessWidget {
     );
   }
 }
-

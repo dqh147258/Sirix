@@ -8,15 +8,32 @@ import 'package:feature_terminal/feature_terminal.dart';
 
 import 'shell_view_model.dart';
 
-class DesktopShellPage extends ConsumerWidget {
+class DesktopShellPage extends ConsumerStatefulWidget {
   const DesktopShellPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<DesktopShellPage> createState() => _DesktopShellPageState();
+}
+
+class _DesktopShellPageState extends ConsumerState<DesktopShellPage> {
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      return ref.read(authViewModelProvider('desktop').notifier).initialize();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('desktop'));
     final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
     final shellState = ref.watch(shellViewModelProvider(ShellMode.desktop));
     final shellVm = ref.read(shellViewModelProvider(ShellMode.desktop).notifier);
+
+    if (!authState.initialized || authState.isInitializing) {
+      return const _DesktopShellBootstrapScreen();
+    }
 
     if (!authState.isAuthenticated) {
       return const AuthPage(clientType: 'desktop');
@@ -103,6 +120,25 @@ class DesktopShellPage extends ConsumerWidget {
               );
             },
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DesktopShellBootstrapScreen extends StatelessWidget {
+  const _DesktopShellBootstrapScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF090C11),
+      body: Center(
+        child: CircularProgressIndicator(
+          strokeWidth: 2.4,
+          color: palette.primaryBright,
         ),
       ),
     );

@@ -53,6 +53,31 @@ class MockBackendApiClient implements BackendApiClient {
   }
 
   @override
+  Future<AuthSession> refresh({
+    required String refreshToken,
+  }) async {
+    AuthSession? existing;
+    for (final session in _users.values) {
+      if (session.refreshToken == refreshToken) {
+        existing = session;
+        break;
+      }
+    }
+    if (existing == null) {
+      throw StateError('refresh token is invalid');
+    }
+
+    final refreshed = AuthSession(
+      userId: existing.userId,
+      username: existing.username,
+      accessToken: _uuid.v4(),
+      refreshToken: _uuid.v4(),
+    );
+    _users[existing.username.toLowerCase().trim()] = refreshed;
+    return refreshed;
+  }
+
+  @override
   Future<AuthSession> register({
     required String username,
     required String password,

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:app_core/app_core.dart';
+import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'models.dart';
@@ -18,16 +19,18 @@ class DesktopLocalClient {
   final int portStart;
   final int portEnd;
   final String path;
+  int? _resolvedPort;
 
   Future<WebSocketChannel> connect() async {
     final errors = <String>[];
 
-    for (var port = portStart; port <= portEnd; port += 1) {
+    for (final port in _candidatePorts()) {
       final uri = Uri.parse('ws://$host:$port$path');
       try {
         AppLogger.trace('try desktop local ws: $uri');
         final channel = WebSocketChannel.connect(uri);
         await channel.ready.timeout(const Duration(milliseconds: 900));
+        _resolvedPort = port;
         AppLogger.info('desktop local ws connected: $uri');
         return channel;
       } catch (error) {
@@ -39,6 +42,51 @@ class DesktopLocalClient {
     throw StateError(
       '无法连接 desktop-server 本地WS，已尝试端口 $portStart-$portEnd: ${errors.join('; ')}',
     );
+  }
+
+  Future<AuthSession?> getAuthSession() async {
+    final response = await _request('GET', '/auth/session');
+    if (response.statusCode == 204) {
+      return null;
+    }
+    return AuthSession.fromJson(_decodeMap(response));
+  }
+
+  Future<AuthSession> login({
+    required String username,
+    required String password,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/auth/session',
+      body: {
+        'username': username,
+        'password': password,
+      },
+    );
+    return AuthSession.fromJson(_decodeMap(response));
+  }
+
+  Future<AuthSession> register({
+    required String username,
+    required String password,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/auth/register',
+      body: {
+        'username': username,
+        'password': password,
+      },
+    );
+    return AuthSession.fromJson(_decodeMap(response));
+  }
+
+  Future<void> logout() async {
+    final response = await _request('DELETE', '/auth/session');
+    if (response.statusCode != 204) {
+      _decodeMap(response);
+    }
   }
 
   Future<List<TerminalSessionSummary>> listTerminalSessions() async {
@@ -198,5 +246,63 @@ class DesktopLocalClient {
           ? null
           : DateTime.tryParse(json['closed_at'] as String? ?? ''),
     );
+  }
+
+  Iterable<int> _candidatePorts() sync* {
+    final resolvedPort = _resolvedPort;
+    if (resolvedPort != null && resolvedPort >= portStart && resolvedPort <= portEnd) {
+      yield resolvedPort;
+    }
+    for (var port = portStart; port <= portEnd; port += 1) {
+      if (port == resolvedPort) {
+        continue;
+      }
+      yield port;
+    }
+  }
+
+  Future<http.Response> _request(
+    String method,
+    String requestPath, {
+    Map<String, dynamic>? body,
+  }) async {
+    final errors = <String>[];
+
+    for (final port in _candidatePorts()) {
+      final uri = Uri.parse('http://$host:$port$requestPath');
+      try {
+        final response = switch (method) {
+          'GET' => await http.get(uri),
+          'POST' => await http.post(
+              uri,
+              headers: const {'Content-Type': 'application/json'},
+              body: jsonEncode(body ?? const <String, dynamic>{}),
+            ),
+          'DELETE' => await http.delete(uri),
+          _ => throw UnsupportedError('unsupported method $method'),
+        };
+        _resolvedPort = port;
+        return response;
+      } catch (error) {
+        errors.add('$port:$error');
+      }
+    }
+
+    throw StateError(
+      '无法连接 desktop-server 本地HTTP，已尝试端口 $portStart-$portEnd: ${errors.join('; ')}',
+    );
+  }
+
+  Map<String, dynamic> _decodeMap(http.Response response) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw StateError('HTTP ${response.statusCode}: ${response.body}');
+    }
+
+    if (response.body.isEmpty) {
+      return const <String, dynamic>{};
+    }
+
+    final decoded = jsonDecode(response.body);
+    return decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
   }
 }

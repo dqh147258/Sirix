@@ -12,6 +12,10 @@ abstract class BackendApiClient {
     required String clientType,
   });
 
+  Future<AuthSession> refresh({
+    required String refreshToken,
+  });
+
   Future<DeviceSummary> registerDevice({
     required String accessToken,
     required String deviceName,

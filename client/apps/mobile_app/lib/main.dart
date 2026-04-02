@@ -76,11 +76,23 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
   RemoteSessionSummary? _activeSession;
 
   @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      return ref.read(authViewModelProvider('mobile').notifier).initialize();
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('mobile'));
     final session = authState.session;
     final palette = context.freeloom;
     final l10n = context.l10n;
+
+    if (!authState.initialized || authState.isInitializing) {
+      return const _MobileAuthBootstrapScreen();
+    }
 
     if (session == null) {
       return const AuthPage(clientType: 'mobile');
@@ -222,6 +234,41 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
             selectedIcon: Icons.person_rounded,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _MobileAuthBootstrapScreen extends StatelessWidget {
+  const _MobileAuthBootstrapScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF111316),
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.4,
+                color: palette.primaryBright,
+              ),
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Restoring mobile session...',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: palette.textSecondary,
+                  ),
+            ),
+          ],
+        ),
       ),
     );
   }

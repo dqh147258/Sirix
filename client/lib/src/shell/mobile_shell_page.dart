@@ -11,13 +11,30 @@ import 'package:feature_terminal/feature_terminal.dart';
 
 import 'shell_view_model.dart';
 
-class MobileShellPage extends ConsumerWidget {
+class MobileShellPage extends ConsumerStatefulWidget {
   const MobileShellPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MobileShellPage> createState() => _MobileShellPageState();
+}
+
+class _MobileShellPageState extends ConsumerState<MobileShellPage> {
+  @override
+  void initState() {
+    super.initState();
+    Future.microtask(() {
+      return ref.read(authViewModelProvider('mobile').notifier).initialize();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final authState = ref.watch(authViewModelProvider('mobile'));
     final session = authState.session;
+
+    if (!authState.initialized || authState.isInitializing) {
+      return const _MobileShellBootstrapScreen();
+    }
 
     if (session == null) {
       return const AuthPage(clientType: 'mobile');
@@ -123,6 +140,25 @@ class MobileShellPage extends ConsumerWidget {
               label: context.l10n.account,
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileShellBootstrapScreen extends StatelessWidget {
+  const _MobileShellBootstrapScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.freeloom;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF090C11),
+      body: Center(
+        child: CircularProgressIndicator(
+          strokeWidth: 2.4,
+          color: palette.primaryBright,
         ),
       ),
     );

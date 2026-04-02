@@ -4,7 +4,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
-use crate::app::{runtime_logger::RuntimeLogger, terminal::manager::TerminalManager};
+use crate::app::{
+    auth::AuthSessionStore, runtime_logger::RuntimeLogger, terminal::manager::TerminalManager,
+};
 use crate::bootstrap::config::AppConfig;
 
 #[derive(Clone)]
@@ -15,6 +17,7 @@ pub struct AppState {
     pub local_events: broadcast::Sender<String>,
     pub pending_authorizations: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     pub terminal_manager: Arc<TerminalManager>,
+    pub auth_session_store: AuthSessionStore,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +43,7 @@ impl AppState {
                 config.backend.device_id.clone(),
                 local_events.clone(),
             )),
+            auth_session_store: AuthSessionStore::new(config.backend.base_url.clone()),
             config: Arc::new(config),
             logger,
             runtime: Arc::new(RwLock::new(RuntimeState {

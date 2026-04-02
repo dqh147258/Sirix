@@ -11,6 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^2.5.1
+  path_provider: ^2.1.4
   app_core:
     path: ../app_core
   infra_api:

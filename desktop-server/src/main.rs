@@ -31,6 +31,22 @@ async fn main() -> anyhow::Result<()> {
     install_panic_logger(state.clone());
     install_termination_logger(state.clone());
     state.logger.clone().spawn_flush_task();
+    match state.auth_session_store.restore().await {
+        Ok(Some(session)) => {
+            state.logger.info(format!(
+                "restored desktop auth session for user={}",
+                session.username
+            ));
+        }
+        Ok(None) => {
+            state.logger.info("no persisted desktop auth session found");
+        }
+        Err(error) => {
+            state
+                .logger
+                .warn(format!("failed to restore desktop auth session: {error}"));
+        }
+    }
     spawn_background_tasks(state.clone());
 
     info!(

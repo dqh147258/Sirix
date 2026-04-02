@@ -13,6 +13,24 @@ class AuthSession {
   final String username;
   final String accessToken;
   final String refreshToken;
+
+  factory AuthSession.fromJson(Map<String, dynamic> json) {
+    return AuthSession(
+      userId: json['user_id'] as String? ?? json['userId'] as String? ?? '',
+      username: json['username'] as String? ?? '',
+      accessToken: json['access_token'] as String? ?? json['accessToken'] as String? ?? '',
+      refreshToken: json['refresh_token'] as String? ?? json['refreshToken'] as String? ?? '',
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'user_id': userId,
+      'username': username,
+      'access_token': accessToken,
+      'refresh_token': refreshToken,
+    };
+  }
 }
 
 @immutable

@@ -1,3 +1,4 @@
 /desktop-server/target
 /backend-server/target
+/desktop-server/runtime
 backend-server/deploy/runtime-logs

@@ -1,19 +1,43 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:app_core/app_core.dart';
-import 'package:infra_api/infra_api.dart';
 
+import 'auth_session_controller.dart';
 import 'auth_state.dart';
 
 class AuthViewModel extends BaseViewModel<AuthState> {
   AuthViewModel({
-    required BackendApiClient apiClient,
+    required AuthSessionController sessionController,
     required this.clientType,
-  })  : _apiClient = apiClient,
+  })  : _sessionController = sessionController,
         super(const AuthState());
 
-  final BackendApiClient _apiClient;
+  final AuthSessionController _sessionController;
   final String clientType;
+
+  Future<void> initialize() async {
+    if (state.isInitializing || state.initialized) {
+      return;
+    }
+
+    state = state.copyWith(isInitializing: true, clearError: true);
+    try {
+      final session = await _sessionController.restore();
+      state = state.copyWith(
+        isInitializing: false,
+        initialized: true,
+        session: session,
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        isInitializing: false,
+        initialized: true,
+        session: null,
+        errorMessage: AppLocalizations.current.loginFailed('$error'),
+      );
+    }
+  }
 
   void setUsername(String value) {
     state = state.copyWith(username: value, clearError: true);
@@ -31,16 +55,21 @@ class AuthViewModel extends BaseViewModel<AuthState> {
 
     state = state.copyWith(isLoading: true, clearError: true);
     try {
-      final session = await _apiClient.login(
+      final session = await _sessionController.login(
         username: state.username,
         password: state.password,
-        clientType: clientType,
       );
-      state = state.copyWith(isLoading: false, session: session, clearError: true);
+      state = state.copyWith(
+        isLoading: false,
+        initialized: true,
+        session: session,
+        clearError: true,
+      );
       AppLogger.info('login success: ${session.username}');
     } catch (error) {
       state = state.copyWith(
         isLoading: false,
+        initialized: true,
         errorMessage: AppLocalizations.current.loginFailed('$error'),
       );
     }
@@ -54,29 +83,45 @@ class AuthViewModel extends BaseViewModel<AuthState> {
 
     state = state.copyWith(isLoading: true, clearError: true);
     try {
-      final session = await _apiClient.register(
+      final session = await _sessionController.register(
         username: state.username,
         password: state.password,
       );
-      state = state.copyWith(isLoading: false, session: session, clearError: true);
+      state = state.copyWith(
+        isLoading: false,
+        initialized: true,
+        session: session,
+        clearError: true,
+      );
       AppLogger.info('register success: ${session.username}');
     } catch (error) {
       state = state.copyWith(
         isLoading: false,
+        initialized: true,
         errorMessage: AppLocalizations.current.registerFailed('$error'),
       );
     }
   }
 
-  void logout() {
-    state = state.copyWith(session: null, password: '', clearError: true);
+  Future<void> logout() async {
+    try {
+      await _sessionController.logout();
+    } catch (error) {
+      AppLogger.warn('logout failed: $error');
+    }
+    state = state.copyWith(
+      session: null,
+      password: '',
+      initialized: true,
+      clearError: true,
+    );
   }
 }
 
 final authViewModelProvider =
     StateNotifierProvider.family<AuthViewModel, AuthState, String>(
   (ref, clientType) {
-    final apiClient = ref.watch(backendApiClientProvider);
-    return AuthViewModel(apiClient: apiClient, clientType: clientType);
+    final sessionController = ref.watch(authSessionControllerProvider(clientType));
+    return AuthViewModel(sessionController: sessionController, clientType: clientType);
   },
 );

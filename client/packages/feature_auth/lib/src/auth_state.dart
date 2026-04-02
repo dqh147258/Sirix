@@ -8,6 +8,8 @@ class AuthState {
     this.username = '',
     this.password = '',
     this.isLoading = false,
+    this.isInitializing = false,
+    this.initialized = false,
     this.errorMessage,
     this.session,
   });
@@ -17,6 +19,8 @@ class AuthState {
   final String username;
   final String password;
   final bool isLoading;
+  final bool isInitializing;
+  final bool initialized;
   final String? errorMessage;
   final AuthSession? session;
 
@@ -26,6 +30,8 @@ class AuthState {
     String? username,
     String? password,
     bool? isLoading,
+    bool? isInitializing,
+    bool? initialized,
     String? errorMessage,
     Object? session = _unset,
     bool clearError = false,
@@ -34,6 +40,8 @@ class AuthState {
       username: username ?? this.username,
       password: password ?? this.password,
       isLoading: isLoading ?? this.isLoading,
+      isInitializing: isInitializing ?? this.isInitializing,
+      initialized: initialized ?? this.initialized,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       session: identical(session, _unset) ? this.session : session as AuthSession?,
     );

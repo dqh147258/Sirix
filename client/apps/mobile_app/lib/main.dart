@@ -195,15 +195,11 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
           ),
           Column(
             children: [
-              SafeArea(
-                bottom: false,
-                child: _MobileShellTopBar(
-                  username: session.username,
-                  onOpenAccount: () => setState(() => _index = 3),
-                ),
-              ),
               Expanded(
-                child: pages[_index],
+                child: SafeArea(
+                  bottom: false,
+                  child: pages[_index],
+                ),
               ),
             ],
           ),
@@ -389,64 +385,6 @@ class _MobileNavDestination {
   final String label;
   final IconData icon;
   final IconData selectedIcon;
-}
-
-class _MobileShellTopBar extends StatelessWidget {
-  const _MobileShellTopBar({
-    required this.username,
-    required this.onOpenAccount,
-  });
-
-  final String username;
-  final VoidCallback onOpenAccount;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = context.sirix;
-
-    return Container(
-      height: 64,
-      width: double.infinity,
-      color: const Color(0xFF111316),
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      child: Row(
-        children: [
-          Icon(Icons.terminal_rounded, color: palette.primaryBright, size: 24),
-          const SizedBox(width: 12),
-          Text(
-            'HYPERSYNC PRO',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 2.0,
-                  color: palette.primaryBright,
-                  fontFamily: 'Space Grotesk',
-                ),
-          ),
-          const Spacer(),
-          InkWell(
-            onTap: onOpenAccount,
-            borderRadius: BorderRadius.circular(999),
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.white.withValues(alpha: 0.3)),
-                borderRadius: BorderRadius.circular(999),
-              ),
-              child: Center(
-                child: Text(
-                  username.isEmpty ? 'F' : username[0].toUpperCase(),
-                  style: const TextStyle(
-                      fontWeight: FontWeight.w700, fontSize: 14),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 class _MobileAccountPage extends StatelessWidget {

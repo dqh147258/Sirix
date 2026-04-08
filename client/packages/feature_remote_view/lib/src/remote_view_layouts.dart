@@ -20,8 +20,7 @@ class _RemoteWorkspaceView extends StatelessWidget {
     final selectedSnapshot = _selectedSnapshot(state);
     final selectedScreenTitle = _selectedScreenTitle(context, state, selectedSnapshot);
 
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(0, 0, 0, 90),
+    return Column(
       children: [
         _RemoteHeader(
           title: selectedScreenTitle,
@@ -29,28 +28,44 @@ class _RemoteWorkspaceView extends StatelessWidget {
           liveActive: streamState.connected,
           onTapTitle: () => vm.openMonitorPicker(accessToken: accessToken),
         ),
-        _RemoteDisplayCard(
-          state: state,
-          streamState: streamState,
-          streamController: streamController,
-          selectedSnapshot: selectedSnapshot,
-          preferLiveOnly: true,
-          placeholderLabel: state.sessionId == null
-              ? null
-              : context.l10n.waitingScreenFrame(
-                  state.sessionId!,
-                  state.sessionState ?? 'connecting',
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(0, 10, 0, 0),
+            child: Column(
+              children: [
+                Expanded(
+                  flex: 4,
+                  child: _RemoteDisplayCard(
+                    state: state,
+                    streamState: streamState,
+                    streamController: streamController,
+                    selectedSnapshot: selectedSnapshot,
+                    preferLiveOnly: true,
+                    expandSurface: true,
+                    padding: EdgeInsets.zero,
+                    placeholderLabel: state.sessionId == null
+                        ? null
+                        : context.l10n.waitingScreenFrame(
+                            state.sessionId!,
+                            state.sessionState ?? 'connecting',
+                          ),
+                    onToggleFullscreen: () => vm.rotate(ViewOrientationMode.landscape),
+                  ),
                 ),
-          onToggleFullscreen: () => vm.rotate(ViewOrientationMode.landscape),
-        ),
-        SizedBox(
-          height: 360,
-          child: TerminalPage(
-            accessToken: accessToken,
-            deviceId: state.deviceId,
-            allowCreate: false,
-            showHeader: false,
-            compact: true,
+                const SizedBox(height: 10),
+                Expanded(
+                  flex: 5,
+                  child: TerminalPage(
+                    accessToken: accessToken,
+                    deviceId: state.deviceId,
+                    allowCreate: false,
+                    showHeader: false,
+                    compact: true,
+                    fullBleed: true,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ],

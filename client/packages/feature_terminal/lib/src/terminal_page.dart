@@ -17,6 +17,7 @@ class TerminalPage extends ConsumerStatefulWidget {
     this.allowCreate = true,
     this.showHeader = true,
     this.compact = false,
+    this.fullBleed = false,
   });
 
   final String accessToken;
@@ -24,6 +25,7 @@ class TerminalPage extends ConsumerStatefulWidget {
   final bool allowCreate;
   final bool showHeader;
   final bool compact;
+  final bool fullBleed;
 
   @override
   ConsumerState<TerminalPage> createState() => _TerminalPageState();
@@ -146,6 +148,8 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final l10n = context.l10n;
     final state = ref.watch(terminalViewModelProvider(_config));
     final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+    final horizontalInset = widget.fullBleed ? 0.0 : 16.0;
+    final bottomInset = widget.fullBleed ? 0.0 : 16.0;
     _pruneTerminalCache(state.terminals.map((item) => item.id));
     final activeTerminal = state.activeTerminal;
     final activeTerminalId = state.activeTerminalId;
@@ -157,7 +161,12 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
       children: [
         if (widget.showHeader)
           Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, widget.compact ? 10 : 14),
+            padding: EdgeInsets.fromLTRB(
+              horizontalInset,
+              16,
+              horizontalInset,
+              widget.compact ? 10 : 14,
+            ),
             child: Row(
               children: [
                 Expanded(
@@ -204,7 +213,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
           ),
         if (state.errorMessage != null)
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            padding: EdgeInsets.fromLTRB(horizontalInset, 0, horizontalInset, 12),
             child: Container(
               width: double.infinity,
               padding: const EdgeInsets.all(14),
@@ -220,7 +229,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
             ),
           ),
         Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16),
+          margin: EdgeInsets.symmetric(horizontal: horizontalInset),
           padding: const EdgeInsets.symmetric(horizontal: 8),
           height: 42,
           decoration: BoxDecoration(
@@ -269,7 +278,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
         ),
         Expanded(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            padding: EdgeInsets.fromLTRB(horizontalInset, 0, horizontalInset, bottomInset),
             child: DecoratedBox(
               decoration: BoxDecoration(
                 color: const Color(0xFF0A0D10),

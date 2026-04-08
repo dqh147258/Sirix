@@ -7,6 +7,8 @@ class _RemoteDisplayCard extends StatelessWidget {
     required this.streamController,
     required this.selectedSnapshot,
     this.preferLiveOnly = false,
+    this.expandSurface = false,
+    this.padding = const EdgeInsets.fromLTRB(12, 12, 12, 10),
     this.placeholderLabel,
     this.onToggleFullscreen,
   });
@@ -16,6 +18,8 @@ class _RemoteDisplayCard extends StatelessWidget {
   final RemoteStreamController streamController;
   final ScreenSnapshot? selectedSnapshot;
   final bool preferLiveOnly;
+  final bool expandSurface;
+  final EdgeInsetsGeometry padding;
   final String? placeholderLabel;
   final VoidCallback? onToggleFullscreen;
 
@@ -23,9 +27,87 @@ class _RemoteDisplayCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final l10n = context.l10n;
+    final viewport = Stack(
+      children: [
+        Positioned.fill(
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            child: _RemoteSurface(
+              streamController: streamController,
+              selectedSnapshot: selectedSnapshot,
+              preferLiveOnly: preferLiveOnly,
+              placeholderLabel: placeholderLabel,
+            ),
+          ),
+        ),
+        Positioned(
+          top: 12,
+          right: 12,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.34),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.sync_rounded, size: 14, color: palette.secondary),
+                const SizedBox(width: 6),
+                Text(
+                  l10n.syncedLabel,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (onToggleFullscreen != null)
+          Positioned(
+            right: 14,
+            bottom: 14,
+            child: _GlassDisplayActionButton(
+              icon: Icons.fullscreen_rounded,
+              onPressed: onToggleFullscreen!,
+            ),
+          ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 14,
+          child: Center(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(18),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.28),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _MetricColumn(label: l10n.latencyLabel, value: '12ms'),
+                      const SizedBox(width: 20),
+                      _MetricColumn(label: 'FPS', value: '60'),
+                      const SizedBox(width: 20),
+                      _MetricColumn(label: l10n.bitrateLabel, value: '15Mbps'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+      padding: padding,
       child: Container(
         decoration: BoxDecoration(
           color: const Color(0xFF0E1217),
@@ -34,89 +116,15 @@ class _RemoteDisplayCard extends StatelessWidget {
         ),
         child: Column(
           children: [
-            AspectRatio(
-              aspectRatio: selectedSnapshot == null
-                  ? 16 / 9
-                  : selectedSnapshot!.width / selectedSnapshot!.height,
-              child: Stack(
-                children: [
-                  Positioned.fill(
-                    child: ClipRRect(
-                      borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-                      child: _RemoteSurface(
-                        streamController: streamController,
-                        selectedSnapshot: selectedSnapshot,
-                        preferLiveOnly: preferLiveOnly,
-                        placeholderLabel: placeholderLabel,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    top: 12,
-                    right: 12,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.34),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.sync_rounded, size: 14, color: palette.secondary),
-                          const SizedBox(width: 6),
-                          Text(
-                            l10n.syncedLabel,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  if (onToggleFullscreen != null)
-                    Positioned(
-                      right: 14,
-                      bottom: 14,
-                      child: _GlassDisplayActionButton(
-                        icon: Icons.fullscreen_rounded,
-                        onPressed: onToggleFullscreen!,
-                      ),
-                    ),
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 14,
-                    child: Center(
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: BackdropFilter(
-                          filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.28),
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                _MetricColumn(label: l10n.latencyLabel, value: '12ms'),
-                                const SizedBox(width: 20),
-                                _MetricColumn(label: 'FPS', value: '60'),
-                                const SizedBox(width: 20),
-                                _MetricColumn(label: l10n.bitrateLabel, value: '15Mbps'),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+            if (expandSurface)
+              Expanded(child: viewport)
+            else
+              AspectRatio(
+                aspectRatio: selectedSnapshot == null
+                    ? 16 / 9
+                    : selectedSnapshot!.width / selectedSnapshot!.height,
+                child: viewport,
               ),
-            ),
             Container(
               height: 44,
               padding: const EdgeInsets.symmetric(horizontal: 14),

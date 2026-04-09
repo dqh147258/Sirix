@@ -8,17 +8,23 @@ import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
 import 'package:infra_webrtc/infra_webrtc.dart';
 
+import 'desktop_terminal_channel_bridge.dart';
 import 'desktop_authorize_state.dart';
 
 const _authMediaTraceTag = '[MEDIA_AUTH_TRACE]';
 
 class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
-  DesktopAuthorizeViewModel(this._localClient, this._apiClient, this._mediaController)
-      : super(const DesktopAuthorizeState());
+  DesktopAuthorizeViewModel(
+    this._localClient,
+    this._apiClient,
+    this._mediaController,
+    this._terminalBridge,
+  ) : super(const DesktopAuthorizeState());
 
   final DesktopLocalClient _localClient;
   final BackendApiClient _apiClient;
   final DesktopMediaController _mediaController;
+  final DesktopTerminalChannelBridge _terminalBridge;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -243,6 +249,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
         unawaited(_handleQualityChanged(decoded));
         break;
       case 'session.control.terminate':
+        unawaited(_terminalBridge.unbindSession());
         unawaited(_mediaController.stop());
         break;
       default:
@@ -277,6 +284,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
           );
         },
       );
+      await _terminalBridge.bindSession(sessionId);
       state = state.copyWith(clearError: true);
     } catch (error) {
       AppLogger.error('desktop media start answering failed: $error');
@@ -494,6 +502,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
     _closingChannel = true;
     _cancelReconnect();
     AppLogger.info('closing desktop local websocket');
+    await _terminalBridge.unbindSession();
     await _mediaController.stop();
     await _subscription?.cancel();
     _subscription = null;
@@ -525,6 +534,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
     _disposed = true;
     _cancelReconnect();
     unawaited(_closeChannel());
+    unawaited(_terminalBridge.dispose());
     super.dispose();
   }
 
@@ -541,7 +551,19 @@ final desktopAuthorizeViewModelProvider =
   final localClient = ref.watch(desktopLocalClientProvider);
   final apiClient = ref.watch(backendApiClientProvider);
   final mediaController = ref.watch(desktopMediaControllerProvider.notifier);
-  final viewModel = DesktopAuthorizeViewModel(localClient, apiClient, mediaController);
+  final terminalChannelController = ref.watch(
+    sessionTerminalChannelControllerProvider.notifier,
+  );
+  final terminalBridge = DesktopTerminalChannelBridge(
+    localClient: localClient,
+    terminalChannelController: terminalChannelController,
+  );
+  final viewModel = DesktopAuthorizeViewModel(
+    localClient,
+    apiClient,
+    mediaController,
+    terminalBridge,
+  );
   ref.listen(desktopMediaControllerProvider, (_, next) {
     viewModel.syncMediaState(next);
   });

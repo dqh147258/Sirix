@@ -14,6 +14,7 @@ class TerminalPage extends ConsumerStatefulWidget {
     super.key,
     required this.accessToken,
     this.deviceId,
+    this.sessionId,
     this.allowCreate = true,
     this.showHeader = true,
     this.compact = false,
@@ -22,6 +23,7 @@ class TerminalPage extends ConsumerStatefulWidget {
 
   final String accessToken;
   final String? deviceId;
+  final String? sessionId;
   final bool allowCreate;
   final bool showHeader;
   final bool compact;
@@ -71,7 +73,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     return TerminalPageConfig(
       accessToken: widget.accessToken,
       deviceId: widget.deviceId,
-      allowCreate: widget.allowCreate,
+      sessionId: widget.sessionId,
     );
   }
 

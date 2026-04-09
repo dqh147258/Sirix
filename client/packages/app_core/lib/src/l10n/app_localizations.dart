@@ -260,7 +260,7 @@ class AppLocalizations {
   String terminalCloseFailed(String error) =>
       isZh ? '关闭终端失败: $error' : 'Failed to close terminal: $error';
   String get terminalStreamUnavailable =>
-      isZh ? 'Mock 模式下未启用 terminal websocket' : 'Terminal websocket is unavailable in mock mode';
+      isZh ? '终端连接暂不可用' : 'Terminal connection is unavailable';
   String terminalConnectFailed(String error) =>
       isZh ? '连接终端失败: $error' : 'Failed to connect to terminal: $error';
   String terminalStreamError(String error) =>

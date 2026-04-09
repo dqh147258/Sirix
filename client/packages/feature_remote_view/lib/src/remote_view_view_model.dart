@@ -363,7 +363,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     try {
-      final offer = await _streamController.createOffer();
+      final offer = await _streamController.createOffer(sessionId: sessionId);
       await _apiClient.sendMobileWebrtcSignal(
         accessToken: accessToken,
         sessionId: sessionId,
@@ -455,7 +455,10 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     try {
-      final answer = await _streamController.createAnswerForOffer(sdp);
+      final answer = await _streamController.createAnswerForOffer(
+        sdp,
+        sessionId: sessionId,
+      );
       await _apiClient.sendMobileWebrtcSignal(
         accessToken: accessToken,
         sessionId: sessionId,

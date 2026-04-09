@@ -58,7 +58,8 @@ class _RemoteWorkspaceView extends StatelessWidget {
                   child: TerminalPage(
                     accessToken: accessToken,
                     deviceId: state.deviceId,
-                    allowCreate: false,
+                    sessionId: state.sessionId,
+                    allowCreate: state.deviceId != null && state.sessionId != null,
                     showHeader: false,
                     compact: true,
                     fullBleed: true,

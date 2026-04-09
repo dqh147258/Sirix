@@ -7,6 +7,8 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
 
+import 'session_terminal_channel_controller.dart';
+
 typedef LocalSignalCallback = Future<void> Function(
   WebrtcSignalType signalType, {
   String? sdp,
@@ -59,11 +61,15 @@ class RemoteStreamState {
 }
 
 class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
-  RemoteStreamController() : super(const RemoteStreamState());
+  RemoteStreamController({
+    required SessionTerminalChannelController terminalChannelController,
+  })  : _terminalChannelController = terminalChannelController,
+        super(const RemoteStreamState());
 
   RTCPeerConnection? _peerConnection;
   RTCVideoRenderer? _remoteRenderer;
   LocalSignalCallback? _localSignalCallback;
+  final SessionTerminalChannelController _terminalChannelController;
 
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
 
@@ -157,6 +163,7 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
     if (peerConnection != null) {
       await peerConnection.close();
     }
+    await _terminalChannelController.reset();
 
     state = state.copyWith(
       connected: false,
@@ -177,12 +184,18 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
     );
   }
 
-  Future<String> createOffer() async {
+  Future<String> createOffer({
+    required String sessionId,
+  }) async {
     final peerConnection = _peerConnection;
     if (peerConnection == null) {
       throw StateError('peer connection is not ready');
     }
 
+    await _terminalChannelController.bindMobilePeerConnection(
+      sessionId: sessionId,
+      peerConnection: peerConnection,
+    );
     final offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
     AppLogger.info(
@@ -193,12 +206,19 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
     return offer.sdp ?? '';
   }
 
-  Future<String> createAnswerForOffer(String remoteOffer) async {
+  Future<String> createAnswerForOffer(
+    String remoteOffer, {
+    required String sessionId,
+  }) async {
     final peerConnection = _peerConnection;
     if (peerConnection == null) {
       throw StateError('peer connection is not ready');
     }
 
+    await _terminalChannelController.bindMobilePeerConnection(
+      sessionId: sessionId,
+      peerConnection: peerConnection,
+    );
     await peerConnection.setRemoteDescription(
       RTCSessionDescription(remoteOffer, 'offer'),
     );
@@ -285,5 +305,10 @@ Map<String, dynamic> iceCandidateToMap(RTCIceCandidate candidate) {
 
 final remoteStreamControllerProvider =
     StateNotifierProvider<RemoteStreamController, RemoteStreamState>((ref) {
-  return RemoteStreamController();
+  final terminalChannelController = ref.watch(
+    sessionTerminalChannelControllerProvider.notifier,
+  );
+  return RemoteStreamController(
+    terminalChannelController: terminalChannelController,
+  );
 });

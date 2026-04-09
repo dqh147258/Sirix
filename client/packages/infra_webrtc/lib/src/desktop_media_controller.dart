@@ -9,6 +9,7 @@ import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
 
 import 'remote_stream_controller.dart';
+import 'session_terminal_channel_controller.dart';
 
 const _mediaStreamTraceTag = '[MEDIA_STREAM_TRACE]';
 
@@ -75,12 +76,16 @@ class DesktopMediaState {
 }
 
 class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
-  DesktopMediaController() : super(const DesktopMediaState());
+  DesktopMediaController({
+    required SessionTerminalChannelController terminalChannelController,
+  })  : _terminalChannelController = terminalChannelController,
+        super(const DesktopMediaState());
 
   RTCPeerConnection? _peerConnection;
   RTCRtpSender? _videoSender;
   MediaStream? _displayStream;
   LocalSignalCallback? _localSignalCallback;
+  final SessionTerminalChannelController _terminalChannelController;
   String? _sharedScreenId;
   QualityProfile _preferredQualityProfile = QualityProfile.p720;
 
@@ -101,6 +106,10 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     final peerConnection = await createPeerConnection(defaultRtcConfiguration());
     AppLogger.info(
       '$_mediaStreamTraceTag desktop peer connection created sessionId=$sessionId',
+    );
+    _terminalChannelController.bindDesktopPeerConnection(
+      sessionId: sessionId,
+      peerConnection: peerConnection,
     );
     peerConnection.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) {
@@ -306,6 +315,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     if (peerConnection != null) {
       await peerConnection.close();
     }
+    await _terminalChannelController.reset();
 
     state = state.copyWith(
       initializing: false,
@@ -475,5 +485,10 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
 
 final desktopMediaControllerProvider =
     StateNotifierProvider<DesktopMediaController, DesktopMediaState>((ref) {
-  return DesktopMediaController();
+  final terminalChannelController = ref.watch(
+    sessionTerminalChannelControllerProvider.notifier,
+  );
+  return DesktopMediaController(
+    terminalChannelController: terminalChannelController,
+  );
 });

@@ -7,26 +7,29 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
+import 'package:infra_webrtc/infra_webrtc.dart';
 
 import 'terminal_state.dart';
 
 const Duration _terminalInputDebounce = Duration(milliseconds: 12);
 const Duration _terminalResizeDebounce = Duration(milliseconds: 80);
+const Duration _terminalSessionAttachRetryDelay = Duration(milliseconds: 180);
 const int _terminalImmediateInputThreshold = 128;
+const int _terminalSessionAttachRetryCount = 6;
 
 @immutable
 class TerminalPageConfig {
   const TerminalPageConfig({
     required this.accessToken,
     required this.deviceId,
-    required this.allowCreate,
+    required this.sessionId,
   });
 
   // UI presentation flags are intentionally excluded so every entry point
-  // shares the same terminal workspace for a given authenticated device.
+  // shares the same terminal workspace for a given authenticated session/device.
   final String accessToken;
   final String? deviceId;
-  final bool allowCreate;
+  final String? sessionId;
 
   @override
   bool operator ==(Object other) {
@@ -35,11 +38,11 @@ class TerminalPageConfig {
             runtimeType == other.runtimeType &&
             accessToken == other.accessToken &&
             deviceId == other.deviceId &&
-            allowCreate == other.allowCreate;
+            sessionId == other.sessionId;
   }
 
   @override
-  int get hashCode => Object.hash(accessToken, deviceId, allowCreate);
+  int get hashCode => Object.hash(accessToken, deviceId, sessionId);
 }
 
 enum TerminalUiEventType {
@@ -69,16 +72,22 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     required BackendApiClient apiClient,
     required BackendEventClient? eventClient,
     required DesktopLocalClient? desktopLocalClient,
+    required SessionTerminalChannelController sessionTerminalChannelController,
     required TerminalPageConfig config,
   })  : _apiClient = apiClient,
         _eventClient = eventClient,
         _desktopLocalClient = desktopLocalClient,
+        _sessionTerminalChannelController = sessionTerminalChannelController,
         _config = config,
-        super(const TerminalState());
+        super(const TerminalState()) {
+    _sessionChannelSubscription =
+        _sessionTerminalChannelController.messages.listen(_handleSessionChannelEvent);
+  }
 
   final BackendApiClient _apiClient;
   final BackendEventClient? _eventClient;
   final DesktopLocalClient? _desktopLocalClient;
+  final SessionTerminalChannelController _sessionTerminalChannelController;
   final TerminalPageConfig _config;
   final StreamController<TerminalUiEvent> _events =
       StreamController<TerminalUiEvent>.broadcast();
@@ -86,10 +95,12 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   WebSocketChannel? _channel;
   _TerminalTransport? _transport;
   StreamSubscription<dynamic>? _channelSubscription;
+  StreamSubscription<Map<String, dynamic>>? _sessionChannelSubscription;
   Timer? _inputTimer;
   Timer? _resizeTimer;
   _QueuedInput? _pendingInput;
   _QueuedResize? _pendingResize;
+  Completer<List<TerminalSessionSummary>>? _pendingSessionTerminalListCompleter;
   bool _hasLoaded = false;
   bool _loadingInFlight = false;
   bool _creatingInFlight = false;
@@ -105,18 +116,32 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     _loadingInFlight = true;
     state = state.copyWith(loading: true, clearError: true);
 
+    if (_shouldWaitForRemoteSession || _shouldWaitForSessionTransport) {
+      await _detachChannel();
+      state = state.copyWith(
+        loading: false,
+        terminals: const [],
+        clearActiveTerminalId: true,
+        clearError: true,
+      );
+      _loadingInFlight = false;
+      return;
+    }
+
     try {
       final terminals = _shouldUseDesktopLocalTransport
           ? await _loadDesktopLocalTerminals()
-          : await _apiClient.listTerminals(
-              accessToken: _config.accessToken,
-              deviceId: _config.deviceId,
-            );
+          : _shouldUseSessionTransport
+              ? await _loadSessionTransportTerminals()
+              : await _apiClient.listTerminals(
+                  accessToken: _config.accessToken,
+                  deviceId: _config.deviceId,
+                );
       _replaceTerminals(terminals);
       state = state.copyWith(loading: false, clearError: true);
 
       if (state.terminals.isEmpty) {
-        if (_shouldCreateDefaultTerminal) {
+        if (_shouldAutoCreateDefaultTerminal) {
           await createTerminal(autoCreated: true);
         } else {
           await _detachChannel();
@@ -161,6 +186,35 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
   }
 
+  Future<List<TerminalSessionSummary>> _loadSessionTransportTerminals() async {
+    final existingCompleter = _pendingSessionTerminalListCompleter;
+    if (existingCompleter != null) {
+      return existingCompleter.future;
+    }
+
+    final completer = Completer<List<TerminalSessionSummary>>();
+    _pendingSessionTerminalListCompleter = completer;
+
+    final sent = await _sessionTerminalChannelController.sendJson({
+      'type': 'terminal.list',
+    });
+    if (!sent) {
+      _pendingSessionTerminalListCompleter = null;
+      AppLogger.warn('session terminal list request skipped: data channel unavailable');
+      return const [];
+    }
+
+    try {
+      return await completer.future.timeout(const Duration(milliseconds: 1500));
+    } on TimeoutException {
+      if (identical(_pendingSessionTerminalListCompleter, completer)) {
+        _pendingSessionTerminalListCompleter = null;
+      }
+      AppLogger.warn('session terminal list timed out');
+      return const [];
+    }
+  }
+
   Future<void> createTerminal({bool autoCreated = false}) async {
     final deviceId = _config.deviceId;
     if (deviceId == null || _creatingInFlight || (_loadingInFlight && !autoCreated)) {
@@ -177,6 +231,12 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
         cols: _preferredCols,
         rows: _preferredRows,
       );
+      if (_config.sessionId != null) {
+        await load(force: true);
+        await attachTerminal(created.id);
+        return;
+      }
+
       final terminals = [...state.terminals, created];
       state = state.copyWith(
         terminals: terminals,
@@ -206,6 +266,18 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   Future<void> closeTerminal(String terminalId) async {
+    if (_config.sessionId != null) {
+      try {
+        await _requestTerminalClose(terminalId);
+        await load(force: true);
+      } catch (error) {
+        state = state.copyWith(
+          errorMessage: AppLocalizations.current.terminalCloseFailed('$error'),
+        );
+      }
+      return;
+    }
+
     final terminalsBeforeClose = state.terminals;
     final closingActive = state.activeTerminalId == terminalId;
 
@@ -233,7 +305,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
 
         if (nextActiveId != null) {
           await attachTerminal(nextActiveId);
-        } else if (_shouldCreateDefaultTerminal) {
+        } else if (_shouldAutoCreateDefaultTerminal) {
           await createTerminal(autoCreated: true);
         }
       }
@@ -245,6 +317,16 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   Future<void> _requestTerminalClose(String terminalId) async {
+    if (_shouldUseSessionTransport) {
+      final sent = await _sessionTerminalChannelController.sendJson({
+        'type': 'terminal.close',
+        'terminal_id': terminalId,
+      });
+      if (sent) {
+        return;
+      }
+    }
+
     if (_shouldUseDesktopLocalTransport) {
       final localClient = _desktopLocalClient;
       if (localClient != null) {
@@ -271,13 +353,16 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   Future<void> attachTerminal(
     String terminalId,
   ) async {
-    final alreadyAttached =
-        state.activeTerminalId == terminalId && _channel != null && !state.connecting;
+    final alreadyAttached = state.activeTerminalId == terminalId &&
+        !state.connecting &&
+        ((_transport == _TerminalTransport.sessionWebrtc && _shouldUseSessionTransport) ||
+            _channel != null);
     if (alreadyAttached) {
       return;
     }
 
-    if (_transport == _TerminalTransport.desktopLocal) {
+    if (_transport == _TerminalTransport.desktopLocal ||
+        _transport == _TerminalTransport.sessionWebrtc) {
       _flushPendingOutboundOperations();
     } else {
       await _detachChannel();
@@ -287,6 +372,23 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       connecting: true,
       clearError: true,
     );
+
+    if (_shouldUseSessionTransport) {
+      await _detachChannel();
+      _transport = _TerminalTransport.sessionWebrtc;
+      final sent = await _sessionTerminalChannelController.sendJson({
+        'type': 'terminal.attach',
+        'terminal_id': terminalId,
+      });
+      if (sent) {
+        if (_shouldRetrySessionAttach(terminalId)) {
+          unawaited(_retrySessionAttachUntilReady(terminalId));
+        }
+        state = state.copyWith(connecting: false);
+        return;
+      }
+      _transport = null;
+    }
 
     if (_shouldUseDesktopLocalTransport) {
       try {
@@ -393,6 +495,11 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   Future<void> _detachChannel() async {
     _flushPendingOutboundOperations();
 
+    if (_transport == _TerminalTransport.sessionWebrtc) {
+      _transport = null;
+      return;
+    }
+
     final channel = _channel;
     final subscription = _channelSubscription;
     _channel = null;
@@ -421,6 +528,28 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
+    _handleTerminalEventPayload(payload);
+  }
+
+  void _handleSessionChannelEvent(Map<String, dynamic> payload) {
+    if (!_shouldUseSessionTransport) {
+      return;
+    }
+
+    final type = payload['type'] as String?;
+    final shouldProcessWithoutSessionTransport = type == 'terminal.list' ||
+        type == 'terminal.ready' ||
+        type == 'terminal.closed' ||
+        type == 'terminal.error';
+    if (_transport != _TerminalTransport.sessionWebrtc &&
+        !shouldProcessWithoutSessionTransport) {
+      return;
+    }
+
+    _handleTerminalEventPayload(payload);
+  }
+
+  void _handleTerminalEventPayload(Map<String, dynamic> payload) {
     final type = payload['type'] as String?;
     final body = payload['payload'] as Map<String, dynamic>?;
     if (type == null || body == null) {
@@ -428,6 +557,9 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
 
     switch (type) {
+      case 'terminal.list':
+        _handleTerminalList(body);
+        break;
       case 'terminal.ready':
         _handleTerminalReady(body);
         break;
@@ -461,6 +593,20 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     ));
   }
 
+  void _handleTerminalList(Map<String, dynamic> body) {
+    final rawTerminals = body['terminals'] as List<dynamic>? ?? const [];
+    final terminals = rawTerminals
+        .whereType<Map<String, dynamic>>()
+        .map(_terminalSummaryFromEvent)
+        .toList(growable: false);
+    _replaceTerminals(terminals);
+    final completer = _pendingSessionTerminalListCompleter;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(terminals);
+    }
+    _pendingSessionTerminalListCompleter = null;
+  }
+
   void _handleTerminalSnapshot(Map<String, dynamic> body) {
     final terminalId = _resolveEventTerminalId(body);
     final text = _decodeEventText(body);
@@ -480,7 +626,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
-    _updateTerminalStateById(terminalId, 'closed');
+    _removeTerminalById(terminalId);
     _events.add(TerminalUiEvent.output(
       terminalId: terminalId,
       text: '\r\n[terminal closed]\r\n',
@@ -526,17 +672,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
-    _updateTerminalSummary(
-      terminalId,
-      (terminal) => terminal.copyWith(
-        title: body['title'] as String?,
-        shell: body['shell'] as String?,
-        cwd: body['cwd'] as String?,
-        state: body['state'] as String?,
-        cols: body['cols'] as int?,
-        rows: body['rows'] as int?,
-      ),
-    );
+    _upsertTerminalSummary(_terminalSummaryFromEvent(body));
   }
 
   void _replaceTerminals(List<TerminalSessionSummary> terminals) {
@@ -582,10 +718,77 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     return remaining[nextIndex].id;
   }
 
+  void _removeTerminalById(String terminalId) {
+    final terminalsBeforeClose = state.terminals;
+    final closingActive = state.activeTerminalId == terminalId;
+    final remaining = terminalsBeforeClose
+        .where((terminal) => terminal.id != terminalId)
+        .toList(growable: false);
+    final nextActiveId = closingActive
+        ? _resolveNextTerminalAfterClose(
+            terminalId: terminalId,
+            terminalsBeforeClose: terminalsBeforeClose,
+            remaining: remaining,
+          )
+        : state.activeTerminalId;
+    state = state.copyWith(
+      terminals: remaining,
+      activeTerminalId: nextActiveId,
+      clearActiveTerminalId: closingActive && nextActiveId == null,
+    );
+  }
+
+  bool _shouldRetrySessionAttach(String terminalId) {
+    for (final terminal in state.terminals) {
+      if (terminal.id == terminalId) {
+        return terminal.state != 'active';
+      }
+    }
+    return false;
+  }
+
+  Future<void> _retrySessionAttachUntilReady(String terminalId) async {
+    for (var attempt = 0; attempt < _terminalSessionAttachRetryCount; attempt += 1) {
+      await Future<void>.delayed(_terminalSessionAttachRetryDelay);
+      if (_transport != _TerminalTransport.sessionWebrtc ||
+          state.activeTerminalId != terminalId ||
+          !_shouldUseSessionTransport ||
+          !_shouldRetrySessionAttach(terminalId)) {
+        return;
+      }
+
+      await _sessionTerminalChannelController.sendJson({
+        'type': 'terminal.attach',
+        'terminal_id': terminalId,
+      });
+    }
+  }
+
   void _updateTerminalStateById(String terminalId, String nextState) {
     _updateTerminalSummary(
       terminalId,
       (terminal) => terminal.copyWith(state: nextState),
+    );
+  }
+
+  void _upsertTerminalSummary(TerminalSessionSummary incoming) {
+    final existingIndex = state.terminals.indexWhere((terminal) => terminal.id == incoming.id);
+    final next = [...state.terminals];
+    if (existingIndex >= 0) {
+      next[existingIndex] = incoming;
+    } else {
+      next.add(incoming);
+    }
+    next.sort((left, right) => left.createdAt.compareTo(right.createdAt));
+
+    final currentActiveId = state.activeTerminalId;
+    final hasCurrentActive = currentActiveId != null &&
+        next.any((terminal) => terminal.id == currentActiveId);
+    final fallbackActiveId = next.isEmpty ? null : next.first.id;
+    state = state.copyWith(
+      terminals: next,
+      activeTerminalId: hasCurrentActive ? currentActiveId : fallbackActiveId,
+      clearActiveTerminalId: next.isEmpty,
     );
   }
 
@@ -612,8 +815,53 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     state = state.copyWith(terminals: terminals);
   }
 
-  bool get _shouldCreateDefaultTerminal =>
-      _config.allowCreate && _config.deviceId != null;
+  TerminalSessionSummary _terminalSummaryFromEvent(Map<String, dynamic> json) {
+    final createdAt = DateTime.tryParse(json['created_at'] as String? ?? '') ?? DateTime.now();
+    return TerminalSessionSummary(
+      id: json['terminal_id'] as String? ?? json['id'] as String? ?? '',
+      deviceId: json['device_id'] as String? ?? _config.deviceId ?? '',
+      title: json['title'] as String? ?? 'Terminal',
+      shell: json['shell'] as String? ?? 'default',
+      cwd: json['cwd'] as String? ?? '~',
+      state: json['state'] as String? ?? 'active',
+      cols: (json['cols'] as num?)?.toInt() ?? 120,
+      rows: (json['rows'] as num?)?.toInt() ?? 32,
+      createdAt: createdAt,
+      closedAt: json['closed_at'] == null
+          ? null
+          : DateTime.tryParse(json['closed_at'] as String? ?? ''),
+    );
+  }
+
+  bool get _shouldAutoCreateDefaultTerminal {
+    if (_config.deviceId == null) {
+      return false;
+    }
+
+    // Only the desktop-local terminal workspace should synthesize a default tab.
+    return _shouldUseDesktopLocalTransport && _config.sessionId == null;
+  }
+
+  bool get _shouldWaitForRemoteSession {
+    return !_shouldUseDesktopLocalTransport &&
+        _config.deviceId == null &&
+        _config.sessionId == null;
+  }
+
+  bool get _shouldWaitForSessionTransport {
+    return !_shouldUseDesktopLocalTransport &&
+        _config.sessionId != null &&
+        !_shouldUseSessionTransport;
+  }
+
+  bool get _shouldUseSessionTransport {
+    final sessionId = _config.sessionId;
+    if (sessionId == null || _shouldUseDesktopLocalTransport) {
+      return false;
+    }
+
+    return _sessionTerminalChannelController.isReadyForSession(sessionId);
+  }
 
   bool get _shouldUseDesktopLocalTransport {
     if (_desktopLocalClient == null || kIsWeb) {
@@ -659,12 +907,21 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       return;
     }
 
+    final payload = base64Encode(utf8.encode(data));
+    if (_transport == _TerminalTransport.sessionWebrtc) {
+      unawaited(_sessionTerminalChannelController.sendJson({
+        'type': 'terminal.input',
+        'terminal_id': pendingInput.terminalId,
+        'data_base64': payload,
+      }));
+      return;
+    }
+
     final channel = _channel;
     if (channel == null) {
       return;
     }
 
-    final payload = base64Encode(utf8.encode(data));
     if (_transport == _TerminalTransport.desktopLocal) {
       _desktopLocalClient?.sendTerminalInput(
         channel: channel,
@@ -687,9 +944,8 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     _resizeTimer = null;
 
     final resize = _pendingResize;
-    final channel = _channel;
     _pendingResize = null;
-    if (resize == null || channel == null) {
+    if (resize == null) {
       return;
     }
 
@@ -698,13 +954,31 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       (terminal) => terminal.copyWith(cols: resize.cols, rows: resize.rows),
     );
 
+    if (_transport == _TerminalTransport.sessionWebrtc) {
+      unawaited(_sessionTerminalChannelController.sendJson({
+        'type': 'terminal.resize',
+        'terminal_id': resize.terminalId,
+        'cols': resize.cols,
+        'rows': resize.rows,
+      }));
+      return;
+    }
+
+    final channel = _channel;
     if (_transport == _TerminalTransport.desktopLocal) {
+      if (channel == null) {
+        return;
+      }
       _desktopLocalClient?.sendTerminalResize(
         channel: channel,
         terminalId: resize.terminalId,
         cols: resize.cols,
         rows: resize.rows,
       );
+      return;
+    }
+
+    if (channel == null) {
       return;
     }
 
@@ -720,8 +994,30 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   @override
   void dispose() {
     unawaited(_detachChannel());
+    unawaited(_sessionChannelSubscription?.cancel());
     unawaited(_events.close());
     super.dispose();
+  }
+
+  void onSessionTerminalChannelStateChanged(
+    SessionTerminalChannelState? previous,
+    SessionTerminalChannelState next,
+  ) {
+    final sessionId = _config.sessionId;
+    if (sessionId == null || next.sessionId != sessionId) {
+      return;
+    }
+
+    final becameReady = next.ready && (previous?.ready ?? false) != true;
+    if (becameReady) {
+      Future.microtask(() => load(force: true));
+      return;
+    }
+
+    final becameUnavailable = !next.ready && (previous?.ready ?? false);
+    if (becameUnavailable && _transport == _TerminalTransport.sessionWebrtc) {
+      state = state.copyWith(connecting: false);
+    }
   }
 
   Future<WebSocketChannel> _connectDesktopLocalChannel() async {
@@ -763,17 +1059,31 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 }
 
-final terminalViewModelProvider = StateNotifierProvider.autoDispose
-    .family<TerminalViewModel, TerminalState, TerminalPageConfig>((ref, config) {
+final terminalViewModelProvider =
+    StateNotifierProvider.family<TerminalViewModel, TerminalState, TerminalPageConfig>((
+  ref,
+  config,
+) {
   final apiClient = ref.watch(backendApiClientProvider);
   final eventClient = ref.watch(backendEventClientProvider);
   final desktopLocalClient = ref.watch(desktopLocalClientProvider);
-  return TerminalViewModel(
+  final sessionTerminalChannelController = ref.watch(
+    sessionTerminalChannelControllerProvider.notifier,
+  );
+  final viewModel = TerminalViewModel(
     apiClient: apiClient,
     eventClient: eventClient,
     desktopLocalClient: desktopLocalClient,
+    sessionTerminalChannelController: sessionTerminalChannelController,
     config: config,
   );
+  ref.listen<SessionTerminalChannelState>(
+    sessionTerminalChannelControllerProvider,
+    (previous, next) {
+      viewModel.onSessionTerminalChannelStateChanged(previous, next);
+    },
+  );
+  return viewModel;
 });
 
 @immutable
@@ -799,4 +1109,5 @@ class _QueuedInput {
 enum _TerminalTransport {
   backend,
   desktopLocal,
+  sessionWebrtc,
 }

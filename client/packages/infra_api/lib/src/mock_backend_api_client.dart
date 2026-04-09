@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:uuid/uuid.dart';
 
 import 'backend_api_client.dart';
@@ -10,7 +8,6 @@ class MockBackendApiClient implements BackendApiClient {
 
   final Uuid _uuid = const Uuid();
   final Map<String, AuthSession> _users = {};
-  final List<TerminalSessionSummary> _terminals = [];
   final List<DeviceSummary> _devices = [
     const DeviceSummary(
       id: 'dev-1',
@@ -169,20 +166,7 @@ class MockBackendApiClient implements BackendApiClient {
     required String deviceId,
     bool forceRefresh = false,
   }) async {
-    const names = ['Display 1', 'Display 2'];
-    return List.generate(names.length, (index) {
-      const ratios = [16 / 9, 21 / 9, 4 / 3];
-      final ratio = ratios[index % ratios.length];
-      const width = 480;
-      final height = max(240, (width / ratio).round());
-      return ScreenSnapshot(
-        screenId: '$deviceId-screen-$index',
-        name: names[index],
-        width: width,
-        height: height,
-        previewBase64: '',
-      );
-    });
+    return const <ScreenSnapshot>[];
   }
 
   @override
@@ -237,19 +221,7 @@ class MockBackendApiClient implements BackendApiClient {
     String? shell,
     String? title,
   }) async {
-    final terminal = TerminalSessionSummary(
-      id: _uuid.v4(),
-      deviceId: targetDeviceId,
-      title: title ?? 'Terminal',
-      shell: shell ?? '/bin/zsh',
-      cwd: cwd ?? '~',
-      state: 'active',
-      cols: cols,
-      rows: rows,
-      createdAt: DateTime.now(),
-    );
-    _terminals.insert(0, terminal);
-    return terminal;
+    throw UnsupportedError('mock backend does not support terminal creation');
   }
 
   @override
@@ -257,17 +229,12 @@ class MockBackendApiClient implements BackendApiClient {
     required String accessToken,
     String? deviceId,
   }) async {
-    if (deviceId == null) {
-      return _terminals;
-    }
-    return _terminals.where((item) => item.deviceId == deviceId).toList(growable: false);
+    return const <TerminalSessionSummary>[];
   }
 
   @override
   Future<void> closeTerminal({
     required String accessToken,
     required String terminalId,
-  }) async {
-    _terminals.removeWhere((item) => item.id == terminalId);
-  }
+  }) async {}
 }

@@ -154,7 +154,10 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
       TerminalPage(
         accessToken: session.accessToken,
         deviceId: _activeSession?.targetDeviceId ?? remoteViewState.deviceId,
-        allowCreate: false,
+        sessionId: _activeSession?.sessionId ?? remoteViewState.sessionId,
+        allowCreate:
+            (_activeSession?.targetDeviceId ?? remoteViewState.deviceId) != null &&
+            (_activeSession?.sessionId ?? remoteViewState.sessionId) != null,
       ),
       _MobileAccountPage(
         username: session.username,

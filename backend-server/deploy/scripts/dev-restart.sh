@@ -45,7 +45,47 @@ else
   docker compose down
 fi
 
-docker compose up -d --build
+compose_up_log="$(mktemp)"
+cleanup() {
+  rm -f "${compose_up_log}"
+}
+trap cleanup EXIT
+
+if ! docker compose up -d --build 2>&1 | tee "${compose_up_log}"; then
+  if grep -Eqi 'docker\.mirrors\.ustc\.edu\.cn|registry-mirrors|failed to do request: Head .*docker\.io.*EOF' "${compose_up_log}"; then
+    cat >&2 <<'EOF'
+
+Detected a Docker registry mirror failure from the local Docker daemon configuration.
+Your Docker daemon is trying to pull docker.io images through a mirror that is currently unavailable.
+
+Recommended fix on this machine:
+  1. Open ~/.docker/daemon.json or Docker Desktop -> Settings -> Docker Engine
+  2. Remove the broken "registry-mirrors" entries, especially:
+       https://docker.mirrors.ustc.edu.cn
+       https://hub-mirror.c.163.com
+       https://registry.docker-cn.com
+  3. Restart Docker Desktop
+  4. Retry:
+       ./backend-server/deploy/scripts/dev-restart.sh
+
+Suggested minimal daemon.json:
+{
+  "builder": {
+    "gc": {
+      "defaultKeepStorage": "20GB",
+      "enabled": true
+    }
+  },
+  "experimental": false,
+  "features": {
+    "buildkit": true
+  }
+}
+EOF
+  fi
+  exit 1
+fi
+
 docker compose ps
 
 backend_container_id="$(docker compose ps -aq backend-server)"

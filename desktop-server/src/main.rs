@@ -26,6 +26,16 @@ async fn main() -> anyhow::Result<()> {
     .context("failed to bind local ws range")?;
 
     let state = AppState::new(config.clone(), bound_port);
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Err(error) = state
+            .sirix_config_store
+            .install_bin_shims(current_exe.as_path())
+        {
+            state
+                .logger
+                .warn(format!("failed to install ~/.sirix/bin shims: {error}"));
+        }
+    }
     let app = api::router(state.clone()).layer(CorsLayer::permissive());
 
     install_panic_logger(state.clone());

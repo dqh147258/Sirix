@@ -5,7 +5,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
 use crate::app::{
-    auth::AuthSessionStore, runtime_logger::RuntimeLogger, terminal::manager::TerminalManager,
+    ai::{approval::AiApprovalRegistry, config::SirixConfigStore, session::AiSessionRegistry},
+    auth::AuthSessionStore,
+    runtime_logger::RuntimeLogger,
+    terminal::manager::TerminalManager,
 };
 use crate::bootstrap::config::AppConfig;
 
@@ -18,6 +21,9 @@ pub struct AppState {
     pub pending_authorizations: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     pub terminal_manager: Arc<TerminalManager>,
     pub auth_session_store: AuthSessionStore,
+    pub sirix_config_store: Arc<SirixConfigStore>,
+    pub ai_session_registry: Arc<AiSessionRegistry>,
+    pub ai_approval_registry: Arc<AiApprovalRegistry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -37,11 +43,18 @@ impl AppState {
             config.backend.base_url.clone(),
             config.backend.runtime_logs_path.clone(),
         ));
+        let sirix_config_store =
+            Arc::new(SirixConfigStore::new().expect("failed to initialize ~/.sirix config store"));
+        let approval_storage_dir = sirix_config_store
+            .sirix_home()
+            .join("runtime")
+            .join("approvals");
         Self {
             terminal_manager: Arc::new(TerminalManager::new(
                 config.backend.base_url.clone(),
                 config.backend.device_id.clone(),
                 local_events.clone(),
+                sirix_config_store.sirix_home().to_path_buf(),
             )),
             auth_session_store: AuthSessionStore::new(config.backend.base_url.clone()),
             config: Arc::new(config),
@@ -56,6 +69,12 @@ impl AppState {
             })),
             local_events,
             pending_authorizations: Arc::new(Mutex::new(HashMap::new())),
+            sirix_config_store,
+            ai_session_registry: Arc::new(AiSessionRegistry::new()),
+            ai_approval_registry: Arc::new(
+                AiApprovalRegistry::new(approval_storage_dir)
+                    .expect("failed to initialize ai approval registry"),
+            ),
         }
     }
 }

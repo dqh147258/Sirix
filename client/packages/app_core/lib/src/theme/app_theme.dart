@@ -16,6 +16,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
     required this.textPrimary,
     required this.textSecondary,
     required this.textMuted,
+    required this.warning,
     required this.error,
   });
 
@@ -31,6 +32,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
   final Color textPrimary;
   final Color textSecondary;
   final Color textMuted;
+  final Color warning;
   final Color error;
 
   static const dark = SirixTheme(
@@ -46,6 +48,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
     textPrimary: Color(0xFFF5FFF9),
     textSecondary: Color(0xFFBDD2C6),
     textMuted: Color(0xFF718697),
+    warning: Color(0xFFFFC857),
     error: Color(0xFFFF7F8F),
   );
 
@@ -67,6 +70,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
       textPrimary: Color.lerp(textPrimary, other.textPrimary, t) ?? textPrimary,
       textSecondary: Color.lerp(textSecondary, other.textSecondary, t) ?? textSecondary,
       textMuted: Color.lerp(textMuted, other.textMuted, t) ?? textMuted,
+      warning: Color.lerp(warning, other.warning, t) ?? warning,
       error: Color.lerp(error, other.error, t) ?? error,
     );
   }
@@ -85,6 +89,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
     Color? textPrimary,
     Color? textSecondary,
     Color? textMuted,
+    Color? warning,
     Color? error,
   }) {
     return SirixTheme(
@@ -100,6 +105,7 @@ class SirixTheme extends ThemeExtension<SirixTheme> {
       textPrimary: textPrimary ?? this.textPrimary,
       textSecondary: textSecondary ?? this.textSecondary,
       textMuted: textMuted ?? this.textMuted,
+      warning: warning ?? this.warning,
       error: error ?? this.error,
     );
   }

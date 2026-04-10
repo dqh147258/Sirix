@@ -7,6 +7,7 @@ import 'package:xterm/xterm.dart';
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
 
+import 'terminal_state.dart';
 import 'terminal_view_model.dart';
 
 class TerminalPage extends ConsumerStatefulWidget {
@@ -136,6 +137,11 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
         final terminal = _terminalFor(event.terminalId);
         terminal.write(event.text);
         break;
+      case TerminalUiEventType.approvalRequested:
+        if (mounted) {
+          setState(() {});
+        }
+        break;
     }
   }
 
@@ -156,6 +162,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final activeTerminal = state.activeTerminal;
     final activeTerminalId = state.activeTerminalId;
     final terminal = activeTerminalId == null ? null : _terminalFor(activeTerminalId);
+    final approvalRequest = state.activeApprovalRequest;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;
 
@@ -336,6 +343,35 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                               ),
                             ),
                           ),
+                        if (approvalRequest != null)
+                          Positioned(
+                            top: 14,
+                            left: 14,
+                            child: _ApprovalRequestCard(
+                              request: approvalRequest,
+                              onAllowOnce: () => unawaited(
+                                viewModel.resolveApprovalRequest(
+                                  request: approvalRequest,
+                                  decision: 'allow',
+                                  scope: 'once',
+                                ),
+                              ),
+                              onAllowSession: () => unawaited(
+                                viewModel.resolveApprovalRequest(
+                                  request: approvalRequest,
+                                  decision: 'allow',
+                                  scope: 'session',
+                                ),
+                              ),
+                              onDeny: () => unawaited(
+                                viewModel.resolveApprovalRequest(
+                                  request: approvalRequest,
+                                  decision: 'deny',
+                                  scope: 'deny',
+                                ),
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -350,6 +386,102 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _ApprovalRequestCard extends StatelessWidget {
+  const _ApprovalRequestCard({
+    required this.request,
+    required this.onAllowOnce,
+    required this.onAllowSession,
+    required this.onDeny,
+  });
+
+  final TerminalApprovalRequest request;
+  final VoidCallback onAllowOnce;
+  final VoidCallback onAllowSession;
+  final VoidCallback onDeny;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 380),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: const Color(0xFF131B20),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: palette.warning.withValues(alpha: 0.28)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.28),
+              blurRadius: 26,
+              offset: const Offset(0, 16),
+            ),
+          ],
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Approval Required',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                request.capabilityKey,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      fontFamily: 'JetBrains Mono',
+                      color: palette.warning,
+                    ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${request.agentId} · ${request.modelId}',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: palette.textMuted,
+                      fontFamily: 'JetBrains Mono',
+                    ),
+              ),
+              if (request.cwd.trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  request.cwd,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textMuted,
+                      ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton(
+                    onPressed: onAllowOnce,
+                    child: const Text('Allow Once'),
+                  ),
+                  OutlinedButton(
+                    onPressed: onAllowSession,
+                    child: const Text('Allow Session'),
+                  ),
+                  TextButton(
+                    onPressed: onDeny,
+                    child: const Text('Deny'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

@@ -19,6 +19,8 @@ dependencies:
     path: ../../packages/feature_desktop_authorize
   feature_terminal:
     path: ../../packages/feature_terminal
+  feature_settings_ai:
+    path: ../../packages/feature_settings_ai
   infra_api:
     path: ../../packages/infra_api
   infra_webrtc:

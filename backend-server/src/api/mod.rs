@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::application::state::AppState;
 
 pub mod auth;
+pub mod ai_sessions;
 pub mod connections;
 pub mod desktop_control;
 pub mod desktop_events;
@@ -29,6 +30,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/register", post(auth::register))
         .route("/api/v1/auth/login", post(auth::login))
         .route("/api/v1/auth/refresh", post(auth::refresh))
+        .route("/api/v1/ai-sessions", get(ai_sessions::list_ai_sessions))
+        .route(
+            "/api/v1/ai-sessions/:ai_session_id/approvals",
+            post(ai_sessions::create_ai_approval),
+        )
         .route("/api/v1/devices/register", post(devices::register_device))
         .route("/api/v1/devices/my", get(devices::list_my_devices))
         .route(
@@ -110,6 +116,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/desktop/terminals/:terminal_id/state",
             post(terminals::update_terminal_state),
+        )
+        .route(
+            "/api/v1/desktop/ai-sessions/local",
+            post(ai_sessions::create_local_desktop_ai_session),
+        )
+        .route(
+            "/api/v1/desktop/terminals/local",
+            post(terminals::create_local_desktop_terminal),
         )
         .route(
             "/api/v1/desktop/terminals/:terminal_id/output",

@@ -25,6 +25,8 @@ dependencies:
     path: packages/feature_remote_view
   feature_desktop_authorize:
     path: packages/feature_desktop_authorize
+  feature_settings_ai:
+    path: packages/feature_settings_ai
   infra_api:
     path: packages/infra_api
   infra_webrtc:

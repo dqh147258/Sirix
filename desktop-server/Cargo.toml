@@ -2,12 +2,14 @@
 name = "desktop-server"
 version = "0.1.0"
 edition = "2021"
+default-run = "desktop-server"
 
 [dependencies]
 anyhow = "1"
 axum = { version = "0.7.5", features = ["macros", "ws"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
+crossterm = "0.28.1"
 dotenvy = "0.15.7"
 futures-util = "0.3.30"
 indexmap = "=2.2.6"

@@ -49,6 +49,10 @@ impl AppState {
             .batch_execute(include_str!("../../migrations/0001_init.sql"))
             .await
             .context("failed to run postgres bootstrap migration")?;
+        postgres
+            .batch_execute(include_str!("../../migrations/0002_ai_sessions.sql"))
+            .await
+            .context("failed to run postgres ai session migration")?;
 
         let redis = redis::Client::open(config.redis.url.clone())
             .context("failed to create redis client")?;

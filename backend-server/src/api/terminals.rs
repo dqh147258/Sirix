@@ -69,6 +69,16 @@ pub struct TerminalOutputRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct CreateLocalDesktopTerminalRequest {
+    pub device_id: Uuid,
+    pub title: Option<String>,
+    pub shell: Option<String>,
+    pub cwd: Option<String>,
+    pub cols: i32,
+    pub rows: i32,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum TerminalInboundMessage {
     #[serde(rename = "terminal.input")]
@@ -220,6 +230,101 @@ pub async fn create_terminal(
     }))
 }
 
+pub async fn create_local_desktop_terminal(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateLocalDesktopTerminalRequest>,
+) -> ApiResult<Json<TerminalSummary>> {
+    let user_id = resolve_user_id(&headers, &state).await?;
+    let target_row = state
+        .postgres
+        .query_opt(
+            "SELECT user_id FROM devices WHERE id = $1",
+            &[&payload.device_id],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    let Some(target_row) = target_row else {
+        return Err(ApiError::not_found(
+            "DEVICE_NOT_FOUND",
+            "target device not found",
+        ));
+    };
+
+    let owner_id: Uuid = target_row.get("user_id");
+    if owner_id != user_id {
+        return Err(ApiError::forbidden(
+            "DEVICE_NOT_OWNED",
+            "current mvp allows only same-account devices",
+        ));
+    }
+
+    let terminal_id = Uuid::new_v4();
+    let now = Utc::now();
+    let title = payload
+        .title
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Sirix AI".to_string());
+    let shell = payload
+        .shell
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "codex".to_string());
+    let cwd = payload
+        .cwd
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "~".to_string());
+    let cols = payload.cols.clamp(20, 400);
+    let rows = payload.rows.clamp(10, 200);
+
+    state
+        .postgres
+        .execute(
+            "INSERT INTO terminal_sessions (id, device_id, creator_user_id, title, shell, cwd, state, cols, rows, created_at, updated_at, closed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            &[
+                &terminal_id,
+                &payload.device_id,
+                &user_id,
+                &title,
+                &shell,
+                &cwd,
+                &"opening",
+                &cols,
+                &rows,
+                &now,
+                &now,
+                &Option::<DateTime<Utc>>::None,
+            ],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    state
+        .postgres
+        .execute(
+            "INSERT INTO terminal_session_participants (session_id, user_id, client_type, joined_at) VALUES ($1,$2,$3,$4)",
+            &[&terminal_id, &user_id, &"desktop_local", &now],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(TerminalSummary {
+        id: terminal_id,
+        device_id: payload.device_id,
+        title,
+        shell,
+        cwd,
+        state: "opening".to_string(),
+        cols,
+        rows,
+        created_at: now,
+        closed_at: None,
+    }))
+}
+
 pub async fn list_terminals(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -290,6 +395,9 @@ pub async fn close_terminal(
             "UPDATE terminal_sessions SET state = $2, updated_at = $3, closed_at = $4 WHERE id = $1",
             &[&terminal_id, &"closed", &now, &Some(now)],
         )
+        .await
+        .map_err(internal_error)?;
+    sync_ai_session_status_by_terminal(&state, terminal_id, "closed", now)
         .await
         .map_err(internal_error)?;
 
@@ -363,6 +471,9 @@ pub async fn update_terminal_state(
             "UPDATE terminal_sessions SET title = $2, shell = $3, cwd = $4, state = $5, cols = $6, rows = $7, updated_at = $8, closed_at = COALESCE($9, closed_at) WHERE id = $1",
             &[&terminal_id, &title, &shell, &cwd, &payload.state, &cols, &rows, &now, &closed_at],
         )
+        .await
+        .map_err(internal_error)?;
+    sync_ai_session_status_by_terminal(&state, terminal_id, &payload.state, now)
         .await
         .map_err(internal_error)?;
 
@@ -638,4 +749,20 @@ async fn publish_terminal_state_event(
 
 fn internal_error(error: tokio_postgres::Error) -> ApiError {
     ApiError::internal("TERMINAL_INTERNAL", error.to_string())
+}
+
+async fn sync_ai_session_status_by_terminal(
+    state: &AppState,
+    terminal_id: Uuid,
+    status: &str,
+    now: DateTime<Utc>,
+) -> Result<u64, tokio_postgres::Error> {
+    let closed_at = if status == "closed" { Some(now) } else { None };
+    state
+        .postgres
+        .execute(
+            "UPDATE ai_sessions SET status = $2, updated_at = $3, closed_at = COALESCE($4, closed_at) WHERE terminal_id = $1",
+            &[&terminal_id, &status, &now, &closed_at],
+        )
+        .await
 }

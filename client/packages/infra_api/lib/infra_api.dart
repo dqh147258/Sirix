@@ -1,5 +1,6 @@
 library infra_api;
 
+export 'src/ai_models.dart';
 export 'src/backend_api_client.dart';
 export 'src/backend_event_client.dart';
 export 'src/desktop_local_client.dart';

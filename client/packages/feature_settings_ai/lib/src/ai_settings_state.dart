@@ -1,0 +1,54 @@
+import 'package:flutter/foundation.dart';
+
+import 'package:infra_api/infra_api.dart';
+
+enum AiSettingsSection {
+  cli,
+  providers,
+  skills,
+  mcp,
+  agents,
+}
+
+@immutable
+class AiSettingsState {
+  const AiSettingsState({
+    this.loading = false,
+    this.saving = false,
+    this.errorMessage,
+    this.noticeMessage,
+    this.selectedSection = AiSettingsSection.cli,
+    this.config = const SirixAiConfig(),
+    this.effective,
+  });
+
+  final bool loading;
+  final bool saving;
+  final String? errorMessage;
+  final String? noticeMessage;
+  final AiSettingsSection selectedSection;
+  final SirixAiConfig config;
+  final EffectiveSirixAiConfig? effective;
+
+  AiSettingsState copyWith({
+    bool? loading,
+    bool? saving,
+    String? errorMessage,
+    String? noticeMessage,
+    AiSettingsSection? selectedSection,
+    SirixAiConfig? config,
+    EffectiveSirixAiConfig? effective,
+    bool clearError = false,
+    bool clearNotice = false,
+  }) {
+    return AiSettingsState(
+      loading: loading ?? this.loading,
+      saving: saving ?? this.saving,
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      noticeMessage: clearNotice ? null : (noticeMessage ?? this.noticeMessage),
+      selectedSection: selectedSection ?? this.selectedSection,
+      config: config ?? this.config,
+      effective: effective ?? this.effective,
+    );
+  }
+}

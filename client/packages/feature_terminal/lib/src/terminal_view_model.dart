@@ -48,6 +48,7 @@ class TerminalPageConfig {
 enum TerminalUiEventType {
   snapshot,
   output,
+  approvalRequested,
 }
 
 @immutable
@@ -61,6 +62,11 @@ class TerminalUiEvent {
     required this.terminalId,
     required this.text,
   }) : type = TerminalUiEventType.output;
+
+  const TerminalUiEvent.approvalRequested({
+    required this.terminalId,
+    required this.text,
+  }) : type = TerminalUiEventType.approvalRequested;
 
   final TerminalUiEventType type;
   final String terminalId;
@@ -575,6 +581,12 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       case 'terminal.error':
         _handleTerminalError(body);
         break;
+      case 'ai.approval.request':
+        _handleApprovalRequest(body);
+        break;
+      case 'ai.approval.resolved':
+        _handleApprovalResolved(body);
+        break;
       default:
         break;
     }
@@ -652,6 +664,46 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     ));
   }
 
+  void _handleApprovalRequest(Map<String, dynamic> body) {
+    final aiSessionId = body['ai_session_id'] as String? ?? '';
+    final terminalId = body['terminal_id'] as String? ?? '';
+    final capabilityKey = body['capability_key'] as String? ?? '';
+    if (aiSessionId.isEmpty || terminalId.isEmpty || capabilityKey.isEmpty) {
+      return;
+    }
+
+    final request = TerminalApprovalRequest(
+      aiSessionId: aiSessionId,
+      terminalId: terminalId,
+      capabilityKey: capabilityKey,
+      agentId: body['agent_id'] as String? ?? '',
+      modelId: body['model_id'] as String? ?? '',
+      cwd: body['cwd'] as String? ?? '',
+      configuredMode: approvalModeFromJson(body['configured_mode'] as String?),
+    );
+    if (state.pendingApprovalRequests.any((item) => item.dedupeKey == request.dedupeKey)) {
+      return;
+    }
+
+    state = state.copyWith(
+      pendingApprovalRequests: [...state.pendingApprovalRequests, request],
+      clearError: true,
+    );
+    _events.add(TerminalUiEvent.approvalRequested(
+      terminalId: terminalId,
+      text: capabilityKey,
+    ));
+  }
+
+  void _handleApprovalResolved(Map<String, dynamic> body) {
+    final aiSessionId = body['ai_session_id'] as String? ?? '';
+    final capabilityKey = body['capability_key'] as String? ?? '';
+    if (aiSessionId.isEmpty || capabilityKey.isEmpty) {
+      return;
+    }
+    _removeApprovalRequest(aiSessionId: aiSessionId, capabilityKey: capabilityKey);
+  }
+
   String? _resolveEventTerminalId(Map<String, dynamic> body) {
     return body['terminal_id'] as String? ?? state.activeTerminalId;
   }
@@ -681,6 +733,9 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
         terminals.any((terminal) => terminal.id == currentActive);
     state = state.copyWith(
       terminals: terminals,
+      pendingApprovalRequests: state.pendingApprovalRequests
+          .where((request) => terminals.any((terminal) => terminal.id == request.terminalId))
+          .toList(growable: false),
       activeTerminalId: hasCurrent ? currentActive : null,
       clearActiveTerminalId: !hasCurrent,
     );
@@ -733,8 +788,58 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
         : state.activeTerminalId;
     state = state.copyWith(
       terminals: remaining,
+      pendingApprovalRequests: state.pendingApprovalRequests
+          .where((request) => request.terminalId != terminalId)
+          .toList(growable: false),
       activeTerminalId: nextActiveId,
       clearActiveTerminalId: closingActive && nextActiveId == null,
+    );
+  }
+
+  Future<void> resolveApprovalRequest({
+    required TerminalApprovalRequest request,
+    required String decision,
+    required String scope,
+  }) async {
+    final localClient = _desktopLocalClient;
+    if (localClient == null) {
+      state = state.copyWith(
+        errorMessage: 'Desktop local approval channel unavailable.',
+      );
+      return;
+    }
+
+    try {
+      await localClient.resolveAiApproval(
+        sessionId: request.aiSessionId,
+        capabilityKey: request.capabilityKey,
+        decision: decision,
+        scope: scope,
+      );
+      _removeApprovalRequest(
+        aiSessionId: request.aiSessionId,
+        capabilityKey: request.capabilityKey,
+      );
+      state = state.copyWith(clearError: true);
+    } catch (error) {
+      state = state.copyWith(
+        errorMessage: 'Failed to resolve approval: $error',
+      );
+    }
+  }
+
+  void _removeApprovalRequest({
+    required String aiSessionId,
+    required String capabilityKey,
+  }) {
+    state = state.copyWith(
+      pendingApprovalRequests: state.pendingApprovalRequests
+          .where(
+            (request) =>
+                !(request.aiSessionId == aiSessionId &&
+                    request.capabilityKey == capabilityKey),
+          )
+          .toList(growable: false),
     );
   }
 

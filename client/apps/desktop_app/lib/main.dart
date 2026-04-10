@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:app_core/app_core.dart';
 import 'package:feature_auth/feature_auth.dart';
 import 'package:feature_desktop_authorize/feature_desktop_authorize.dart';
+import 'package:feature_settings_ai/feature_settings_ai.dart';
 import 'package:feature_terminal/feature_terminal.dart';
 import 'package:infra_api/infra_api.dart';
 
@@ -72,6 +73,7 @@ class DesktopHomePage extends ConsumerStatefulWidget {
 
 class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
   int _navigationIndex = 0;
+  static const int _settingsSectionIndex = 4;
 
   @override
   void initState() {
@@ -126,6 +128,13 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
         subtitle: l10n.desktopAccountReady,
         icon: Icons.account_circle_outlined,
         child: _DesktopAccountPage(session: authState.session!),
+      ),
+      _DesktopSection(
+        label: 'Settings',
+        title: 'AI Settings',
+        subtitle: 'CLI, Provider, Skills, MCP and Agent controls',
+        icon: Icons.tune_rounded,
+        child: AiSettingsPage(),
       ),
     ];
     final currentSection =
@@ -219,20 +228,42 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                         const SizedBox(width: 12),
                         Icon(Icons.help_outline_rounded, color: palette.textMuted, size: 20),
                         const SizedBox(width: 12),
-                        Container(
-                          width: 32,
-                          height: 32,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-                            color: palette.surfaceMuted,
-                          ),
-                          child: Center(
-                            child: Text(
-                              authState.session!.username.isNotEmpty
-                                  ? authState.session!.username[0].toUpperCase()
-                                  : 'O',
-                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                        PopupMenuButton<_AccountMenuAction>(
+                          onSelected: (action) async {
+                            switch (action) {
+                              case _AccountMenuAction.settings:
+                                setState(() => _navigationIndex = _settingsSectionIndex);
+                                break;
+                              case _AccountMenuAction.logout:
+                                await ref.read(authViewModelProvider('desktop').notifier).logout();
+                                break;
+                            }
+                          },
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                              value: _AccountMenuAction.settings,
+                              child: Text('Settings'),
+                            ),
+                            PopupMenuItem(
+                              value: _AccountMenuAction.logout,
+                              child: Text('Logout'),
+                            ),
+                          ],
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+                              color: palette.surfaceMuted,
+                            ),
+                            child: Center(
+                              child: Text(
+                                authState.session!.username.isNotEmpty
+                                    ? authState.session!.username[0].toUpperCase()
+                                    : 'O',
+                                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                              ),
                             ),
                           ),
                         ),
@@ -443,6 +474,11 @@ class _DesktopSection {
   final String subtitle;
   final IconData icon;
   final Widget child;
+}
+
+enum _AccountMenuAction {
+  settings,
+  logout,
 }
 
 class _SidebarFooterItem extends StatelessWidget {

@@ -1,0 +1,260 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import 'package:app_core/app_core.dart';
+import 'package:infra_api/infra_api.dart';
+
+import 'ai_settings_state.dart';
+
+class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
+  AiSettingsViewModel(this._localClient) : super(const AiSettingsState());
+
+  final DesktopLocalClient _localClient;
+  bool _loaded = false;
+
+  Future<void> load({bool force = false}) async {
+    if (_loaded && !force) {
+      return;
+    }
+
+    _loaded = true;
+    state = state.copyWith(loading: true, clearError: true, clearNotice: true);
+    try {
+      final config = await _localClient.getAiConfig();
+      final effective = await _localClient.getEffectiveAiConfig();
+      state = state.copyWith(
+        loading: false,
+        config: config,
+        effective: effective,
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        loading: false,
+        errorMessage: 'Failed to load AI settings: $error',
+      );
+    }
+  }
+
+  Future<void> save() async {
+    if (state.saving) {
+      return;
+    }
+
+    state = state.copyWith(saving: true, clearError: true, clearNotice: true);
+    try {
+      final saved = await _localClient.saveAiConfig(state.config);
+      final effective = await _localClient.getEffectiveAiConfig();
+      state = state.copyWith(
+        saving: false,
+        config: saved,
+        effective: effective,
+        noticeMessage: 'AI settings saved.',
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        saving: false,
+        errorMessage: 'Failed to save AI settings: $error',
+      );
+    }
+  }
+
+  void selectSection(AiSettingsSection section) {
+    state = state.copyWith(selectedSection: section, clearError: true, clearNotice: true);
+  }
+
+  void updateCliPrompt(String prompt) {
+    state = state.copyWith(
+      config: state.config.copyWith(
+        cli: state.config.cli.copyWith(supplementalSystemPrompt: prompt),
+      ),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void upsertProvider(AiProviderConfig provider) {
+    final next = _upsertById(state.config.providers, provider, (item) => item.id);
+    state = state.copyWith(
+      config: state.config.copyWith(providers: next),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void removeProvider(String providerId) {
+    final providers = state.config.providers
+        .where((item) => item.id != providerId)
+        .toList(growable: false);
+    final agents = state.config.agents
+        .where((item) => item.providerId != providerId)
+        .toList(growable: false);
+    state = state.copyWith(
+      config: state.config.copyWith(
+        providers: providers,
+        agents: agents,
+      ),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void upsertModel({
+    required String providerId,
+    required AiModelConfig model,
+  }) {
+    final providers = [
+      for (final provider in state.config.providers)
+        if (provider.id == providerId)
+          provider.copyWith(
+            models: _upsertById(provider.models, model, (item) => item.id),
+          )
+        else
+          provider,
+    ];
+    state = state.copyWith(
+      config: state.config.copyWith(providers: providers),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void removeModel({
+    required String providerId,
+    required String modelId,
+  }) {
+    final providers = [
+      for (final provider in state.config.providers)
+        if (provider.id == providerId)
+          provider.copyWith(
+            models:
+                provider.models.where((item) => item.id != modelId).toList(growable: false),
+          )
+        else
+          provider,
+    ];
+    final agents = state.config.agents
+        .where((item) => !(item.providerId == providerId && item.modelId == modelId))
+        .toList(growable: false);
+    state = state.copyWith(
+      config: state.config.copyWith(
+        providers: providers,
+        agents: agents,
+      ),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void upsertSkill(SkillConfigModel skill) {
+    final next = _upsertById(state.config.skills, skill, (item) => item.id);
+    state = state.copyWith(
+      config: state.config.copyWith(skills: next),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void removeSkill(String skillId) {
+    final skills =
+        state.config.skills.where((item) => item.id != skillId).toList(growable: false);
+    final agents = [
+      for (final agent in state.config.agents)
+        agent.copyWith(
+          enabledSkillIds:
+              agent.enabledSkillIds.where((item) => item != skillId).toList(growable: false),
+          disabledSkillIds:
+              agent.disabledSkillIds.where((item) => item != skillId).toList(growable: false),
+        ),
+    ];
+    state = state.copyWith(
+      config: state.config.copyWith(skills: skills, agents: agents),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void upsertMcpServer(McpServerConfigModel server) {
+    final next = _upsertById(state.config.mcpServers, server, (item) => item.id);
+    state = state.copyWith(
+      config: state.config.copyWith(mcpServers: next),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateMcpGlobal(McpGlobalConfigModel mcp) {
+    state = state.copyWith(
+      config: state.config.copyWith(mcp: mcp),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void removeMcpServer(String serverId) {
+    final mcpServers =
+        state.config.mcpServers.where((item) => item.id != serverId).toList(growable: false);
+    final agents = [
+      for (final agent in state.config.agents)
+        agent.copyWith(
+          enabledMcpServerIds: agent.enabledMcpServerIds
+              .where((item) => item != serverId)
+              .toList(growable: false),
+          disabledMcpServerIds: agent.disabledMcpServerIds
+              .where((item) => item != serverId)
+              .toList(growable: false),
+        ),
+    ];
+    state = state.copyWith(
+      config: state.config.copyWith(mcpServers: mcpServers, agents: agents),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void upsertAgent(AgentConfigModel agent) {
+    final next = _upsertById(state.config.agents, agent, (item) => item.id);
+    state = state.copyWith(
+      config: state.config.copyWith(agents: next),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void removeAgent(String agentId) {
+    final agents =
+        state.config.agents.where((item) => item.id != agentId).toList(growable: false);
+    state = state.copyWith(
+      config: state.config.copyWith(agents: agents),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  String createStableId(String prefix) {
+    final micros = DateTime.now().microsecondsSinceEpoch;
+    return '$prefix-$micros';
+  }
+}
+
+List<T> _upsertById<T>(
+  List<T> items,
+  T incoming,
+  String Function(T) getId,
+) {
+  final incomingId = getId(incoming);
+  final index = items.indexWhere((item) => getId(item) == incomingId);
+  if (index < 0) {
+    return [...items, incoming];
+  }
+
+  final next = [...items];
+  next[index] = incoming;
+  return next;
+}
+
+final aiSettingsViewModelProvider =
+    StateNotifierProvider<AiSettingsViewModel, AiSettingsState>((ref) {
+  final localClient = ref.watch(desktopLocalClientProvider);
+  return AiSettingsViewModel(localClient);
+});

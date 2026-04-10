@@ -5,6 +5,7 @@ import 'package:app_core/app_core.dart';
 import 'package:http/http.dart' as http;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'ai_models.dart';
 import 'models.dart';
 
 class DesktopLocalClient {
@@ -121,6 +122,61 @@ class DesktopLocalClient {
     }
 
     return const [];
+  }
+
+  Future<SirixAiConfig> getAiConfig() async {
+    final response = await _request('GET', '/ai/config');
+    return SirixAiConfig.fromJson(_decodeMap(response));
+  }
+
+  Future<EffectiveSirixAiConfig> getEffectiveAiConfig({String? cwd}) async {
+    final suffix = (cwd == null || cwd.isEmpty)
+        ? ''
+        : '?cwd=${Uri.encodeQueryComponent(cwd)}';
+    final response = await _request('GET', '/ai/config/effective$suffix');
+    return EffectiveSirixAiConfig.fromJson(_decodeMap(response));
+  }
+
+  Future<SirixAiConfig> saveAiConfig(SirixAiConfig config) async {
+    final response = await _request(
+      'PATCH',
+      '/ai/config',
+      body: config.toJson(),
+    );
+    return SirixAiConfig.fromJson(_decodeMap(response));
+  }
+
+  Future<Map<String, dynamic>> checkAiApproval({
+    required String sessionId,
+    required String capabilityKey,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/ai/sessions/approvals/check',
+      body: {
+        'session_id': sessionId,
+        'capability_key': capabilityKey,
+      },
+    );
+    return _decodeMap(response);
+  }
+
+  Future<void> resolveAiApproval({
+    required String sessionId,
+    required String capabilityKey,
+    required String decision,
+    required String scope,
+  }) async {
+    await _request(
+      'POST',
+      '/ai/sessions/approvals/resolve',
+      body: {
+        'session_id': sessionId,
+        'capability_key': capabilityKey,
+        'decision': decision,
+        'scope': scope,
+      },
+    );
   }
 
   void sendSetAutoApprove({
@@ -274,6 +330,11 @@ class DesktopLocalClient {
         final response = switch (method) {
           'GET' => await http.get(uri),
           'POST' => await http.post(
+              uri,
+              headers: const {'Content-Type': 'application/json'},
+              body: jsonEncode(body ?? const <String, dynamic>{}),
+            ),
+          'PATCH' => await http.patch(
               uri,
               headers: const {'Content-Type': 'application/json'},
               body: jsonEncode(body ?? const <String, dynamic>{}),

@@ -17,6 +17,8 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::app::ai::config::AiLaunchConfig;
+
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
@@ -32,6 +34,7 @@ struct TerminalSessionHandle {
     child: SharedChild,
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
     replay_buffer: SharedReplayBuffer,
+    remote_sync: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +107,7 @@ pub struct TerminalManager {
     local_events: broadcast::Sender<String>,
     sessions: Arc<RwLock<HashMap<Uuid, TerminalSessionHandle>>>,
     client: reqwest::Client,
+    sirix_home: PathBuf,
 }
 
 impl TerminalManager {
@@ -111,6 +115,7 @@ impl TerminalManager {
         backend_base_url: String,
         device_id: String,
         local_events: broadcast::Sender<String>,
+        sirix_home: PathBuf,
     ) -> Self {
         Self {
             backend_base_url: backend_base_url.trim_end_matches('/').to_string(),
@@ -118,6 +123,7 @@ impl TerminalManager {
             local_events,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             client: reqwest::Client::new(),
+            sirix_home,
         }
     }
 
@@ -130,83 +136,66 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> anyhow::Result<()> {
-        let system = native_pty_system();
-        let pair = system.openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
-
         let shell_path = resolve_shell(shell.as_deref());
+        let cwd_display = cwd.clone().unwrap_or_else(|| "~".to_string());
+        let title = title.clone().unwrap_or_else(|| "Terminal".to_string());
         let mut builder = CommandBuilder::new(shell_path.clone());
         if let Some(dir) = cwd.as_deref().and_then(resolve_cwd) {
             builder.cwd(dir);
         }
+        self.apply_sirix_env(&mut builder);
 
-        let child = pair.slave.spawn_command(builder)?;
-        let reader = pair.master.try_clone_reader()?;
-        let writer = pair.master.take_writer()?;
-        let master = Arc::new(Mutex::new(pair.master));
-        let writer = Arc::new(Mutex::new(writer));
-        let child = Arc::new(Mutex::new(child));
-        let metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
-            title: title.clone().unwrap_or_else(|| "Terminal".to_string()),
-            shell: shell_path.clone(),
-            cwd: cwd.clone().unwrap_or_else(|| "~".to_string()),
-            state: "active".to_string(),
+        self.create_process_terminal(
+            terminal_id,
+            builder,
+            title.clone(),
+            shell_path.clone(),
+            cwd_display.clone(),
             cols,
             rows,
-            created_at: Utc::now(),
-            closed_at: None,
-        }));
-        let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
-
-        self.sessions.write().await.insert(
-            terminal_id,
-            TerminalSessionHandle {
-                master: master.clone(),
-                writer: writer.clone(),
-                child: child.clone(),
-                metadata: metadata.clone(),
-                replay_buffer: replay_buffer.clone(),
-            },
-        );
-
-        self.update_state(
-            terminal_id,
-            "active",
-            title,
+            true,
+            Some(title),
             Some(shell_path),
-            cwd,
-            Some(cols.into()),
-            Some(rows.into()),
-            None,
+            Some(cwd_display),
         )
         .await?;
-
-        let client = self.client.clone();
-        let backend_base_url = self.backend_base_url.clone();
-        let device_id = self.device_id.clone();
-        let local_events = self.local_events.clone();
-        let runtime_handle = tokio::runtime::Handle::current();
-        thread::spawn(move || {
-            stream_terminal_output(
-                reader,
-                client,
-                backend_base_url,
-                device_id,
-                local_events,
-                terminal_id,
-                metadata,
-                replay_buffer,
-                runtime_handle,
-            );
-        });
-
-        self.publish_local_terminal_ready(terminal_id).await;
         info!(terminal_id = %terminal_id, "terminal session created");
         Ok(())
+    }
+
+    pub async fn create_codex_terminal(
+        &self,
+        terminal_id: Uuid,
+        launch: AiLaunchConfig,
+        cols: u16,
+        rows: u16,
+        remote_sync: bool,
+    ) -> anyhow::Result<()> {
+        let codex_executable = resolve_codex_executable();
+        let mut builder = CommandBuilder::new(codex_executable.clone());
+        builder.arg("--config");
+        builder.arg(format!("approval_policy=\"never\""));
+        if !launch.provider.api_key.trim().is_empty() && !launch.provider.api_key_env.trim().is_empty() {
+            builder.env(&launch.provider.api_key_env, &launch.provider.api_key);
+        }
+        self.apply_sirix_env(&mut builder);
+        builder.env("CODEX_HOME", &launch.codex_home);
+        builder.cwd(&launch.workspace_root);
+
+        self.create_process_terminal(
+            terminal_id,
+            builder,
+            format!("Sirix AI · {}", launch.agent.name),
+            "codex".to_string(),
+            launch.workspace_root.display().to_string(),
+            cols,
+            rows,
+            remote_sync,
+            Some(format!("Sirix AI · {}", launch.agent.name)),
+            Some("codex".to_string()),
+            Some(launch.workspace_root.display().to_string()),
+        )
+        .await
     }
 
     pub async fn write_input(&self, terminal_id: Uuid, data_base64: &str) -> anyhow::Result<()> {
@@ -248,7 +237,9 @@ impl TerminalManager {
     }
 
     pub async fn close(&self, terminal_id: Uuid) -> anyhow::Result<()> {
+        let mut remote_sync = false;
         if let Some(handle) = self.sessions.write().await.remove(&terminal_id) {
+            remote_sync = handle.remote_sync;
             if let Ok(mut metadata) = handle.metadata.lock() {
                 metadata.state = "closed".to_string();
                 metadata.closed_at = Some(Utc::now());
@@ -258,8 +249,10 @@ impl TerminalManager {
                 let _ = child.wait();
             }
         }
-        self.update_state(terminal_id, "closed", None, None, None, None, None, None)
-            .await?;
+        if remote_sync {
+            self.update_state(terminal_id, "closed", None, None, None, None, None, None)
+                .await?;
+        }
         self.publish_local_terminal_event("terminal.closed", json!({ "terminal_id": terminal_id }));
         Ok(())
     }
@@ -331,6 +324,9 @@ impl TerminalManager {
         rows: Option<i32>,
         error_message: Option<String>,
     ) -> anyhow::Result<()> {
+        if !self.is_remote_sync(terminal_id).await {
+            return Ok(());
+        }
         let url = format!(
             "{}/api/v1/desktop/terminals/{}/state",
             self.backend_base_url, terminal_id
@@ -368,6 +364,116 @@ impl TerminalManager {
             .to_string(),
         );
     }
+
+    fn apply_sirix_env(&self, builder: &mut CommandBuilder) {
+        let path = env::var("PATH").unwrap_or_default();
+        let sirix_bin = self.sirix_home.join("bin");
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let augmented_path = if path.trim().is_empty() {
+            sirix_bin.display().to_string()
+        } else {
+            format!("{}{}{}", sirix_bin.display(), separator, path)
+        };
+        builder.env("PATH", &augmented_path);
+        builder.env("SIRIX_HOME", &self.sirix_home);
+    }
+
+    async fn create_process_terminal(
+        &self,
+        terminal_id: Uuid,
+        builder: CommandBuilder,
+        title: String,
+        shell: String,
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        remote_sync: bool,
+        remote_title: Option<String>,
+        remote_shell: Option<String>,
+        remote_cwd: Option<String>,
+    ) -> anyhow::Result<()> {
+        let system = native_pty_system();
+        let pair = system.openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })?;
+
+        let child = pair.slave.spawn_command(builder)?;
+        let reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+        let master = Arc::new(Mutex::new(pair.master));
+        let writer = Arc::new(Mutex::new(writer));
+        let child = Arc::new(Mutex::new(child));
+        let metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
+            title: title.clone(),
+            shell: shell.clone(),
+            cwd: cwd.clone(),
+            state: "active".to_string(),
+            cols,
+            rows,
+            created_at: Utc::now(),
+            closed_at: None,
+        }));
+        let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
+
+        self.sessions.write().await.insert(
+            terminal_id,
+            TerminalSessionHandle {
+                master: master.clone(),
+                writer: writer.clone(),
+                child: child.clone(),
+                metadata: metadata.clone(),
+                replay_buffer: replay_buffer.clone(),
+                remote_sync,
+            },
+        );
+
+        self.update_state(
+            terminal_id,
+            "active",
+            remote_title.or_else(|| Some(title.clone())),
+            remote_shell.or_else(|| Some(shell.clone())),
+            remote_cwd.or_else(|| Some(cwd.clone())),
+            Some(cols.into()),
+            Some(rows.into()),
+            None,
+        )
+        .await?;
+
+        let client = self.client.clone();
+        let backend_base_url = self.backend_base_url.clone();
+        let device_id = self.device_id.clone();
+        let local_events = self.local_events.clone();
+        let runtime_handle = tokio::runtime::Handle::current();
+        thread::spawn(move || {
+            stream_terminal_output(
+                reader,
+                client,
+                backend_base_url,
+                device_id,
+                local_events,
+                terminal_id,
+                metadata,
+                replay_buffer,
+                runtime_handle,
+                remote_sync,
+            );
+        });
+
+        self.publish_local_terminal_ready(terminal_id).await;
+        Ok(())
+    }
+
+    async fn is_remote_sync(&self, terminal_id: Uuid) -> bool {
+        self.sessions
+            .read()
+            .await
+            .get(&terminal_id)
+            .map(|handle| handle.remote_sync)
+            .unwrap_or(false)
+    }
 }
 
 fn stream_terminal_output(
@@ -380,6 +486,7 @@ fn stream_terminal_output(
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
     replay_buffer: SharedReplayBuffer,
     runtime: tokio::runtime::Handle,
+    remote_sync: bool,
 ) {
     let (tx, rx) = mpsc::sync_channel::<std::io::Result<Option<Vec<u8>>>>(32);
 
@@ -414,17 +521,20 @@ fn stream_terminal_output(
                         &replay_buffer,
                         &mut pending,
                         &runtime,
+                        remote_sync,
                     ) {
                         warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
-                        let _ = update_terminal_remote_state(
-                            &client,
-                            &backend_base_url,
-                            &device_id,
-                            terminal_id,
-                            "error",
-                            Some(error.to_string()),
-                            &runtime,
-                        );
+                        if remote_sync {
+                            let _ = update_terminal_remote_state(
+                                &client,
+                                &backend_base_url,
+                                &device_id,
+                                terminal_id,
+                                "error",
+                                Some(error.to_string()),
+                                &runtime,
+                            );
+                        }
                         break;
                     }
                 }
@@ -439,6 +549,7 @@ fn stream_terminal_output(
                     &replay_buffer,
                     &mut pending,
                     &runtime,
+                    remote_sync,
                 ) {
                     warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
                 }
@@ -446,15 +557,17 @@ fn stream_terminal_output(
                     metadata.state = "closed".to_string();
                     metadata.closed_at = Some(Utc::now());
                 }
-                let _ = update_terminal_remote_state(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    terminal_id,
-                    "closed",
-                    None,
-                    &runtime,
-                );
+                if remote_sync {
+                    let _ = update_terminal_remote_state(
+                        &client,
+                        &backend_base_url,
+                        &device_id,
+                        terminal_id,
+                        "closed",
+                        None,
+                        &runtime,
+                    );
+                }
                 let _ = local_events.send(
                     json!({
                         "type": "terminal.closed",
@@ -476,19 +589,22 @@ fn stream_terminal_output(
                     &replay_buffer,
                     &mut pending,
                     &runtime,
+                    remote_sync,
                 );
                 if let Ok(mut metadata) = metadata.lock() {
                     metadata.state = "error".to_string();
                 }
-                let _ = update_terminal_remote_state(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    terminal_id,
-                    "error",
-                    Some(error.to_string()),
-                    &runtime,
-                );
+                if remote_sync {
+                    let _ = update_terminal_remote_state(
+                        &client,
+                        &backend_base_url,
+                        &device_id,
+                        terminal_id,
+                        "error",
+                        Some(error.to_string()),
+                        &runtime,
+                    );
+                }
                 let _ = local_events.send(
                     json!({
                         "type": "terminal.error",
@@ -511,17 +627,20 @@ fn stream_terminal_output(
                     &replay_buffer,
                     &mut pending,
                     &runtime,
+                    remote_sync,
                 ) {
                     warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
-                    let _ = update_terminal_remote_state(
-                        &client,
-                        &backend_base_url,
-                        &device_id,
-                        terminal_id,
-                        "error",
-                        Some(error.to_string()),
-                        &runtime,
-                    );
+                    if remote_sync {
+                        let _ = update_terminal_remote_state(
+                            &client,
+                            &backend_base_url,
+                            &device_id,
+                            terminal_id,
+                            "error",
+                            Some(error.to_string()),
+                            &runtime,
+                        );
+                    }
                     break;
                 }
             }
@@ -535,6 +654,7 @@ fn stream_terminal_output(
                     &replay_buffer,
                     &mut pending,
                     &runtime,
+                    remote_sync,
                 );
                 break;
             }
@@ -551,6 +671,7 @@ fn flush_terminal_output(
     replay_buffer: &SharedReplayBuffer,
     pending: &mut Vec<u8>,
     runtime: &tokio::runtime::Handle,
+    remote_sync: bool,
 ) -> anyhow::Result<()> {
     if pending.is_empty() {
         return Ok(());
@@ -573,6 +694,10 @@ fn flush_terminal_output(
         })
         .to_string(),
     );
+
+    if !remote_sync {
+        return Ok(());
+    }
 
     runtime.block_on(async {
         let url = format!(
@@ -655,6 +780,15 @@ fn resolve_shell(requested: Option<&str>) -> String {
         }
         return "/bin/bash".to_string();
     }
+}
+
+fn resolve_codex_executable() -> String {
+    if let Ok(codex) = env::var("SIRIX_CODEX_EXECUTABLE") {
+        if !codex.trim().is_empty() {
+            return codex;
+        }
+    }
+    "codex".to_string()
 }
 
 fn resolve_cwd(raw: &str) -> Option<PathBuf> {

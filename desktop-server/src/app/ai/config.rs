@@ -12,6 +12,7 @@ use uuid::Uuid;
 const DEFAULT_AGENT_ID: &str = "default-agent";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_MODEL_ID: &str = "gpt-5";
+const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,12 +52,15 @@ impl Default for ApprovalMode {
 pub struct CliSettings {
     #[serde(default)]
     pub supplemental_system_prompt: String,
+    #[serde(default)]
+    pub close_model_without_confirmation: bool,
 }
 
 impl Default for CliSettings {
     fn default() -> Self {
         Self {
             supplemental_system_prompt: String::new(),
+            close_model_without_confirmation: false,
         }
     }
 }
@@ -257,6 +261,7 @@ pub struct AiLaunchConfig {
     pub agent: AgentConfig,
     pub provider: ProviderConfig,
     pub model: ModelConfig,
+    pub session_providers: Vec<ProviderConfig>,
     pub codex_home: PathBuf,
     pub workspace_root: PathBuf,
     pub workspace_source: Option<PathBuf>,
@@ -336,8 +341,19 @@ impl SirixConfigStore {
             let raw = fs::read_to_string(&sirix_workspace)
                 .with_context(|| format!("failed to read {}", sirix_workspace.display()))?;
             let workspace = parse_config_with_compat(&raw, &sirix_workspace)?;
+            let workspace_cli_close_override =
+                extract_cli_close_confirmation_override(&raw, &sirix_workspace)?;
+            let mut merged = merge_sirix_config(global, workspace);
+            // `CliSettings` keeps this toggle as a concrete `bool`, so regular deserialization
+            // cannot tell whether the workspace omitted the field or explicitly set it to
+            // `false`. Inspect the raw workspace TOML and only override the merged value when
+            // the workspace file declared the toggle, so a workspace-level `false` can still
+            // disable a global `true`.
+            if let Some(close_without_confirmation) = workspace_cli_close_override {
+                merged.cli.close_model_without_confirmation = close_without_confirmation;
+            }
             return Ok(EffectiveSirixConfig {
-                config: merge_sirix_config(global, workspace),
+                config: merged,
                 workspace_path: Some(workspace_dir.display().to_string()),
                 workspace_source: Some(sirix_workspace.display().to_string()),
             });
@@ -368,6 +384,12 @@ impl SirixConfigStore {
         let effective = self.effective_for_workspace(cwd.to_str())?;
         let config = effective.config;
         let agent = resolve_agent(&config, agent_id)?;
+        let session_providers = config
+            .providers
+            .iter()
+            .filter(|item| item.enabled)
+            .cloned()
+            .collect::<Vec<_>>();
         let provider = config
             .providers
             .iter()
@@ -398,6 +420,7 @@ impl SirixConfigStore {
             agent,
             provider,
             model,
+            session_providers,
             codex_home,
             workspace_root: cwd.to_path_buf(),
             workspace_source: effective.workspace_source.map(PathBuf::from),
@@ -413,8 +436,13 @@ impl SirixConfigStore {
     ) -> anyhow::Result<()> {
         fs::create_dir_all(&launch.codex_home)
             .with_context(|| format!("failed to create {}", launch.codex_home.display()))?;
-        let config_value =
-            build_codex_bridge_toml(self.load_global()?, launch, cwd, local_ws_port, ai_session_id)?;
+        let config_value = build_codex_bridge_toml(
+            self.load_global()?,
+            launch,
+            cwd,
+            local_ws_port,
+            ai_session_id,
+        )?;
         let serialized = toml::to_string_pretty(&config_value)
             .context("failed to serialize codex bridge config")?;
         let config_path = launch.codex_home.join("config.toml");
@@ -530,17 +558,20 @@ fn build_codex_bridge_toml(
     global: SirixConfig,
     launch: &AiLaunchConfig,
     cwd: &Path,
-    _local_ws_port: u16,
-    _ai_session_id: Uuid,
+    local_ws_port: u16,
+    ai_session_id: Uuid,
 ) -> anyhow::Result<toml::map::Map<String, TomlValue>> {
     let mut root = toml::map::Map::<String, TomlValue>::new();
     root.insert(
         "model".to_string(),
         TomlValue::String(launch.model.id.clone()),
     );
+    // Sirix routes every embedded Codex model request through a single local
+    // proxy provider. That keeps the upstream Codex runtime unchanged while
+    // still letting `/model` switch across Sirix providers by model slug.
     root.insert(
         "model_provider".to_string(),
-        TomlValue::String(launch.provider.id.clone()),
+        TomlValue::String(SIRIX_SESSION_PROXY_PROVIDER_ID.to_string()),
     );
     root.insert(
         "approval_policy".to_string(),
@@ -549,6 +580,12 @@ fn build_codex_bridge_toml(
     root.insert(
         "sandbox_mode".to_string(),
         TomlValue::String("workspace-write".to_string()),
+    );
+    // Sirix owns this UX toggle and always writes it into the bridge config so the
+    // embedded Codex TUI does not fall back to its own product defaults.
+    root.insert(
+        "close_model_without_confirmation".to_string(),
+        TomlValue::Boolean(global.cli.close_model_without_confirmation),
     );
 
     let mut instructions = String::new();
@@ -565,42 +602,34 @@ fn build_codex_bridge_toml(
         root.insert("instructions".to_string(), TomlValue::String(instructions));
     }
 
-    let provider_headers = parse_json_map(&launch.provider.headers_json)
-        .with_context(|| format!("invalid headers_json for provider {}", launch.provider.id))?;
     let mut model_providers = toml::map::Map::<String, TomlValue>::new();
     let mut provider_value = toml::map::Map::<String, TomlValue>::new();
     provider_value.insert(
         "name".to_string(),
-        TomlValue::String(launch.provider.name.clone()),
+        TomlValue::String("Sirix Session Proxy".to_string()),
     );
-    let provider_base_url = bridge_provider_base_url(&launch.provider);
-    if !provider_base_url.trim().is_empty() {
-        provider_value.insert(
-            "base_url".to_string(),
-            TomlValue::String(provider_base_url),
-        );
-    }
-    if !launch.provider.api_key_env.trim().is_empty() {
-        provider_value.insert(
-            "env_key".to_string(),
-            TomlValue::String(launch.provider.api_key_env.clone()),
-        );
-    }
-    if !provider_headers.is_empty() {
-        provider_value.insert(
-            "http_headers".to_string(),
-            TomlValue::Table(provider_headers),
-        );
-    }
+    provider_value.insert(
+        "base_url".to_string(),
+        TomlValue::String(bridge_session_proxy_base_url(local_ws_port, ai_session_id)),
+    );
     provider_value.insert(
         "wire_api".to_string(),
-        TomlValue::String(bridge_provider_wire_api(&launch.provider).to_string()),
+        TomlValue::String("responses".to_string()),
     );
-    model_providers.insert(launch.provider.id.clone(), TomlValue::Table(provider_value));
+    model_providers.insert(
+        SIRIX_SESSION_PROXY_PROVIDER_ID.to_string(),
+        TomlValue::Table(provider_value),
+    );
     root.insert(
         "model_providers".to_string(),
         TomlValue::Table(model_providers),
     );
+
+    let picker_models =
+        build_bridge_models_for_session(&launch.session_providers, &launch.provider.id);
+    if !picker_models.is_empty() {
+        root.insert("models".to_string(), TomlValue::Array(picker_models));
+    }
 
     let enabled_skills = global
         .skills
@@ -723,20 +752,86 @@ fn build_codex_bridge_toml(
     Ok(root)
 }
 
-fn bridge_provider_base_url(provider: &ProviderConfig) -> String {
-    provider.base_url.clone()
+fn build_bridge_models_for_session(
+    providers: &[ProviderConfig],
+    active_provider_id: &str,
+) -> Vec<TomlValue> {
+    let mut ordered_providers = providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .collect::<Vec<_>>();
+    // When different providers expose the same model slug, the local proxy
+    // resolves that slug back to the active provider first. Reusing the same
+    // priority here keeps the picker catalog and the proxy router consistent:
+    // the first visible copy of a duplicate slug is always the one that would
+    // actually receive the request after selection.
+    ordered_providers.sort_by_key(|provider| {
+        (
+            provider.id != active_provider_id,
+            provider.name.to_ascii_lowercase(),
+            provider.id.to_ascii_lowercase(),
+        )
+    });
+
+    let mut seen_model_ids = HashSet::<String>::new();
+    let mut models = Vec::new();
+    for provider in ordered_providers {
+        for model in provider.models.iter() {
+            if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
+                continue;
+            }
+            if !seen_model_ids.insert(model.id.clone()) {
+                continue;
+            }
+            let mut entry = toml::map::Map::<String, TomlValue>::new();
+            entry.insert("id".to_string(), TomlValue::String(model.id.clone()));
+            entry.insert("model".to_string(), TomlValue::String(model.id.clone()));
+            entry.insert(
+                "display_name".to_string(),
+                TomlValue::String(model.display_name.clone()),
+            );
+            entry.insert(
+                "description".to_string(),
+                TomlValue::String(format!("Configured in Sirix provider {}", provider.name)),
+            );
+            entry.insert(
+                "default_reasoning_effort".to_string(),
+                TomlValue::String("none".to_string()),
+            );
+            entry.insert(
+                "supported_reasoning_efforts".to_string(),
+                TomlValue::Array(Vec::new()),
+            );
+            entry.insert(
+                "supports_personality".to_string(),
+                TomlValue::Boolean(false),
+            );
+            entry.insert(
+                "additional_speed_tiers".to_string(),
+                TomlValue::Array(Vec::new()),
+            );
+            entry.insert("is_default".to_string(), TomlValue::Boolean(false));
+            entry.insert("show_in_picker".to_string(), TomlValue::Boolean(true));
+            entry.insert("supported_in_api".to_string(), TomlValue::Boolean(true));
+            entry.insert(
+                "input_modalities".to_string(),
+                TomlValue::Array(if model.supports_images {
+                    vec![
+                        TomlValue::String("text".to_string()),
+                        TomlValue::String("image".to_string()),
+                    ]
+                } else {
+                    vec![TomlValue::String("text".to_string())]
+                }),
+            );
+            models.push(TomlValue::Table(entry));
+        }
+    }
+    models
 }
 
-fn bridge_provider_wire_api(provider: &ProviderConfig) -> &'static str {
-    match provider.kind {
-        // Sirix runtime now understands both native Responses providers and
-        // OpenAI-compatible chat-completions providers directly. The bridge
-        // config must therefore preserve the provider's real wire protocol
-        // instead of forcing everything through a local proxy adapter.
-        ProviderKind::OpenAiCompatible => "chat",
-        ProviderKind::OpenAiResponses => "responses",
-        ProviderKind::Gemini | ProviderKind::Anthropic => "responses",
-    }
+fn bridge_session_proxy_base_url(local_ws_port: u16, ai_session_id: Uuid) -> String {
+    format!("http://127.0.0.1:{local_ws_port}/ai/sessions/{ai_session_id}/provider/v1")
 }
 
 pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
@@ -877,20 +972,6 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn parse_json_map(raw: &str) -> anyhow::Result<toml::map::Map<String, TomlValue>> {
-    if raw.trim().is_empty() {
-        return Ok(toml::map::Map::new());
-    }
-    let value = serde_json::from_str::<serde_json::Value>(raw)?;
-    match value {
-        serde_json::Value::Object(map) => Ok(map
-            .into_iter()
-            .map(|(key, value)| (key, toml_from_json(value)))
-            .collect()),
-        _ => anyhow::bail!("expected JSON object"),
-    }
-}
-
 fn parse_config_with_compat(raw: &str, source: &Path) -> anyhow::Result<SirixConfig> {
     match toml::from_str::<SirixConfig>(raw) {
         Ok(parsed) => Ok(parsed),
@@ -919,6 +1000,12 @@ fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
         .filter(|value| !value.trim().is_empty())
     {
         config.cli.supplemental_system_prompt = instructions.to_string();
+    }
+    if let Some(close_without_confirmation) = table
+        .get("close_model_without_confirmation")
+        .and_then(TomlValue::as_bool)
+    {
+        config.cli.close_model_without_confirmation = close_without_confirmation;
     }
 
     let model_id = table
@@ -997,6 +1084,37 @@ fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
     config.agents = vec![agent];
 
     Ok(config)
+}
+
+fn extract_cli_close_confirmation_override(
+    raw: &str,
+    source: &Path,
+) -> anyhow::Result<Option<bool>> {
+    let value = toml::from_str::<TomlValue>(raw).with_context(|| {
+        format!(
+            "failed to parse {} while inspecting CLI close toggle",
+            source.display()
+        )
+    })?;
+    let table = value.as_table().with_context(|| {
+        format!(
+            "{} root must be a table while inspecting CLI close toggle",
+            source.display()
+        )
+    })?;
+
+    if let Some(value) = table
+        .get("cli")
+        .and_then(TomlValue::as_table)
+        .and_then(|cli| cli.get("close_model_without_confirmation"))
+        .and_then(TomlValue::as_bool)
+    {
+        return Ok(Some(value));
+    }
+
+    Ok(table
+        .get("close_model_without_confirmation")
+        .and_then(TomlValue::as_bool))
 }
 
 fn looks_like_legacy_codex_config(table: &toml::map::Map<String, TomlValue>) -> bool {
@@ -1467,11 +1585,7 @@ fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()> {
 fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
     SirixConfig {
         version: overlay.version.max(base.version),
-        cli: if overlay.cli.supplemental_system_prompt.trim().is_empty() {
-            base.cli
-        } else {
-            overlay.cli
-        },
+        cli: merge_cli_settings(base.cli, overlay.cli),
         providers: if overlay.providers.is_empty() {
             base.providers
         } else {
@@ -1497,6 +1611,18 @@ fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
         } else {
             overlay.agents
         },
+    }
+}
+
+fn merge_cli_settings(base: CliSettings, overlay: CliSettings) -> CliSettings {
+    CliSettings {
+        supplemental_system_prompt: if overlay.supplemental_system_prompt.trim().is_empty() {
+            base.supplemental_system_prompt
+        } else {
+            overlay.supplemental_system_prompt
+        },
+        close_model_without_confirmation: base.close_model_without_confirmation
+            || overlay.close_model_without_confirmation,
     }
 }
 
@@ -1565,9 +1691,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn openai_compatible_bridge_targets_native_chat_provider() {
-        let ai_session_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555")
-            .expect("uuid should parse");
+    fn bridge_targets_sirix_session_proxy_provider() {
+        let ai_session_id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid should parse");
+        let provider = ProviderConfig {
+            id: "glm".to_string(),
+            name: "GLM".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
+            api_key_env: "GLM_API_KEY".to_string(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "glm-5-turbo".to_string(),
+                display_name: "GLM 5 Turbo".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 128_000,
+                supports_images: false,
+                enabled: true,
+            }],
+        };
         let launch = AiLaunchConfig {
             agent: AgentConfig {
                 id: "agent".to_string(),
@@ -1583,32 +1727,9 @@ mod tests {
                 capability_rules: Vec::new(),
                 enabled: true,
             },
-            provider: ProviderConfig {
-                id: "glm".to_string(),
-                name: "GLM".to_string(),
-                kind: ProviderKind::OpenAiCompatible,
-                base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
-                api_key_env: "GLM_API_KEY".to_string(),
-                api_key: String::new(),
-                headers_json: "{}".to_string(),
-                enabled: true,
-                models: vec![ModelConfig {
-                    id: "glm-5-turbo".to_string(),
-                    display_name: "GLM 5 Turbo".to_string(),
-                    model_kind: ModelKind::Text,
-                    context_window: 128_000,
-                    supports_images: false,
-                    enabled: true,
-                }],
-            },
-            model: ModelConfig {
-                id: "glm-5-turbo".to_string(),
-                display_name: "GLM 5 Turbo".to_string(),
-                model_kind: ModelKind::Text,
-                context_window: 128_000,
-                supports_images: false,
-                enabled: true,
-            },
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider],
             codex_home: PathBuf::from("/tmp/.sirix"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
@@ -1628,17 +1749,231 @@ mod tests {
             .and_then(TomlValue::as_table)
             .expect("model_providers should exist");
         let provider = providers
-            .get("glm")
+            .get(SIRIX_SESSION_PROXY_PROVIDER_ID)
             .and_then(TomlValue::as_table)
-            .expect("glm provider should exist");
+            .expect("session proxy provider should exist");
 
         assert_eq!(
             provider.get("base_url").and_then(TomlValue::as_str),
-            Some("https://open.bigmodel.cn/api/coding/paas/v4")
+            Some(
+                "http://127.0.0.1:9701/ai/sessions/11111111-2222-3333-4444-555555555555/provider/v1"
+            )
         );
         assert_eq!(
             provider.get("wire_api").and_then(TomlValue::as_str),
-            Some("chat")
+            Some("responses")
+        );
+    }
+
+    #[test]
+    fn bridge_writes_cli_close_toggle_and_active_provider_models() {
+        let ai_session_id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid should parse");
+        let provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![
+                ModelConfig {
+                    id: "gpt-5".to_string(),
+                    display_name: "GPT-5".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: 200_000,
+                    supports_images: true,
+                    enabled: true,
+                },
+                ModelConfig {
+                    id: "tts-1".to_string(),
+                    display_name: "TTS".to_string(),
+                    model_kind: ModelKind::Tts,
+                    context_window: 0,
+                    supports_images: false,
+                    enabled: true,
+                },
+                ModelConfig {
+                    id: "gpt-disabled".to_string(),
+                    display_name: "Disabled".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: 128_000,
+                    supports_images: false,
+                    enabled: false,
+                },
+            ],
+        };
+        let launch = AiLaunchConfig {
+            agent: AgentConfig {
+                id: "agent".to_string(),
+                name: "Agent".to_string(),
+                provider_id: provider.id.clone(),
+                model_id: "gpt-5".to_string(),
+                system_prompt: String::new(),
+                builtin_tools_enabled: true,
+                enabled_skill_ids: Vec::new(),
+                disabled_skill_ids: Vec::new(),
+                enabled_mcp_server_ids: Vec::new(),
+                disabled_mcp_server_ids: Vec::new(),
+                capability_rules: Vec::new(),
+                enabled: true,
+            },
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider.clone()],
+            codex_home: PathBuf::from("/tmp/.sirix"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        };
+        let mut global = SirixConfig::default();
+        global.cli.close_model_without_confirmation = true;
+        global.providers = vec![provider];
+
+        let config = build_codex_bridge_toml(
+            global,
+            &launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            ai_session_id,
+        )
+        .expect("bridge config should build");
+
+        assert_eq!(
+            config
+                .get("close_model_without_confirmation")
+                .and_then(TomlValue::as_bool),
+            Some(true)
+        );
+
+        let models = config
+            .get("models")
+            .and_then(TomlValue::as_array)
+            .expect("bridge models should exist");
+        assert_eq!(
+            models.len(),
+            1,
+            "only enabled text models should be exported"
+        );
+        let model = models[0]
+            .as_table()
+            .expect("bridge model should be a table");
+        assert_eq!(
+            model.get("model").and_then(TomlValue::as_str),
+            Some("gpt-5")
+        );
+        assert_eq!(
+            model.get("show_in_picker").and_then(TomlValue::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn bridge_exports_enabled_text_models_across_session_providers() {
+        let ai_session_id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid should parse");
+        let active_provider = ProviderConfig {
+            id: "glm".to_string(),
+            name: "GLM".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://example.com/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "glm-5".to_string(),
+                display_name: "GLM 5".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 128_000,
+                supports_images: false,
+                enabled: true,
+            }],
+        };
+        let openai_provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![
+                ModelConfig {
+                    id: "gpt-5".to_string(),
+                    display_name: "GPT-5".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: 400_000,
+                    supports_images: true,
+                    enabled: true,
+                },
+                ModelConfig {
+                    id: "glm-5".to_string(),
+                    display_name: "Duplicate GLM".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: 128_000,
+                    supports_images: true,
+                    enabled: true,
+                },
+            ],
+        };
+        let launch = AiLaunchConfig {
+            agent: AgentConfig {
+                id: "agent".to_string(),
+                name: "Agent".to_string(),
+                provider_id: active_provider.id.clone(),
+                model_id: "glm-5".to_string(),
+                system_prompt: String::new(),
+                builtin_tools_enabled: true,
+                enabled_skill_ids: Vec::new(),
+                disabled_skill_ids: Vec::new(),
+                enabled_mcp_server_ids: Vec::new(),
+                disabled_mcp_server_ids: Vec::new(),
+                capability_rules: Vec::new(),
+                enabled: true,
+            },
+            provider: active_provider.clone(),
+            model: active_provider.models[0].clone(),
+            session_providers: vec![openai_provider, active_provider.clone()],
+            codex_home: PathBuf::from("/tmp/.sirix"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        };
+
+        let config = build_codex_bridge_toml(
+            SirixConfig::default(),
+            &launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            ai_session_id,
+        )
+        .expect("bridge config should build");
+
+        let models = config
+            .get("models")
+            .and_then(TomlValue::as_array)
+            .expect("bridge models should exist");
+        assert_eq!(
+            models.len(),
+            2,
+            "expected unique text models from both providers"
+        );
+        assert_eq!(
+            models[0]
+                .as_table()
+                .and_then(|item| item.get("model"))
+                .and_then(TomlValue::as_str),
+            Some("glm-5"),
+            "active-provider duplicate should stay first in the picker catalog"
+        );
+        assert_eq!(
+            models[1]
+                .as_table()
+                .and_then(|item| item.get("model"))
+                .and_then(TomlValue::as_str),
+            Some("gpt-5")
         );
     }
 
@@ -1649,6 +1984,7 @@ model = "gpt-5.4"
 model_provider = "crs"
 model_context_window = 400000
 instructions = "legacy prompt"
+close_model_without_confirmation = true
 
 [model_providers.crs]
 name = "CRS"
@@ -1669,6 +2005,7 @@ config = [
         let parsed = parse_legacy_codex_config(raw).expect("legacy config should parse");
 
         assert_eq!(parsed.cli.supplemental_system_prompt, "legacy prompt");
+        assert!(parsed.cli.close_model_without_confirmation);
         assert_eq!(parsed.providers.len(), 1);
         assert_eq!(parsed.providers[0].id, "crs");
         assert_eq!(parsed.providers[0].kind, ProviderKind::OpenAiResponses);
@@ -1709,5 +2046,45 @@ model = "gpt-5.4"
         let table = value.as_table().expect("config root should be table");
 
         assert!(looks_like_legacy_codex_config(table));
+    }
+
+    #[test]
+    fn workspace_cli_close_toggle_can_override_global_true_with_false() {
+        let root = env::temp_dir().join(format!(
+            "sirix-config-workspace-override-{}",
+            Uuid::new_v4()
+        ));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        let workspace_config_dir = workspace_dir.join(".sirix");
+        fs::create_dir_all(&workspace_config_dir).expect("workspace config dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let mut global = SirixConfig::default();
+        global.cli.close_model_without_confirmation = true;
+        store
+            .save_global(&global)
+            .expect("global config should be saved");
+
+        fs::write(
+            workspace_config_dir.join("config.toml"),
+            "[cli]\nclose_model_without_confirmation = false\n",
+        )
+        .expect("workspace config should be written");
+
+        let effective = store
+            .effective_for_workspace(workspace_dir.to_str())
+            .expect("effective config should load");
+
+        assert!(
+            !effective.config.cli.close_model_without_confirmation,
+            "workspace config should be able to disable the global close shortcut override"
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
     }
 }

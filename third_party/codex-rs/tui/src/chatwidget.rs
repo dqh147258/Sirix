@@ -303,7 +303,6 @@ use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::CollaborationModeIndicator;
 use crate::bottom_pane::ColumnWidthMode;
-use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
 use crate::bottom_pane::InputResult;
@@ -7213,6 +7212,14 @@ impl ChatWidget {
             .send(AppEvent::Exit(ExitMode::ShutdownFirst));
     }
 
+    /// Sirix can restore the safer "press twice to close" flow even though
+    /// standalone Codex defaults to immediate close when no explicit setting is
+    /// present. Keeping this check in `ChatWidget` ensures the shortcut state,
+    /// footer hint, and final exit request all respect the same runtime config.
+    fn requires_close_confirmation(&self) -> bool {
+        !self.config.close_model_without_confirmation
+    }
+
     fn request_redraw(&mut self) {
         self.frame_requester.schedule_frame();
     }
@@ -8114,7 +8121,13 @@ impl ChatWidget {
             let description =
                 (!preset.description.is_empty()).then_some(preset.description.to_string());
             let is_current = preset.model.as_str() == self.current_model();
-            let single_supported_effort = preset.supported_reasoning_efforts.len() == 1;
+            // Sirix can inject custom picker entries without an explicit
+            // `supported_reasoning_efforts` list. In that case
+            // `open_reasoning_popup()` immediately applies the model instead of
+            // opening a second popup, so the first-stage model picker must also
+            // dismiss itself on Enter to avoid leaving a stale selection view on
+            // screen after the model switch completed.
+            let single_supported_effort = preset.supported_reasoning_efforts.len() <= 1;
             let preset_for_action = preset.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 let preset_for_event = preset_for_action.clone();
@@ -10255,9 +10268,10 @@ impl ChatWidget {
             self.stop_realtime_conversation_from_ui();
             return;
         }
+        let requires_close_confirmation = self.requires_close_confirmation();
         let modal_or_popup_active = !self.bottom_pane.no_modal_or_popup_active();
-        if self.bottom_pane.on_ctrl_c() == CancellationEvent::Handled {
-            if DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
+        if self.bottom_pane.on_ctrl_c(requires_close_confirmation) == CancellationEvent::Handled {
+            if requires_close_confirmation {
                 if modal_or_popup_active {
                     self.quit_shortcut_expires_at = None;
                     self.quit_shortcut_key = None;
@@ -10269,7 +10283,7 @@ impl ChatWidget {
             return;
         }
 
-        if !DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
+        if !requires_close_confirmation {
             if self.is_cancellable_work_active() {
                 self.submit_op(AppCommand::interrupt());
             } else {
@@ -10298,7 +10312,7 @@ impl ChatWidget {
     /// Otherwise it should be routed to the active view and not attempt to quit.
     fn on_ctrl_d(&mut self) -> bool {
         let key = key_hint::ctrl(KeyCode::Char('d'));
-        if !DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED {
+        if !self.requires_close_confirmation() {
             if !self.bottom_pane.composer_is_empty() || !self.bottom_pane.no_modal_or_popup_active()
             {
                 return false;

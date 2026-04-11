@@ -1,10 +1,21 @@
-use std::{collections::BTreeMap, convert::Infallible, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    convert::Infallible,
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    http::{header::CONTENT_TYPE, HeaderMap as AxumHeaderMap, HeaderValue as AxumHeaderValue, StatusCode},
-    response::{sse::{Event, Sse}, IntoResponse, Response},
+    http::{
+        header::CONTENT_TYPE, HeaderMap as AxumHeaderMap, HeaderValue as AxumHeaderValue,
+        StatusCode,
+    },
+    response::{
+        sse::{Event, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use eventsource_stream::Eventsource;
@@ -316,33 +327,20 @@ pub async fn proxy_compatible_models(
     Path(ai_session_id): Path<uuid::Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let provider = state
+    let (active_provider_id, providers) = state
         .ai_session_registry
-        .resolve_provider(ai_session_id)
+        .resolve_session_providers(ai_session_id)
         .await
-        .ok_or_else(|| ApiError::not_found(format!("provider not found for ai session {ai_session_id}")))?;
-    if provider.kind != ProviderKind::OpenAiCompatible {
-        return Err(ApiError::bad_request(format!(
-            "provider {} is not openai-compatible",
-            provider.id
-        )));
-    }
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "providers not found for ai session {ai_session_id}"
+            ))
+        })?;
 
-    let base_url = normalized_provider_base_url(&provider).map_err(ApiError::internal)?;
-    let models_url = provider_models_url(&provider, &base_url).map_err(ApiError::internal)?;
-    let headers = provider_request_headers(&provider).map_err(ApiError::internal)?;
-    let payload = reqwest::Client::new()
-        .get(models_url)
-        .headers(headers)
-        .send()
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?
-        .error_for_status()
-        .map_err(|error| ApiError::bad_gateway(format!("compatible provider /models failed: {error}")))?
-        .json::<JsonValue>()
-        .await
-        .map_err(|error| ApiError::internal(error.into()))?;
-    Ok(Json(payload))
+    Ok(Json(session_models_payload(
+        &providers,
+        active_provider_id.as_str(),
+    )))
 }
 
 pub async fn proxy_compatible_responses(
@@ -350,23 +348,72 @@ pub async fn proxy_compatible_responses(
     State(state): State<AppState>,
     Json(payload): Json<JsonValue>,
 ) -> Result<Response, ApiError> {
+    let requested_model = payload
+        .get("model")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
     let provider = state
         .ai_session_registry
-        .resolve_provider(ai_session_id)
+        .resolve_provider_for_model(ai_session_id, requested_model)
         .await
-        .ok_or_else(|| ApiError::not_found(format!("provider not found for ai session {ai_session_id}")))?;
-    if provider.kind != ProviderKind::OpenAiCompatible {
-        return Err(ApiError::bad_request(format!(
-            "provider {} is not openai-compatible",
-            provider.id
-        )));
+        .ok_or_else(|| {
+            ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
+        })?;
+    match provider.kind {
+        ProviderKind::OpenAiCompatible => {
+            proxy_openai_compatible_responses(&provider, &payload).await
+        }
+        ProviderKind::OpenAiResponses | ProviderKind::Gemini | ProviderKind::Anthropic => {
+            proxy_native_responses(&provider, &payload).await
+        }
+    }
+}
+
+fn session_models_payload(providers: &[ProviderConfig], active_provider_id: &str) -> JsonValue {
+    let mut ordered_providers = providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .collect::<Vec<_>>();
+    ordered_providers.sort_by_key(|provider| {
+        (
+            provider.id != active_provider_id,
+            provider.name.to_ascii_lowercase(),
+            provider.id.to_ascii_lowercase(),
+        )
+    });
+
+    let mut seen_model_ids = HashSet::<String>::new();
+    let mut models = Vec::new();
+    for provider in ordered_providers {
+        for model in provider.models.iter() {
+            if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
+                continue;
+            }
+            if !seen_model_ids.insert(model.id.clone()) {
+                continue;
+            }
+            models.push(serde_json::json!({
+                "id": model.id,
+                "display_name": model.display_name,
+                "owned_by": provider.name,
+                "context_window": model.context_window,
+                "supports_images": model.supports_images,
+            }));
+        }
     }
 
-    let upstream_body = translate_responses_request_to_chat_completions(&payload)
+    serde_json::json!({ "data": models })
+}
+
+async fn proxy_openai_compatible_responses(
+    provider: &ProviderConfig,
+    payload: &JsonValue,
+) -> Result<Response, ApiError> {
+    let upstream_body = translate_responses_request_to_chat_completions(payload)
         .map_err(ApiError::bad_request_anyhow)?;
-    let base_url = normalized_provider_base_url(&provider).map_err(ApiError::internal)?;
+    let base_url = normalized_provider_base_url(provider).map_err(ApiError::internal)?;
     let upstream_url = compatible_chat_completions_url(&base_url).map_err(ApiError::internal)?;
-    let mut headers = provider_request_headers(&provider).map_err(ApiError::internal)?;
+    let mut headers = provider_request_headers(provider).map_err(ApiError::internal)?;
     headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -460,8 +507,53 @@ pub async fn proxy_compatible_responses(
     };
 
     let mut headers = AxumHeaderMap::new();
-    headers.insert(CONTENT_TYPE, AxumHeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        CONTENT_TYPE,
+        AxumHeaderValue::from_static("text/event-stream"),
+    );
     Ok((headers, Sse::new(stream)).into_response())
+}
+
+async fn proxy_native_responses(
+    provider: &ProviderConfig,
+    payload: &JsonValue,
+) -> Result<Response, ApiError> {
+    let base_url = normalized_provider_base_url(provider).map_err(ApiError::internal)?;
+    let mut upstream_url = base_url.clone();
+    if !upstream_url.path().ends_with('/') {
+        let next_path = format!("{}/", upstream_url.path());
+        upstream_url.set_path(&next_path);
+    }
+    let upstream_url = upstream_url
+        .join("responses")
+        .map_err(|error| ApiError::internal(error.into()))?;
+    let mut headers = provider_request_headers(provider).map_err(ApiError::internal)?;
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    let upstream_response = reqwest::Client::new()
+        .post(upstream_url)
+        .headers(headers)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| ApiError::internal(error.into()))?;
+    let status = upstream_response.status();
+    if !status.is_success() {
+        let body = upstream_response.text().await.unwrap_or_default();
+        return Err(ApiError::bad_gateway(format!(
+            "responses provider request failed with status {status}: {body}"
+        )));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(upstream_response.bytes_stream()))
+        .map_err(|error| ApiError::internal(error.into()))
 }
 
 async fn fetch_provider_models(provider: &ProviderConfig) -> anyhow::Result<Vec<ModelConfig>> {
@@ -855,7 +947,10 @@ struct ChatCompletionToolCall {
 impl ChatCompletionAccumulator {
     fn capture_chunk(&mut self, chunk: &JsonValue) {
         if self.response_id.is_none() {
-            self.response_id = chunk.get("id").and_then(JsonValue::as_str).map(ToString::to_string);
+            self.response_id = chunk
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .map(ToString::to_string);
         }
         if let Some(usage) = chunk.get("usage").cloned() {
             self.usage = Some(usage);
@@ -882,11 +977,14 @@ impl ChatCompletionAccumulator {
                     if let Some(id) = tool_call.get("id").and_then(JsonValue::as_str) {
                         entry.id = id.to_string();
                     }
-                    if let Some(function) = tool_call.get("function").and_then(JsonValue::as_object) {
+                    if let Some(function) = tool_call.get("function").and_then(JsonValue::as_object)
+                    {
                         if let Some(name) = function.get("name").and_then(JsonValue::as_str) {
                             entry.name = name.to_string();
                         }
-                        if let Some(arguments) = function.get("arguments").and_then(JsonValue::as_str) {
+                        if let Some(arguments) =
+                            function.get("arguments").and_then(JsonValue::as_str)
+                        {
                             entry.arguments.push_str(arguments);
                         }
                     }
@@ -1000,7 +1098,9 @@ fn compatible_chat_completions_url(base_url: &Url) -> anyhow::Result<Url> {
     Ok(api_root.join("chat/completions")?)
 }
 
-fn translate_responses_request_to_chat_completions(payload: &JsonValue) -> anyhow::Result<JsonValue> {
+fn translate_responses_request_to_chat_completions(
+    payload: &JsonValue,
+) -> anyhow::Result<JsonValue> {
     let model = payload
         .get("model")
         .and_then(JsonValue::as_str)
@@ -1064,14 +1164,23 @@ fn append_chat_messages_from_response_input(item: &JsonValue, messages: &mut Vec
                 .get("role")
                 .and_then(JsonValue::as_str)
                 .unwrap_or("user");
+            // Many OpenAI-compatible chat-completions providers only accept the
+            // legacy role set (`system`/`user`/`assistant`/`tool`/`function`)
+            // and reject Responses-style `developer`. Sirix uses the local
+            // `/responses` proxy for every session, so downgrade `developer`
+            // to `system` during the compatibility translation step.
+            let chat_role = if role == "developer" { "system" } else { role };
             let content = chat_content_from_response_message(item.get("content"));
             messages.push(serde_json::json!({
-                "role": role,
+                "role": chat_role,
                 "content": content,
             }));
         }
         "function_call" => {
-            let name = item.get("name").and_then(JsonValue::as_str).unwrap_or_default();
+            let name = item
+                .get("name")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
             let arguments = item
                 .get("arguments")
                 .and_then(JsonValue::as_str)
@@ -1178,11 +1287,13 @@ fn convert_single_response_tool(tool: &JsonValue, converted: &mut Vec<JsonValue>
                 .get("parameters")
                 .cloned()
                 .or_else(|| tool.get("input_schema").cloned())
-                .unwrap_or_else(|| serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": true,
-                }));
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": true,
+                    })
+                });
             converted.push(serde_json::json!({
                 "type": "function",
                 "function": {
@@ -1204,9 +1315,7 @@ fn convert_single_response_tool(tool: &JsonValue, converted: &mut Vec<JsonValue>
 }
 
 fn sse_json_event(kind: &str, payload: &JsonValue) -> Event {
-    Event::default()
-        .event(kind)
-        .data(payload.to_string())
+    Event::default().event(kind).data(payload.to_string())
 }
 
 fn resolve_capability_mode(
@@ -1398,12 +1507,99 @@ mod tests {
         }));
 
         let added = accumulator.message_item_added();
-        let done = accumulator.final_message_item().expect("message item should exist");
+        let done = accumulator
+            .final_message_item()
+            .expect("message item should exist");
 
         assert_eq!(added.get("id"), done.get("id"));
         assert_eq!(
             done.pointer("/content/0/text").and_then(JsonValue::as_str),
             Some("Hi")
         );
+    }
+
+    #[test]
+    fn compatibility_translation_maps_developer_role_to_system() {
+        let payload = serde_json::json!({
+            "model": "glm-5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "stay focused"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let translated = translate_responses_request_to_chat_completions(&payload)
+            .expect("compatibility translation should succeed");
+        let messages = translated
+            .get("messages")
+            .and_then(JsonValue::as_array)
+            .expect("translated request should contain messages");
+
+        assert_eq!(
+            messages[0].get("role").and_then(JsonValue::as_str),
+            Some("system")
+        );
+    }
+
+    #[test]
+    fn session_models_payload_prefers_active_provider_duplicate_ids() {
+        let mut active = provider(ProviderKind::OpenAiCompatible, "https://example.com/v1");
+        active.id = "glm".to_string();
+        active.name = "GLM".to_string();
+        active.models = vec![ModelConfig {
+            id: "shared-model".to_string(),
+            display_name: "GLM Shared".to_string(),
+            model_kind: ModelKind::Text,
+            context_window: 128_000,
+            supports_images: false,
+            enabled: true,
+        }];
+
+        let mut secondary = provider(ProviderKind::OpenAiResponses, "https://api.openai.com/v1");
+        secondary.id = "openai".to_string();
+        secondary.name = "OpenAI".to_string();
+        secondary.models = vec![
+            ModelConfig {
+                id: "gpt-5".to_string(),
+                display_name: "GPT-5".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 400_000,
+                supports_images: true,
+                enabled: true,
+            },
+            ModelConfig {
+                id: "shared-model".to_string(),
+                display_name: "OpenAI Shared".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 400_000,
+                supports_images: true,
+                enabled: true,
+            },
+        ];
+
+        let payload = session_models_payload(&[secondary, active], "glm");
+        let data = payload
+            .get("data")
+            .and_then(JsonValue::as_array)
+            .expect("session model payload should contain data");
+
+        assert_eq!(data.len(), 2);
+        assert_eq!(
+            data[0].get("id").and_then(JsonValue::as_str),
+            Some("shared-model")
+        );
+        assert_eq!(
+            data[0].get("owned_by").and_then(JsonValue::as_str),
+            Some("GLM")
+        );
+        assert_eq!(data[1].get("id").and_then(JsonValue::as_str), Some("gpt-5"));
     }
 }

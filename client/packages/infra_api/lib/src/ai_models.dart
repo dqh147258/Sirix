@@ -85,27 +85,35 @@ ApprovalMode approvalModeFromJson(String? raw) {
 class CliSettingsConfig {
   const CliSettingsConfig({
     this.supplementalSystemPrompt = '',
+    this.closeModelWithoutConfirmation = false,
   });
 
   final String supplementalSystemPrompt;
+  final bool closeModelWithoutConfirmation;
 
   factory CliSettingsConfig.fromJson(Map<String, dynamic> json) {
     return CliSettingsConfig(
       supplementalSystemPrompt: json['supplemental_system_prompt'] as String? ?? '',
+      closeModelWithoutConfirmation:
+          json['close_model_without_confirmation'] as bool? ?? false,
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
       'supplemental_system_prompt': supplementalSystemPrompt,
+      'close_model_without_confirmation': closeModelWithoutConfirmation,
     };
   }
 
   CliSettingsConfig copyWith({
     String? supplementalSystemPrompt,
+    bool? closeModelWithoutConfirmation,
   }) {
     return CliSettingsConfig(
       supplementalSystemPrompt: supplementalSystemPrompt ?? this.supplementalSystemPrompt,
+      closeModelWithoutConfirmation:
+          closeModelWithoutConfirmation ?? this.closeModelWithoutConfirmation,
     );
   }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -1614,6 +1615,59 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     assert!(
         !popup.contains("test-hidden-model"),
         "expected hidden model to be excluded from picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_uses_inline_configured_models_when_catalog_is_overridden() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("sirix-gpt")).await;
+    let mut model = codex_models_manager::model_info::model_info_from_slug("sirix-gpt");
+    model.display_name = "Sirix GPT".to_string();
+    model.visibility = codex_protocol::openai_models::ModelVisibility::List;
+    chat.config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
+        models: vec![model],
+    });
+    chat.model_catalog = test_model_catalog(&chat.config);
+
+    chat.open_model_popup();
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        popup.contains("sirix-gpt"),
+        "expected inline configured model to appear in picker:\n{popup}"
+    );
+    assert!(
+        !popup.contains("codex-auto-fast"),
+        "expected bundled auto catalog entries to be replaced by inline configured models:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn all_models_picker_dismisses_when_model_has_no_explicit_effort_choices() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("sirix-gpt")).await;
+    let preset = ModelPreset {
+        id: "sirix-gpt".to_string(),
+        model: "sirix-gpt".to_string(),
+        display_name: "Sirix GPT".to_string(),
+        description: "Injected by Sirix".to_string(),
+        default_reasoning_effort: ReasoningEffort::None,
+        supported_reasoning_efforts: Vec::new(),
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: true,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_all_models_popup(vec![preset]);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert!(
+        chat.bottom_pane.no_modal_or_popup_active(),
+        "expected model picker to dismiss when selecting a model that applies immediately"
     );
 }
 

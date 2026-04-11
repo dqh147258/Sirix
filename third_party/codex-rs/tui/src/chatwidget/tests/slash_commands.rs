@@ -38,6 +38,18 @@ async fn ctrl_d_quits_without_prompt() {
 }
 
 #[tokio::test]
+async fn ctrl_d_requires_second_press_when_close_confirmation_is_enabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.close_model_without_confirmation = false;
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+}
+
+#[tokio::test]
 async fn ctrl_d_with_modal_open_does_not_quit() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

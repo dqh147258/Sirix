@@ -130,10 +130,17 @@ pub(super) fn test_model_catalog(config: &Config) -> Arc<ModelCatalog> {
             .features
             .enabled(Feature::DefaultModeRequestUserInput),
     };
-    Arc::new(ModelCatalog::new(
-        codex_core::test_support::all_model_presets().clone(),
-        collaboration_modes_config,
-    ))
+    let models = config
+        .model_catalog
+        .as_ref()
+        .map(|catalog| {
+            let mut presets: Vec<ModelPreset> =
+                catalog.models.clone().into_iter().map(Into::into).collect();
+            ModelPreset::mark_default_by_picker_visibility(&mut presets);
+            presets
+        })
+        .unwrap_or_else(|| codex_core::test_support::all_model_presets().clone());
+    Arc::new(ModelCatalog::new(models, collaboration_modes_config))
 }
 
 // --- Helpers for tests that need direct construction and event draining ---

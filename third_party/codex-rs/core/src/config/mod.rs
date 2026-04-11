@@ -62,6 +62,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::ModelsManagerConfig;
+use codex_models_manager::model_info;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
@@ -73,6 +74,8 @@ use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
@@ -197,6 +200,8 @@ pub struct Config {
 
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// Whether close shortcuts should bypass the extra exit confirmation step.
+    pub close_model_without_confirmation: bool,
 
     /// Effective service tier preference for new turns (`fast` or `flex`).
     pub service_tier: Option<ServiceTier>,
@@ -871,6 +876,43 @@ fn load_model_catalog(
     model_catalog_json
         .map(|path| load_catalog_json(&path))
         .transpose()
+}
+
+fn build_model_catalog_from_presets(models: Option<Vec<ModelPreset>>) -> Option<ModelsResponse> {
+    let models = models?;
+    if models.is_empty() {
+        return None;
+    }
+
+    let models = models
+        .into_iter()
+        .enumerate()
+        .map(|(priority, preset)| {
+            // Seed bridge-defined picker entries from the standard fallback metadata so
+            // Sirix can inject only model-picker-facing fields while Codex still retains
+            // sensible runtime defaults for instructions, shell behavior, and truncation.
+            let mut model = model_info::model_info_from_slug(&preset.model);
+            model.slug = preset.model;
+            model.display_name = preset.display_name;
+            model.description =
+                (!preset.description.trim().is_empty()).then_some(preset.description);
+            model.default_reasoning_level = Some(preset.default_reasoning_effort);
+            model.supported_reasoning_levels = preset.supported_reasoning_efforts;
+            model.visibility = if preset.show_in_picker {
+                ModelVisibility::List
+            } else {
+                ModelVisibility::Hide
+            };
+            model.supported_in_api = preset.supported_in_api;
+            model.priority = i32::try_from(priority).unwrap_or(i32::MAX);
+            model.additional_speed_tiers = preset.additional_speed_tiers;
+            model.availability_nux = preset.availability_nux;
+            model.input_modalities = preset.input_modalities;
+            model
+        })
+        .collect();
+
+    Some(ModelsResponse { models })
 }
 
 fn filter_mcp_servers_by_requirements(
@@ -1879,12 +1921,13 @@ impl Config {
         let review_model = override_review_model.or(cfg.review_model);
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
-        let model_catalog = load_model_catalog(
-            config_profile
-                .model_catalog_json
-                .clone()
-                .or(cfg.model_catalog_json.clone()),
-        )?;
+        let model_catalog =
+            build_model_catalog_from_presets(cfg.models.clone()).or(load_model_catalog(
+                config_profile
+                    .model_catalog_json
+                    .clone()
+                    .or(cfg.model_catalog_json.clone()),
+            )?);
 
         let log_dir = cfg
             .log_dir
@@ -1981,6 +2024,7 @@ impl Config {
             };
         let config = Self {
             model,
+            close_model_without_confirmation: cfg.close_model_without_confirmation.unwrap_or(true),
             service_tier,
             review_model,
             model_context_window: cfg.model_context_window,

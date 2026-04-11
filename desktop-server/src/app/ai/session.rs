@@ -48,7 +48,13 @@ pub struct AiSessionRegistry {
 struct AiSessionRegistryState {
     sessions: HashMap<Uuid, AiSessionRecord>,
     terminal_index: HashMap<Uuid, Uuid>,
-    provider_index: HashMap<Uuid, ProviderConfig>,
+    provider_index: HashMap<Uuid, SessionProviderRouting>,
+}
+
+#[derive(Debug, Clone)]
+struct SessionProviderRouting {
+    active_provider_id: String,
+    providers: Vec<ProviderConfig>,
 }
 
 impl AiSessionRegistry {
@@ -56,7 +62,12 @@ impl AiSessionRegistry {
         Self::default()
     }
 
-    pub async fn insert(&self, record: AiSessionRecord, provider: ProviderConfig) {
+    pub async fn insert(
+        &self,
+        record: AiSessionRecord,
+        active_provider: ProviderConfig,
+        session_providers: Vec<ProviderConfig>,
+    ) {
         let ai_session_id = record.ai_session_id;
         let terminal_id = record.terminal_id;
         let mut state = self.state.write().await;
@@ -66,7 +77,13 @@ impl AiSessionRegistry {
             state.sessions.remove(&previous_ai_session_id);
             state.provider_index.remove(&previous_ai_session_id);
         }
-        state.provider_index.insert(ai_session_id, provider);
+        state.provider_index.insert(
+            ai_session_id,
+            SessionProviderRouting {
+                active_provider_id: active_provider.id,
+                providers: session_providers,
+            },
+        );
         state.sessions.insert(ai_session_id, record);
     }
 
@@ -86,10 +103,62 @@ impl AiSessionRegistry {
         state.sessions.get(&mapped).cloned()
     }
 
-    pub async fn resolve_provider(&self, ai_session_id: Uuid) -> Option<ProviderConfig> {
+    pub async fn resolve_provider_for_model(
+        &self,
+        ai_session_id: Uuid,
+        model_id: &str,
+    ) -> Option<ProviderConfig> {
         let state = self.state.read().await;
-        state.provider_index.get(&ai_session_id).cloned()
+        let routing = state.provider_index.get(&ai_session_id)?;
+        resolve_provider_for_model(routing, model_id)
     }
+
+    pub async fn resolve_session_providers(
+        &self,
+        ai_session_id: Uuid,
+    ) -> Option<(String, Vec<ProviderConfig>)> {
+        let state = self.state.read().await;
+        state.provider_index.get(&ai_session_id).map(|routing| {
+            (
+                routing.active_provider_id.clone(),
+                routing.providers.clone(),
+            )
+        })
+    }
+}
+
+fn resolve_provider_for_model(
+    routing: &SessionProviderRouting,
+    model_id: &str,
+) -> Option<ProviderConfig> {
+    let trimmed_model_id = model_id.trim();
+    if trimmed_model_id.is_empty() {
+        return routing
+            .providers
+            .iter()
+            .find(|provider| provider.id == routing.active_provider_id)
+            .cloned()
+            .or_else(|| routing.providers.first().cloned());
+    }
+
+    routing
+        .providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .filter(|provider| {
+            provider
+                .models
+                .iter()
+                .any(|model| model.enabled && model.id == trimmed_model_id)
+        })
+        .min_by_key(|provider| {
+            (
+                provider.id != routing.active_provider_id,
+                provider.name.to_ascii_lowercase(),
+                provider.id.to_ascii_lowercase(),
+            )
+        })
+        .cloned()
 }
 
 pub async fn launch_ai_session(
@@ -134,6 +203,7 @@ pub async fn launch_ai_session(
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
     let resolved_provider = launch.provider.clone();
+    let session_providers = launch.session_providers.clone();
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
@@ -146,14 +216,18 @@ pub async fn launch_ai_session(
 
     state
         .ai_session_registry
-        .insert(AiSessionRecord {
-            ai_session_id,
-            terminal_id,
-            cwd: cwd.display().to_string(),
-            agent_id: resolved_agent_id,
-            model_id: resolved_model_id,
-            mirrored_to_backend,
-        }, resolved_provider)
+        .insert(
+            AiSessionRecord {
+                ai_session_id,
+                terminal_id,
+                cwd: cwd.display().to_string(),
+                agent_id: resolved_agent_id,
+                model_id: resolved_model_id,
+                mirrored_to_backend,
+            },
+            resolved_provider,
+            session_providers,
+        )
         .await;
 
     let runtime = state.runtime.read().await;
@@ -185,6 +259,7 @@ pub async fn launch_ai_session_in_current_terminal(
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
+    let session_providers = launch.session_providers.clone();
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
@@ -192,14 +267,18 @@ pub async fn launch_ai_session_in_current_terminal(
 
     state
         .ai_session_registry
-        .insert(AiSessionRecord {
-            ai_session_id,
-            terminal_id,
-            cwd: cwd.display().to_string(),
-            agent_id: resolved_agent_id,
-            model_id: resolved_model_id,
-            mirrored_to_backend: false,
-        }, launch.provider.clone())
+        .insert(
+            AiSessionRecord {
+                ai_session_id,
+                terminal_id,
+                cwd: cwd.display().to_string(),
+                agent_id: resolved_agent_id,
+                model_id: resolved_model_id,
+                mirrored_to_backend: false,
+            },
+            launch.provider.clone(),
+            session_providers,
+        )
         .await;
 
     let runtime = state.runtime.read().await;
@@ -283,8 +362,20 @@ mod tests {
             mirrored_to_backend: true,
         };
 
-        registry.insert(first.clone(), test_provider("provider-a")).await;
-        registry.insert(second.clone(), test_provider("provider-b")).await;
+        registry
+            .insert(
+                first.clone(),
+                test_provider("provider-a"),
+                vec![test_provider("provider-a")],
+            )
+            .await;
+        registry
+            .insert(
+                second.clone(),
+                test_provider("provider-b"),
+                vec![test_provider("provider-b")],
+            )
+            .await;
 
         assert_eq!(registry.list().await, vec![second.clone()]);
         assert!(registry.resolve(first.ai_session_id).await.is_none());
@@ -293,9 +384,44 @@ mod tests {
             Some(second.clone())
         );
         assert_eq!(registry.resolve(terminal_id).await, Some(second.clone()));
-        assert!(registry.resolve_provider(first.ai_session_id).await.is_none());
+        assert!(registry
+            .resolve_provider_for_model(first.ai_session_id, "model")
+            .await
+            .is_none());
         assert_eq!(
-            registry.resolve_provider(second.ai_session_id).await.map(|provider| provider.id),
+            registry
+                .resolve_provider_for_model(second.ai_session_id, "model")
+                .await
+                .map(|provider| provider.id),
+            Some("provider-b".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_duplicate_model_ids_to_active_provider_first() {
+        let registry = AiSessionRegistry::new();
+        let record = AiSessionRecord {
+            ai_session_id: Uuid::new_v4(),
+            terminal_id: Uuid::new_v4(),
+            cwd: "/tmp/workspace".to_string(),
+            agent_id: "agent".to_string(),
+            model_id: "shared-model".to_string(),
+            mirrored_to_backend: false,
+        };
+
+        registry
+            .insert(
+                record.clone(),
+                test_provider("provider-b"),
+                vec![test_provider("provider-a"), test_provider("provider-b")],
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .resolve_provider_for_model(record.ai_session_id, "model")
+                .await
+                .map(|provider| provider.id),
             Some("provider-b".to_string())
         );
     }

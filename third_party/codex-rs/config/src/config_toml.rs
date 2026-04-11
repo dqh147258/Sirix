@@ -45,6 +45,7 @@ use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReadOnlyAccess;
@@ -67,6 +68,12 @@ const RESERVED_MODEL_PROVIDER_IDS: [&str; 3] = [
 pub struct ConfigToml {
     /// Optional override of model selection.
     pub model: Option<String>,
+    /// When `true`, Ctrl+C/Ctrl+D can exit the TUI immediately.
+    ///
+    /// When omitted, Codex keeps its existing product default. Sirix writes this
+    /// explicitly so the embedded TUI follows the desktop setting instead of a
+    /// standalone Codex default.
+    pub close_model_without_confirmation: Option<bool>,
     /// Review model override used by the `/review` feature.
     pub review_model: Option<String>,
 
@@ -260,6 +267,11 @@ pub struct ConfigToml {
     /// Optional path to a JSON model catalog (applied on startup only).
     /// Per-thread `config` overrides are accepted but do not reapply this (no-ops).
     pub model_catalog_json: Option<AbsolutePathBuf>,
+    /// Optional in-memory model picker catalog injected directly through TOML.
+    ///
+    /// Sirix uses this to publish the enabled models for the active provider
+    /// into the embedded Codex runtime without needing a sidecar JSON file.
+    pub models: Option<Vec<ModelPreset>>,
 
     /// Optionally specify a personality for the model
     pub personality: Option<Personality>,

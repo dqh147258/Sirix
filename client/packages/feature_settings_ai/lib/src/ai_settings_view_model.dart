@@ -73,6 +73,16 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     );
   }
 
+  void updateCloseModelWithoutConfirmation(bool value) {
+    state = state.copyWith(
+      config: state.config.copyWith(
+        cli: state.config.cli.copyWith(closeModelWithoutConfirmation: value),
+      ),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
   void upsertProvider(AiProviderConfig provider) {
     final next = _upsertById(state.config.providers, provider, (item) => item.id);
     state = state.copyWith(

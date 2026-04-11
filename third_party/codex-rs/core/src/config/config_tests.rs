@@ -48,6 +48,8 @@ use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
@@ -4331,6 +4333,46 @@ fn model_catalog_json_loads_from_path() -> std::io::Result<()> {
 }
 
 #[test]
+fn inline_models_load_into_model_catalog() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        models: Some(vec![ModelPreset {
+            id: "custom-gpt-5".to_string(),
+            model: "custom-gpt-5".to_string(),
+            display_name: "Custom GPT-5".to_string(),
+            description: "Injected by bridge".to_string(),
+            default_reasoning_effort: ReasoningEffort::None,
+            supported_reasoning_efforts: Vec::new(),
+            supports_personality: false,
+            additional_speed_tiers: Vec::new(),
+            is_default: false,
+            upgrade: None,
+            show_in_picker: true,
+            availability_nux: None,
+            supported_in_api: true,
+            input_modalities: vec![codex_protocol::openai_models::InputModality::Text],
+        }]),
+        close_model_without_confirmation: Some(false),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.path().to_path_buf(),
+    )?;
+
+    let catalog = config
+        .model_catalog
+        .expect("inline models should create a model catalog");
+    assert_eq!(catalog.models.len(), 1);
+    assert_eq!(catalog.models[0].slug, "custom-gpt-5");
+    assert_eq!(catalog.models[0].display_name, "Custom GPT-5");
+    assert!(!config.close_model_without_confirmation);
+    Ok(())
+}
+
+#[test]
 fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let catalog_path = codex_home.path().join("catalog.json");
@@ -4487,6 +4529,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
     assert_eq!(
         Config {
             model: Some("o3".to_string()),
+            close_model_without_confirmation: true,
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
@@ -4633,6 +4676,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
     )?;
     let expected_gpt3_profile_config = Config {
         model: Some("gpt-3.5-turbo".to_string()),
+        close_model_without_confirmation: true,
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
@@ -4777,6 +4821,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
     )?;
     let expected_zdr_profile_config = Config {
         model: Some("o3".to_string()),
+        close_model_without_confirmation: true,
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
@@ -4907,6 +4952,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
     )?;
     let expected_gpt5_profile_config = Config {
         model: Some("gpt-5.1".to_string()),
+        close_model_without_confirmation: true,
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,

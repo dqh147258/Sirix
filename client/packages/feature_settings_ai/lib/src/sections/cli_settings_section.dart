@@ -31,6 +31,14 @@ class CliSettingsSection extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              AiSettingsToggleTile(
+                title: 'Close Model Without Confirmation',
+                subtitle: 'Skip the extra quit confirmation in the embedded CLI session.',
+                value: state.config.cli.closeModelWithoutConfirmation,
+                onChanged: vm.updateCloseModelWithoutConfirmation,
+                width: double.infinity,
+              ),
+              const SizedBox(height: 18),
               Text(
                 'Supplemental System Prompt',
                 style: Theme.of(context).textTheme.titleMedium,

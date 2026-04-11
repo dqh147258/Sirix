@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:xterm/xterm.dart';
+import 'package:xterm/xterm.dart' show Terminal, TerminalTheme, TerminalThemes, TerminalView;
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
@@ -37,35 +37,34 @@ class TerminalPage extends ConsumerStatefulWidget {
 class _TerminalPageState extends ConsumerState<TerminalPage> {
   final TerminalTheme _theme = TerminalThemes.defaultTheme;
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
-  final Map<String, Terminal> _terminalCache = <String, Terminal>{};
-  StreamSubscription<TerminalUiEvent>? _uiSubscription;
   late TerminalPageConfig _config;
 
   @override
   void initState() {
     super.initState();
     _config = _buildConfig();
-    _bindViewModel(load: true);
+    final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+    viewModel.updateConfig(_config);
+    Future.microtask(() => viewModel.load());
   }
 
   @override
   void didUpdateWidget(covariant TerminalPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     final nextConfig = _buildConfig();
+    final viewModel = ref.read(terminalViewModelProvider(nextConfig).notifier);
+    viewModel.updateConfig(nextConfig);
     if (_config == nextConfig) {
+      _config = nextConfig;
       return;
     }
 
     _config = nextConfig;
-    _terminalCache.clear();
-    _bindViewModel(load: true);
+    Future.microtask(() => viewModel.load(force: true));
   }
 
   @override
   void dispose() {
-    final subscription = _uiSubscription;
-    _uiSubscription = null;
-    unawaited(subscription?.cancel());
     _focusNode.dispose();
     super.dispose();
   }
@@ -78,78 +77,6 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     );
   }
 
-  Terminal _createTerminal(String terminalId) {
-    final terminal = Terminal(maxLines: 10000);
-    _bindTerminalCallbacks(terminal, terminalId);
-    return terminal;
-  }
-
-  Terminal _terminalFor(String terminalId) {
-    return _terminalCache.putIfAbsent(terminalId, () => _createTerminal(terminalId));
-  }
-
-  void _bindTerminalCallbacks(Terminal terminal, String terminalId) {
-    terminal.onOutput = (data) {
-      ref.read(terminalViewModelProvider(_config).notifier).queueInput(
-            terminalId: terminalId,
-            data: data,
-          );
-    };
-    terminal.onResize = (width, height, pixelWidth, pixelHeight) {
-      ref
-          .read(terminalViewModelProvider(_config).notifier)
-          .queueResize(
-            terminalId: terminalId,
-            cols: width,
-            rows: height,
-          );
-    };
-  }
-
-  void _bindViewModel({
-    required bool load,
-  }) {
-    final previousSubscription = _uiSubscription;
-    _uiSubscription = null;
-    unawaited(previousSubscription?.cancel());
-    final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
-    _uiSubscription = viewModel.events.listen(_handleUiEvent);
-
-    if (load) {
-      Future.microtask(() => viewModel.load());
-    }
-  }
-
-  void _handleUiEvent(TerminalUiEvent event) {
-    switch (event.type) {
-      case TerminalUiEventType.snapshot:
-        final terminal = _createTerminal(event.terminalId);
-        if (event.text.isNotEmpty) {
-          terminal.write(event.text);
-        }
-        _terminalCache[event.terminalId] = terminal;
-        if (event.terminalId == ref.read(terminalViewModelProvider(_config)).activeTerminalId &&
-            mounted) {
-          setState(() {});
-        }
-        break;
-      case TerminalUiEventType.output:
-        final terminal = _terminalFor(event.terminalId);
-        terminal.write(event.text);
-        break;
-      case TerminalUiEventType.approvalRequested:
-        if (mounted) {
-          setState(() {});
-        }
-        break;
-    }
-  }
-
-  void _pruneTerminalCache(Iterable<String> terminalIds) {
-    final allowed = terminalIds.toSet();
-    _terminalCache.removeWhere((key, _) => !allowed.contains(key));
-  }
-
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
@@ -158,10 +85,9 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
     final horizontalInset = widget.fullBleed ? 0.0 : 16.0;
     final bottomInset = widget.fullBleed ? 0.0 : 16.0;
-    _pruneTerminalCache(state.terminals.map((item) => item.id));
     final activeTerminal = state.activeTerminal;
     final activeTerminalId = state.activeTerminalId;
-    final terminal = activeTerminalId == null ? null : _terminalFor(activeTerminalId);
+    final terminal = viewModel.terminalFor(activeTerminalId);
     final approvalRequest = state.activeApprovalRequest;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;

@@ -4,10 +4,7 @@ use anyhow::Context;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::app::{
-    ai::config::SirixConfigStore,
-    state::AppState,
-};
+use crate::app::{ai::config::SirixConfigStore, state::AppState};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiSessionLaunchResponse {
@@ -16,6 +13,8 @@ pub struct AiSessionLaunchResponse {
     pub mirrored_to_backend: bool,
     pub local_ws_port: u16,
     pub created_locally: bool,
+    pub reuse_current_terminal: bool,
+    pub current_terminal_launch: Option<CurrentTerminalLaunch>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -26,6 +25,15 @@ pub struct AiSessionRecord {
     pub agent_id: String,
     pub model_id: String,
     pub mirrored_to_backend: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CurrentTerminalLaunch {
+    pub codex_executable: String,
+    pub workspace_root: String,
+    pub codex_home: String,
+    pub provider_api_key_env: Option<String>,
+    pub provider_api_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -42,15 +50,22 @@ impl AiSessionRegistry {
     pub async fn insert(&self, record: AiSessionRecord) {
         let ai_session_id = record.ai_session_id;
         let terminal_id = record.terminal_id;
-        self.sessions.write().await.insert(ai_session_id, record);
-        self.terminal_index
-            .write()
-            .await
-            .insert(terminal_id, ai_session_id);
+        let mut sessions = self.sessions.write().await;
+        let mut terminal_index = self.terminal_index.write().await;
+        if let Some(previous_ai_session_id) = terminal_index.insert(terminal_id, ai_session_id) {
+            sessions.remove(&previous_ai_session_id);
+        }
+        sessions.insert(ai_session_id, record);
     }
 
     pub async fn list(&self) -> Vec<AiSessionRecord> {
-        let mut items = self.sessions.read().await.values().cloned().collect::<Vec<_>>();
+        let mut items = self
+            .sessions
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         items.sort_by(|left, right| left.ai_session_id.cmp(&right.ai_session_id));
         items
     }
@@ -108,13 +123,7 @@ pub async fn launch_ai_session(
     config_store.write_codex_bridge_config(&launch, cwd)?;
     state
         .terminal_manager
-        .create_codex_terminal(
-            terminal_id,
-            launch,
-            cols,
-            rows,
-            mirrored_to_backend,
-        )
+        .create_codex_terminal(terminal_id, launch, cols, rows, mirrored_to_backend)
         .await
         .context("failed to create codex-backed terminal")?;
 
@@ -137,6 +146,59 @@ pub async fn launch_ai_session(
         mirrored_to_backend,
         local_ws_port: runtime.local_ws_port,
         created_locally: true,
+        reuse_current_terminal: false,
+        current_terminal_launch: None,
+    })
+}
+
+pub async fn launch_ai_session_in_current_terminal(
+    state: &AppState,
+    config_store: &SirixConfigStore,
+    terminal_id: Uuid,
+    cwd: &Path,
+    agent_id: Option<&str>,
+) -> anyhow::Result<AiSessionLaunchResponse> {
+    state
+        .terminal_manager
+        .get_snapshot(terminal_id)
+        .await
+        .with_context(|| format!("terminal session not found for id={terminal_id}"))?;
+
+    let ai_session_id = Uuid::new_v4();
+    let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
+    let resolved_agent_id = launch.agent.id.clone();
+    let resolved_model_id = launch.model.id.clone();
+    config_store.write_codex_bridge_config(&launch, cwd)?;
+
+    state
+        .ai_session_registry
+        .insert(AiSessionRecord {
+            ai_session_id,
+            terminal_id,
+            cwd: cwd.display().to_string(),
+            agent_id: resolved_agent_id,
+            model_id: resolved_model_id,
+            mirrored_to_backend: false,
+        })
+        .await;
+
+    let runtime = state.runtime.read().await;
+    Ok(AiSessionLaunchResponse {
+        ai_session_id,
+        terminal_id,
+        mirrored_to_backend: false,
+        local_ws_port: runtime.local_ws_port,
+        created_locally: true,
+        reuse_current_terminal: true,
+        current_terminal_launch: Some(CurrentTerminalLaunch {
+            codex_executable: super::super::terminal::manager::resolve_codex_executable(),
+            workspace_root: launch.workspace_root.display().to_string(),
+            codex_home: launch.codex_home.display().to_string(),
+            provider_api_key_env: (!launch.provider.api_key_env.trim().is_empty())
+                .then(|| launch.provider.api_key_env.clone()),
+            provider_api_key: (!launch.provider.api_key.trim().is_empty())
+                .then(|| launch.provider.api_key.clone()),
+        }),
     })
 }
 

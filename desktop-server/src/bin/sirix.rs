@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT_START: u16 = 9700;
 const DEFAULT_PORT_END: u16 = 9710;
+const CURRENT_TERMINAL_ENV: &str = "SIRIX_TERMINAL_SESSION_ID";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,8 +27,9 @@ async fn main() -> anyhow::Result<()> {
     match args.next().as_deref() {
         Some("list") => list_sessions().await,
         Some("resume") => {
-            let session_or_terminal_id =
-                args.next().context("usage: sirix resume <ai_session_id|terminal_id>")?;
+            let session_or_terminal_id = args
+                .next()
+                .context("usage: sirix resume <ai_session_id|terminal_id>")?;
             let port = ensure_desktop_server().await?;
             ensure_login_prompt(port).await?;
             let terminal_id = resolve_terminal_id(port, &session_or_terminal_id).await?;
@@ -40,8 +42,13 @@ async fn main() -> anyhow::Result<()> {
         _ => {
             let port = ensure_desktop_server().await?;
             ensure_login_prompt(port).await?;
-            let terminal_id = launch_session(port).await?;
-            attach_session(port, &terminal_id).await
+            let current_terminal_id = env::var(CURRENT_TERMINAL_ENV).ok();
+            let launch = launch_session(port, current_terminal_id.as_deref()).await?;
+            if launch.reuse_current_terminal {
+                run_codex_in_current_terminal(&launch)
+            } else {
+                attach_session(port, &launch.terminal_id).await
+            }
         }
     }
 }
@@ -58,7 +65,9 @@ async fn list_sessions() -> anyhow::Result<()> {
     let response = reqwest::get(url)
         .await
         .context("failed to query local ai sessions")?;
-    let response = response.error_for_status().context("failed to load ai sessions")?;
+    let response = response
+        .error_for_status()
+        .context("failed to load ai sessions")?;
     let payload = response
         .json::<serde_json::Value>()
         .await
@@ -73,8 +82,14 @@ async fn list_sessions() -> anyhow::Result<()> {
                 .get("terminal_id")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("-");
-            let cwd = item.get("cwd").and_then(serde_json::Value::as_str).unwrap_or("-");
-            let agent = item.get("agent_id").and_then(serde_json::Value::as_str).unwrap_or("-");
+            let cwd = item
+                .get("cwd")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
+            let agent = item
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("-");
             println!("{ai_session_id}\t{terminal_id}\t{agent}\t{cwd}");
         }
     }
@@ -123,7 +138,10 @@ fn start_desktop_server() -> anyhow::Result<()> {
     };
     let desktop_server = parent.join(desktop_server_name);
     if !desktop_server.exists() {
-        anyhow::bail!("desktop-server binary not found next to sirix: {}", desktop_server.display());
+        anyhow::bail!(
+            "desktop-server binary not found next to sirix: {}",
+            desktop_server.display()
+        );
     }
 
     Command::new(desktop_server)
@@ -141,10 +159,7 @@ async fn ensure_login_prompt(port: u16) -> anyhow::Result<()> {
         .await
         .context("failed to query local auth session")?;
     if response.status() == StatusCode::NO_CONTENT {
-        let should_login = prompt_yes_no(
-            "Sirix 当前未登录，是否现在登录？ [Y/n]: ",
-            true,
-        )?;
+        let should_login = prompt_yes_no("Sirix 当前未登录，是否现在登录？ [Y/n]: ", true)?;
         if should_login {
             let username = prompt_line("用户名: ")?;
             let password = prompt_line("密码: ")?;
@@ -160,7 +175,8 @@ async fn ensure_login_prompt(port: u16) -> anyhow::Result<()> {
                 .await
                 .context("failed to submit local login")?;
             if !login_response.status().is_success() {
-                let should_register = prompt_yes_no("登录失败，是否尝试注册并继续？ [Y/n]: ", true)?;
+                let should_register =
+                    prompt_yes_no("登录失败，是否尝试注册并继续？ [Y/n]: ", true)?;
                 if should_register {
                     client
                         .post(local_http_url(port, "/auth/register"))
@@ -177,17 +193,38 @@ async fn ensure_login_prompt(port: u16) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn launch_session(port: u16) -> anyhow::Result<String> {
+struct LaunchSessionResult {
+    terminal_id: String,
+    reuse_current_terminal: bool,
+    current_terminal_launch: Option<CurrentTerminalLaunch>,
+}
+
+struct CurrentTerminalLaunch {
+    codex_executable: String,
+    workspace_root: String,
+    codex_home: String,
+    provider_api_key_env: Option<String>,
+    provider_api_key: Option<String>,
+}
+
+async fn launch_session(
+    port: u16,
+    reuse_terminal_id: Option<&str>,
+) -> anyhow::Result<LaunchSessionResult> {
     let cwd = env::current_dir().context("failed to resolve current directory")?;
     let (cols, rows) = terminal::size().unwrap_or((120, 32));
     let client = reqwest::Client::new();
+    let mut request_body = serde_json::json!({
+        "cwd": cwd,
+        "cols": cols,
+        "rows": rows,
+    });
+    if let Some(reuse_terminal_id) = reuse_terminal_id.filter(|value| !value.trim().is_empty()) {
+        request_body["reuse_terminal_id"] = serde_json::Value::String(reuse_terminal_id.to_string());
+    }
     let response = client
         .post(local_http_url(port, "/ai/sessions"))
-        .json(&serde_json::json!({
-            "cwd": cwd,
-            "cols": cols,
-            "rows": rows,
-        }))
+        .json(&request_body)
         .send()
         .await
         .context("failed to launch local ai session")?
@@ -197,11 +234,87 @@ async fn launch_session(port: u16) -> anyhow::Result<String> {
         .json::<serde_json::Value>()
         .await
         .context("failed to decode ai session response")?;
-    payload
+    let terminal_id = payload
         .get("terminal_id")
         .and_then(serde_json::Value::as_str)
         .map(ToString::to_string)
-        .context("ai session response missing terminal_id")
+        .context("ai session response missing terminal_id")?;
+    let reuse_current_terminal = payload
+        .get("reuse_current_terminal")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let current_terminal_launch = payload
+        .get("current_terminal_launch")
+        .and_then(serde_json::Value::as_object)
+        .map(|item| CurrentTerminalLaunch {
+            codex_executable: item
+                .get("codex_executable")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("codex")
+                .to_string(),
+            workspace_root: item
+                .get("workspace_root")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+                .to_string(),
+            codex_home: item
+                .get("codex_home")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            provider_api_key_env: item
+                .get("provider_api_key_env")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
+            provider_api_key: item
+                .get("provider_api_key")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string),
+        });
+    Ok(LaunchSessionResult {
+        terminal_id,
+        reuse_current_terminal,
+        current_terminal_launch,
+    })
+}
+
+fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result<()> {
+    let current = launch
+        .current_terminal_launch
+        .as_ref()
+        .context("current terminal launch payload missing")?;
+
+    let mut command = Command::new(&current.codex_executable);
+    command.arg("--config");
+    command.arg("approval_policy=\"never\"");
+    command.current_dir(&current.workspace_root);
+    if !current.codex_home.trim().is_empty() {
+        command.env("CODEX_HOME", &current.codex_home);
+    }
+    if let (Some(env_key), Some(api_key)) = (
+        current.provider_api_key_env.as_deref(),
+        current.provider_api_key.as_deref(),
+    ) {
+        if !env_key.trim().is_empty() && !api_key.trim().is_empty() {
+            command.env(env_key, api_key);
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        return Err(error).context("failed to exec codex in current terminal");
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = command.status().context("failed to spawn codex in current terminal")?;
+        if status.success() {
+            return Ok(());
+        }
+        anyhow::bail!("codex exited with status {status}");
+    }
 }
 
 async fn resolve_terminal_id(port: u16, session_or_terminal_id: &str) -> anyhow::Result<String> {
@@ -230,7 +343,9 @@ async fn resolve_terminal_id(port: u16, session_or_terminal_id: &str) -> anyhow:
 
 async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
     let url = format!("ws://{}:{}/ws", local_host(), port);
-    let (socket, _) = connect_async(url).await.context("failed to connect local websocket")?;
+    let (socket, _) = connect_async(url)
+        .await
+        .context("failed to connect local websocket")?;
     let (mut write, mut read) = socket.split();
 
     write
@@ -240,7 +355,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                 "terminal_id": terminal_id,
             })
             .to_string(),
-            ))
+        ))
         .await
         .context("failed to attach terminal session")?;
 
@@ -297,11 +412,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn write_resize<S>(
-    write: &mut S,
-    terminal_id: &str,
-    size: (u16, u16),
-) -> anyhow::Result<()>
+async fn write_resize<S>(write: &mut S, terminal_id: &str, size: (u16, u16)) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {

@@ -143,7 +143,7 @@ impl TerminalManager {
         if let Some(dir) = cwd.as_deref().and_then(resolve_cwd) {
             builder.cwd(dir);
         }
-        self.apply_sirix_env(&mut builder);
+        self.apply_sirix_env(&mut builder, Some(terminal_id));
 
         self.create_process_terminal(
             terminal_id,
@@ -175,10 +175,12 @@ impl TerminalManager {
         let mut builder = CommandBuilder::new(codex_executable.clone());
         builder.arg("--config");
         builder.arg(format!("approval_policy=\"never\""));
-        if !launch.provider.api_key.trim().is_empty() && !launch.provider.api_key_env.trim().is_empty() {
+        if !launch.provider.api_key.trim().is_empty()
+            && !launch.provider.api_key_env.trim().is_empty()
+        {
             builder.env(&launch.provider.api_key_env, &launch.provider.api_key);
         }
-        self.apply_sirix_env(&mut builder);
+        self.apply_sirix_env(&mut builder, None);
         builder.env("CODEX_HOME", &launch.codex_home);
         builder.cwd(&launch.workspace_root);
 
@@ -365,7 +367,7 @@ impl TerminalManager {
         );
     }
 
-    fn apply_sirix_env(&self, builder: &mut CommandBuilder) {
+    fn apply_sirix_env(&self, builder: &mut CommandBuilder, terminal_id: Option<Uuid>) {
         let path = env::var("PATH").unwrap_or_default();
         let sirix_bin = self.sirix_home.join("bin");
         let separator = if cfg!(windows) { ';' } else { ':' };
@@ -376,6 +378,10 @@ impl TerminalManager {
         };
         builder.env("PATH", &augmented_path);
         builder.env("SIRIX_HOME", &self.sirix_home);
+        builder.env("SIRIX_CODEX_EXECUTABLE", resolve_codex_executable());
+        if let Some(terminal_id) = terminal_id {
+            builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
+        }
     }
 
     async fn create_process_terminal(
@@ -782,7 +788,7 @@ fn resolve_shell(requested: Option<&str>) -> String {
     }
 }
 
-fn resolve_codex_executable() -> String {
+pub(crate) fn resolve_codex_executable() -> String {
     if let Ok(codex) = env::var("SIRIX_CODEX_EXECUTABLE") {
         if !codex.trim().is_empty() {
             return codex;

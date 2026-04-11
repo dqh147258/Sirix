@@ -12,7 +12,10 @@ use crate::app::{
     ai::{
         approval::{ApprovalDecision, ApprovalRecord, ApprovalScope},
         config::{validate_sirix_config, ApprovalMode, SirixConfig},
-        session::{launch_ai_session, AiSessionLaunchResponse, AiSessionRecord},
+        session::{
+            launch_ai_session, launch_ai_session_in_current_terminal, AiSessionLaunchResponse,
+            AiSessionRecord,
+        },
     },
     state::AppState,
 };
@@ -33,6 +36,7 @@ pub struct LaunchAiSessionRequest {
     pub agent_id: Option<String>,
     pub cols: Option<u16>,
     pub rows: Option<u16>,
+    pub reuse_terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,8 +89,7 @@ pub async fn get_effective_ai_config(
         .effective_for_workspace(query.cwd.as_deref())
         .map_err(ApiError::internal)?;
     Ok(Json(
-        serde_json::to_value(effective)
-            .map_err(|error| ApiError::internal(error.into()))?,
+        serde_json::to_value(effective).map_err(|error| ApiError::internal(error.into()))?,
     ))
 }
 
@@ -100,16 +103,36 @@ pub async fn launch_session(
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let response = launch_ai_session(
-        &state,
-        state.sirix_config_store.as_ref(),
-        cwd.as_path(),
-        payload.agent_id.as_deref(),
-        payload.cols.unwrap_or(120).clamp(20, 400),
-        payload.rows.unwrap_or(32).clamp(10, 200),
-    )
-    .await
-    .map_err(ApiError::internal)?;
+    let cols = payload.cols.unwrap_or(120).clamp(20, 400);
+    let rows = payload.rows.unwrap_or(32).clamp(10, 200);
+    let response = if let Some(reuse_terminal_id) = payload
+        .reuse_terminal_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let terminal_id = uuid::Uuid::parse_str(reuse_terminal_id)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        launch_ai_session_in_current_terminal(
+            &state,
+            state.sirix_config_store.as_ref(),
+            terminal_id,
+            cwd.as_path(),
+            payload.agent_id.as_deref(),
+        )
+        .await
+        .map_err(ApiError::internal)?
+    } else {
+        launch_ai_session(
+            &state,
+            state.sirix_config_store.as_ref(),
+            cwd.as_path(),
+            payload.agent_id.as_deref(),
+            cols,
+            rows,
+        )
+        .await
+        .map_err(ApiError::internal)?
+    };
     Ok(Json(response))
 }
 
@@ -123,8 +146,8 @@ pub async fn resolve_session(
     State(state): State<AppState>,
     Query(query): Query<ResolveSessionQuery>,
 ) -> Result<Json<AiSessionRecord>, ApiError> {
-    let session_id =
-        uuid::Uuid::parse_str(&query.id).map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let session_id = uuid::Uuid::parse_str(&query.id)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let Some(record) = state.ai_session_registry.resolve(session_id).await else {
         return Err(ApiError::not_found(format!(
             "ai session not found for id={}",
@@ -142,7 +165,9 @@ pub async fn check_approval(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let capability_key = payload.capability_key.trim();
     if capability_key.is_empty() {
-        return Err(ApiError::bad_request("capability_key cannot be empty".to_string()));
+        return Err(ApiError::bad_request(
+            "capability_key cannot be empty".to_string(),
+        ));
     }
 
     let Some(record) = state.ai_session_registry.resolve(session_id).await else {
@@ -179,13 +204,8 @@ pub async fn check_approval(
         ApprovalMode::Allow => "allow",
         ApprovalMode::Deny => "deny",
         ApprovalMode::AskOnce | ApprovalMode::AskEachTime => {
-            emit_approval_request_event(
-                &state,
-                &record,
-                capability_key,
-                configured_mode.clone(),
-            )
-            .await;
+            emit_approval_request_event(&state, &record, capability_key, configured_mode.clone())
+                .await;
             "ask"
         }
     };
@@ -204,7 +224,9 @@ pub async fn resolve_approval(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let capability_key = payload.capability_key.trim().to_string();
     if capability_key.is_empty() {
-        return Err(ApiError::bad_request("capability_key cannot be empty".to_string()));
+        return Err(ApiError::bad_request(
+            "capability_key cannot be empty".to_string(),
+        ));
     }
     let Some(record) = state.ai_session_registry.resolve(session_id).await else {
         return Err(ApiError::not_found(format!(

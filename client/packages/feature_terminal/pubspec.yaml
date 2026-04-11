@@ -18,7 +18,8 @@ dependencies:
   infra_webrtc:
     path: ../infra_webrtc
   web_socket_channel: ^3.0.1
-  xterm: ^4.0.0
+  xterm:
+    path: ../../third_party/xterm
 
 dev_dependencies:
   flutter_test:

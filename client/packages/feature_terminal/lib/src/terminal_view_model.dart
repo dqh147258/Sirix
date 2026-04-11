@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:xterm/xterm.dart' show Terminal;
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
@@ -36,41 +37,12 @@ class TerminalPageConfig {
     return identical(this, other) ||
         other is TerminalPageConfig &&
             runtimeType == other.runtimeType &&
-            accessToken == other.accessToken &&
             deviceId == other.deviceId &&
             sessionId == other.sessionId;
   }
 
   @override
-  int get hashCode => Object.hash(accessToken, deviceId, sessionId);
-}
-
-enum TerminalUiEventType {
-  snapshot,
-  output,
-  approvalRequested,
-}
-
-@immutable
-class TerminalUiEvent {
-  const TerminalUiEvent.snapshot({
-    required this.terminalId,
-    required this.text,
-  }) : type = TerminalUiEventType.snapshot;
-
-  const TerminalUiEvent.output({
-    required this.terminalId,
-    required this.text,
-  }) : type = TerminalUiEventType.output;
-
-  const TerminalUiEvent.approvalRequested({
-    required this.terminalId,
-    required this.text,
-  }) : type = TerminalUiEventType.approvalRequested;
-
-  final TerminalUiEventType type;
-  final String terminalId;
-  final String text;
+  int get hashCode => Object.hash(deviceId, sessionId);
 }
 
 class TerminalViewModel extends BaseViewModel<TerminalState> {
@@ -94,9 +66,8 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   final BackendEventClient? _eventClient;
   final DesktopLocalClient? _desktopLocalClient;
   final SessionTerminalChannelController _sessionTerminalChannelController;
-  final TerminalPageConfig _config;
-  final StreamController<TerminalUiEvent> _events =
-      StreamController<TerminalUiEvent>.broadcast();
+  TerminalPageConfig _config;
+  final Map<String, Terminal> _terminalCache = <String, Terminal>{};
 
   WebSocketChannel? _channel;
   _TerminalTransport? _transport;
@@ -111,7 +82,9 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   bool _loadingInFlight = false;
   bool _creatingInFlight = false;
 
-  Stream<TerminalUiEvent> get events => _events.stream;
+  void updateConfig(TerminalPageConfig config) {
+    _config = config;
+  }
 
   Future<void> load({bool force = false}) async {
     if (_loadingInFlight || (_hasLoaded && !force)) {
@@ -498,6 +471,48 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     _resizeTimer = Timer(_terminalResizeDebounce, _flushPendingResize);
   }
 
+  Terminal? terminalFor(String? terminalId) {
+    if (terminalId == null || terminalId.isEmpty) {
+      return null;
+    }
+
+    return _terminalCache.putIfAbsent(terminalId, () => _createTerminal(terminalId));
+  }
+
+  Terminal _createTerminal(String terminalId) {
+    final terminal = Terminal(maxLines: 10000);
+    terminal.onOutput = (data) {
+      queueInput(
+        terminalId: terminalId,
+        data: data,
+      );
+    };
+    terminal.onResize = (width, height, pixelWidth, pixelHeight) {
+      queueResize(
+        terminalId: terminalId,
+        cols: width,
+        rows: height,
+      );
+    };
+    return terminal;
+  }
+
+  void _replaceTerminalSnapshot({
+    required String terminalId,
+    required String text,
+  }) {
+    final terminal = _createTerminal(terminalId);
+    if (text.isNotEmpty) {
+      terminal.write(text);
+    }
+    _terminalCache[terminalId] = terminal;
+  }
+
+  void _pruneTerminalCache(Iterable<String> terminalIds) {
+    final allowed = terminalIds.toSet();
+    _terminalCache.removeWhere((key, _) => !allowed.contains(key));
+  }
+
   Future<void> _detachChannel() async {
     _flushPendingOutboundOperations();
 
@@ -598,11 +613,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     if (terminalId == null || text == null) {
       return;
     }
-
-    _events.add(TerminalUiEvent.output(
-      terminalId: terminalId,
-      text: text,
-    ));
+    terminalFor(terminalId)?.write(text);
   }
 
   void _handleTerminalList(Map<String, dynamic> body) {
@@ -625,11 +636,10 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     if (terminalId == null) {
       return;
     }
-
-    _events.add(TerminalUiEvent.snapshot(
+    _replaceTerminalSnapshot(
       terminalId: terminalId,
       text: text ?? '',
-    ));
+    );
   }
 
   void _handleTerminalClosed(Map<String, dynamic> body) {
@@ -639,10 +649,6 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
 
     _removeTerminalById(terminalId);
-    _events.add(TerminalUiEvent.output(
-      terminalId: terminalId,
-      text: '\r\n[terminal closed]\r\n',
-    ));
   }
 
   void _handleTerminalError(Map<String, dynamic> body) {
@@ -658,10 +664,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
         errorMessage: AppLocalizations.current.terminalStreamError(message),
       );
     }
-    _events.add(TerminalUiEvent.output(
-      terminalId: terminalId,
-      text: '\r\n[terminal error] $message\r\n',
-    ));
+    terminalFor(terminalId)?.write('\r\n[terminal error] $message\r\n');
   }
 
   void _handleApprovalRequest(Map<String, dynamic> body) {
@@ -689,10 +692,6 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       pendingApprovalRequests: [...state.pendingApprovalRequests, request],
       clearError: true,
     );
-    _events.add(TerminalUiEvent.approvalRequested(
-      terminalId: terminalId,
-      text: capabilityKey,
-    ));
   }
 
   void _handleApprovalResolved(Map<String, dynamic> body) {
@@ -739,6 +738,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       activeTerminalId: hasCurrent ? currentActive : null,
       clearActiveTerminalId: !hasCurrent,
     );
+    _pruneTerminalCache(terminals.map((terminal) => terminal.id));
   }
 
   String? _resolveTerminalToActivate(List<TerminalSessionSummary> terminals) {
@@ -794,6 +794,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       activeTerminalId: nextActiveId,
       clearActiveTerminalId: closingActive && nextActiveId == null,
     );
+    _terminalCache.remove(terminalId);
   }
 
   Future<void> resolveApprovalRequest({
@@ -1100,7 +1101,6 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   void dispose() {
     unawaited(_detachChannel());
     unawaited(_sessionChannelSubscription?.cancel());
-    unawaited(_events.close());
     super.dispose();
   }
 

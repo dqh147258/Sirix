@@ -85,19 +85,16 @@ impl AiApprovalRegistry {
         }
     }
 
-    pub async fn set(
-        &self,
-        ai_session_id: Uuid,
-        capability_key: String,
-        record: ApprovalRecord,
-    ) {
+    pub async fn set(&self, ai_session_id: Uuid, capability_key: String, record: ApprovalRecord) {
         let snapshot = {
             let mut guard = self.records.write().await;
             let capability_map = guard.entry(ai_session_id).or_default();
             capability_map.insert(capability_key, record);
             capability_map.clone()
         };
-        if let Err(error) = persist_session_records(&self.storage_dir, ai_session_id, Some(&snapshot)) {
+        if let Err(error) =
+            persist_session_records(&self.storage_dir, ai_session_id, Some(&snapshot))
+        {
             tracing::warn!(
                 ai_session_id = %ai_session_id,
                 error = %error,
@@ -119,10 +116,12 @@ impl AiApprovalRegistry {
     }
 }
 
-fn load_records(storage_dir: &Path) -> anyhow::Result<HashMap<Uuid, HashMap<String, ApprovalRecord>>> {
+fn load_records(
+    storage_dir: &Path,
+) -> anyhow::Result<HashMap<Uuid, HashMap<String, ApprovalRecord>>> {
     let mut records = HashMap::new();
-    for entry in
-        fs::read_dir(storage_dir).with_context(|| format!("failed to read {}", storage_dir.display()))?
+    for entry in fs::read_dir(storage_dir)
+        .with_context(|| format!("failed to read {}", storage_dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();

@@ -6,25 +6,26 @@ default-run = "desktop-server"
 
 [dependencies]
 anyhow = "1"
+async-stream = "0.3"
 axum = { version = "0.7.5", features = ["macros", "ws"] }
 base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 crossterm = "0.28.1"
 dotenvy = "0.15.7"
+eventsource-stream = "0.2"
 futures-util = "0.3.30"
-indexmap = "=2.2.6"
-reqwest = { version = "=0.11.27", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "=0.11.27", default-features = false, features = ["json", "rustls-tls", "stream"] }
 portable-pty = "0.8"
 serde = { version = "1.0.204", features = ["derive"] }
 serde_json = "1.0.120"
 tokio = { version = "1.38.0", features = ["macros", "rt-multi-thread", "time", "net", "sync", "signal", "fs"] }
-tokio-tungstenite = "0.24.0"
+tokio-tungstenite = "0.28.0"
 toml = "0.8.14"
 tower-http = { version = "0.5.2", features = ["cors", "trace"] }
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt"] }
-url = "=2.4.1"
-uuid = { version = "=1.8.0", features = ["v4", "serde"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg"] }

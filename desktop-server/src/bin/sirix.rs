@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn print_help() {
     println!(
-        "sirix\n  sirix\n  sirix list\n  sirix resume <ai_session_id|terminal_id>\n\nRuns a Codex-backed AI coding session mirrored into Sirix."
+        "sirix\n  sirix\n  sirix list\n  sirix resume <ai_session_id|terminal_id>\n\nRuns a Sirix AI coding session mirrored into Sirix."
     );
 }
 
@@ -288,8 +288,6 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
     let resolved_executable = resolve_launch_executable(&current.codex_executable)?;
 
     let mut command = Command::new(&resolved_executable);
-    command.arg("--config");
-    command.arg("approval_policy=\"never\"");
     command.current_dir(&current.workspace_root);
     if !current.codex_home.trim().is_empty() {
         command.env("CODEX_HOME", &current.codex_home);
@@ -307,33 +305,40 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
     {
         use std::os::unix::process::CommandExt;
         let error = command.exec();
-        return Err(error).context("failed to exec codex in current terminal");
+        return Err(error).context("failed to exec AI runtime in current terminal");
     }
 
     #[cfg(not(unix))]
     {
         let status = command
             .status()
-            .context("failed to spawn codex in current terminal")?;
+            .context("failed to spawn AI runtime in current terminal")?;
         if status.success() {
             return Ok(());
         }
-        anyhow::bail!("codex exited with status {status}");
+        anyhow::bail!("AI runtime exited with status {status}");
     }
 }
 
 fn resolve_launch_executable(raw: &str) -> anyhow::Result<PathBuf> {
     let candidate = raw.trim();
     if candidate.is_empty() {
-        anyhow::bail!("codex executable path is empty");
+        anyhow::bail!("AI runtime executable path is empty");
     }
 
     let resolved = find_executable(candidate)
-        .with_context(|| format!("codex executable not found: {candidate}"))?;
-    let metadata = std::fs::metadata(&resolved)
-        .with_context(|| format!("failed to stat codex executable {}", resolved.display()))?;
+        .with_context(|| format!("AI runtime executable not found: {candidate}"))?;
+    let metadata = std::fs::metadata(&resolved).with_context(|| {
+        format!(
+            "failed to stat AI runtime executable {}",
+            resolved.display()
+        )
+    })?;
     if !metadata.is_file() {
-        anyhow::bail!("codex executable is not a file: {}", resolved.display());
+        anyhow::bail!(
+            "AI runtime executable is not a file: {}",
+            resolved.display()
+        );
     }
 
     #[cfg(unix)]
@@ -341,7 +346,10 @@ fn resolve_launch_executable(raw: &str) -> anyhow::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
 
         if metadata.permissions().mode() & 0o111 == 0 {
-            anyhow::bail!("codex executable is not executable: {}", resolved.display());
+            anyhow::bail!(
+                "AI runtime executable is not executable: {}",
+                resolved.display()
+            );
         }
     }
 
@@ -416,7 +424,8 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                 "type": "terminal.attach",
                 "terminal_id": terminal_id,
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .context("failed to attach terminal session")?;
@@ -440,7 +449,9 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                             "type": "terminal.input",
                             "terminal_id": terminal_id,
                             "data_base64": BASE64.encode(bytes),
-                        }).to_string()
+                        })
+                        .to_string()
+                        .into()
                     ))
                     .await
                     .context("failed to send terminal input")?;
@@ -486,7 +497,8 @@ where
                 "cols": size.0,
                 "rows": size.1,
             })
-            .to_string(),
+            .to_string()
+            .into(),
         ))
         .await
         .context("failed to send terminal resize")

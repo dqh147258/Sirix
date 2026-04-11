@@ -1036,7 +1036,23 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   bool _shouldFlushInputImmediately(String data) {
     return data.length >= _terminalImmediateInputThreshold ||
         data.contains('\n') ||
-        data.contains('\r');
+        data.contains('\r') ||
+        _containsImmediateControlInput(data);
+  }
+
+  bool _containsImmediateControlInput(String data) {
+    // Terminal control keys such as ESC, Ctrl+C and arrow-key escape
+    // sequences should bypass the small debounce window. Delaying these bytes
+    // makes interruption-oriented interactions feel unreliable, especially for
+    // Sirix/Codex-style TUI flows that expect `Esc` to cancel the current job
+    // immediately.
+    for (final codeUnit in data.codeUnits) {
+      final isAsciiControl = codeUnit < 0x20 || codeUnit == 0x7f;
+      if (isAsciiControl && codeUnit != 0x0a && codeUnit != 0x0d) {
+        return true;
+      }
+    }
+    return false;
   }
 
   void _flushPendingInput() {

@@ -408,10 +408,13 @@ impl SirixConfigStore {
         &self,
         launch: &AiLaunchConfig,
         cwd: &Path,
+        local_ws_port: u16,
+        ai_session_id: Uuid,
     ) -> anyhow::Result<()> {
         fs::create_dir_all(&launch.codex_home)
             .with_context(|| format!("failed to create {}", launch.codex_home.display()))?;
-        let config_value = build_codex_bridge_toml(self.load_global()?, launch, cwd)?;
+        let config_value =
+            build_codex_bridge_toml(self.load_global()?, launch, cwd, local_ws_port, ai_session_id)?;
         let serialized = toml::to_string_pretty(&config_value)
             .context("failed to serialize codex bridge config")?;
         let config_path = launch.codex_home.join("config.toml");
@@ -434,28 +437,33 @@ impl SirixConfigStore {
             return Ok(());
         }
 
-        let target = bin_dir.join(sirix_binary_name);
-        if target.exists() {
-            let _ = fs::remove_file(&target);
+        install_bin_shim(&sirix_binary, &bin_dir.join(sirix_binary_name))?;
+
+        let runtime_binary_name = if cfg!(windows) {
+            "sirix-runtime.exe"
+        } else {
+            "sirix-runtime"
+        };
+        let runtime_binary = sibling_dir.join(runtime_binary_name);
+        if runtime_binary.exists() {
+            install_bin_shim(&runtime_binary, &bin_dir.join(runtime_binary_name))?;
+            return Ok(());
         }
 
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&sirix_binary, &target).with_context(|| {
-            format!(
-                "failed to link {} -> {}",
-                target.display(),
-                sirix_binary.display()
-            )
-        })?;
-
-        #[cfg(windows)]
-        fs::copy(&sirix_binary, &target).with_context(|| {
-            format!(
-                "failed to copy {} -> {}",
-                sirix_binary.display(),
-                target.display()
-            )
-        })?;
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for profile in ["debug", "release"] {
+            let candidate = manifest_dir
+                .join("..")
+                .join("third_party")
+                .join("codex-rs")
+                .join("target")
+                .join(profile)
+                .join(runtime_binary_name);
+            if candidate.exists() {
+                install_bin_shim(&candidate, &bin_dir.join(runtime_binary_name))?;
+                break;
+            }
+        }
 
         Ok(())
     }
@@ -470,6 +478,32 @@ impl SirixConfigStore {
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
         Ok(())
     }
+}
+
+fn install_bin_shim(source: &Path, target: &Path) -> anyhow::Result<()> {
+    if target.exists() {
+        let _ = fs::remove_file(target);
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(source, target).with_context(|| {
+        format!(
+            "failed to link {} -> {}",
+            target.display(),
+            source.display()
+        )
+    })?;
+
+    #[cfg(windows)]
+    fs::copy(source, target).with_context(|| {
+        format!(
+            "failed to copy {} -> {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 fn resolve_agent(config: &SirixConfig, preferred: Option<&str>) -> anyhow::Result<AgentConfig> {
@@ -496,6 +530,8 @@ fn build_codex_bridge_toml(
     global: SirixConfig,
     launch: &AiLaunchConfig,
     cwd: &Path,
+    _local_ws_port: u16,
+    _ai_session_id: Uuid,
 ) -> anyhow::Result<toml::map::Map<String, TomlValue>> {
     let mut root = toml::map::Map::<String, TomlValue>::new();
     root.insert(
@@ -537,10 +573,11 @@ fn build_codex_bridge_toml(
         "name".to_string(),
         TomlValue::String(launch.provider.name.clone()),
     );
-    if !launch.provider.base_url.trim().is_empty() {
+    let provider_base_url = bridge_provider_base_url(&launch.provider);
+    if !provider_base_url.trim().is_empty() {
         provider_value.insert(
             "base_url".to_string(),
-            TomlValue::String(launch.provider.base_url.clone()),
+            TomlValue::String(provider_base_url),
         );
     }
     if !launch.provider.api_key_env.trim().is_empty() {
@@ -557,7 +594,7 @@ fn build_codex_bridge_toml(
     }
     provider_value.insert(
         "wire_api".to_string(),
-        TomlValue::String("responses".to_string()),
+        TomlValue::String(bridge_provider_wire_api(&launch.provider).to_string()),
     );
     model_providers.insert(launch.provider.id.clone(), TomlValue::Table(provider_value));
     root.insert(
@@ -684,6 +721,22 @@ fn build_codex_bridge_toml(
     );
 
     Ok(root)
+}
+
+fn bridge_provider_base_url(provider: &ProviderConfig) -> String {
+    provider.base_url.clone()
+}
+
+fn bridge_provider_wire_api(provider: &ProviderConfig) -> &'static str {
+    match provider.kind {
+        // Sirix runtime now understands both native Responses providers and
+        // OpenAI-compatible chat-completions providers directly. The bridge
+        // config must therefore preserve the provider's real wire protocol
+        // instead of forcing everything through a local proxy adapter.
+        ProviderKind::OpenAiCompatible => "chat",
+        ProviderKind::OpenAiResponses => "responses",
+        ProviderKind::Gemini | ProviderKind::Anthropic => "responses",
+    }
 }
 
 pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
@@ -1510,6 +1563,84 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openai_compatible_bridge_targets_native_chat_provider() {
+        let ai_session_id = Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+            .expect("uuid should parse");
+        let launch = AiLaunchConfig {
+            agent: AgentConfig {
+                id: "agent".to_string(),
+                name: "Agent".to_string(),
+                provider_id: "glm".to_string(),
+                model_id: "glm-5-turbo".to_string(),
+                system_prompt: "system prompt".to_string(),
+                builtin_tools_enabled: true,
+                enabled_skill_ids: Vec::new(),
+                disabled_skill_ids: Vec::new(),
+                enabled_mcp_server_ids: Vec::new(),
+                disabled_mcp_server_ids: Vec::new(),
+                capability_rules: Vec::new(),
+                enabled: true,
+            },
+            provider: ProviderConfig {
+                id: "glm".to_string(),
+                name: "GLM".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
+                api_key_env: "GLM_API_KEY".to_string(),
+                api_key: String::new(),
+                headers_json: "{}".to_string(),
+                enabled: true,
+                models: vec![ModelConfig {
+                    id: "glm-5-turbo".to_string(),
+                    display_name: "GLM 5 Turbo".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: 128_000,
+                    supports_images: false,
+                    enabled: true,
+                }],
+            },
+            model: ModelConfig {
+                id: "glm-5-turbo".to_string(),
+                display_name: "GLM 5 Turbo".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 128_000,
+                supports_images: false,
+                enabled: true,
+            },
+            codex_home: PathBuf::from("/tmp/.sirix"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        };
+
+        let config = build_codex_bridge_toml(
+            SirixConfig::default(),
+            &launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            ai_session_id,
+        )
+        .expect("bridge config should build");
+
+        let providers = config
+            .get("model_providers")
+            .and_then(TomlValue::as_table)
+            .expect("model_providers should exist");
+        let provider = providers
+            .get("glm")
+            .and_then(TomlValue::as_table)
+            .expect("glm provider should exist");
+
+        assert_eq!(
+            provider.get("base_url").and_then(TomlValue::as_str),
+            Some("https://open.bigmodel.cn/api/coding/paas/v4")
+        );
+        assert_eq!(
+            provider.get("wire_api").and_then(TomlValue::as_str),
+            Some("chat")
+        );
+    }
 
     #[test]
     fn parses_legacy_codex_global_config() {

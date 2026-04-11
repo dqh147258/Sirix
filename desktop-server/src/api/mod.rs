@@ -44,6 +44,14 @@ pub fn router(state: AppState) -> Router {
             "/ai/sessions/approvals/resolve",
             axum::routing::post(ai::resolve_approval),
         )
+        .route(
+            "/ai/sessions/:ai_session_id/provider/v1/responses",
+            axum::routing::post(ai::proxy_compatible_responses),
+        )
+        .route(
+            "/ai/sessions/:ai_session_id/provider/v1/models",
+            get(ai::proxy_compatible_models),
+        )
         .route("/ws", get(ws::local_ws_upgrade))
         .with_state(state)
 }

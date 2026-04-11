@@ -143,7 +143,7 @@ impl TerminalManager {
         if let Some(dir) = cwd.as_deref().and_then(resolve_cwd) {
             builder.cwd(dir);
         }
-        self.apply_sirix_env(&mut builder, Some(terminal_id));
+        self.apply_sirix_env(&mut builder, Some(terminal_id))?;
 
         self.create_process_terminal(
             terminal_id,
@@ -171,16 +171,14 @@ impl TerminalManager {
         rows: u16,
         remote_sync: bool,
     ) -> anyhow::Result<()> {
-        let codex_executable = resolve_codex_executable();
+        let codex_executable = resolve_codex_executable()?;
         let mut builder = CommandBuilder::new(codex_executable.clone());
-        builder.arg("--config");
-        builder.arg(format!("approval_policy=\"never\""));
         if !launch.provider.api_key.trim().is_empty()
             && !launch.provider.api_key_env.trim().is_empty()
         {
             builder.env(&launch.provider.api_key_env, &launch.provider.api_key);
         }
-        self.apply_sirix_env(&mut builder, None);
+        self.apply_sirix_env(&mut builder, None)?;
         builder.env("CODEX_HOME", &launch.codex_home);
         builder.cwd(&launch.workspace_root);
 
@@ -188,7 +186,7 @@ impl TerminalManager {
             terminal_id,
             builder,
             format!("Sirix AI · {}", launch.agent.name),
-            "codex".to_string(),
+            "sirix-runtime".to_string(),
             launch.workspace_root.display().to_string(),
             cols,
             rows,
@@ -367,7 +365,11 @@ impl TerminalManager {
         );
     }
 
-    fn apply_sirix_env(&self, builder: &mut CommandBuilder, terminal_id: Option<Uuid>) {
+    fn apply_sirix_env(
+        &self,
+        builder: &mut CommandBuilder,
+        terminal_id: Option<Uuid>,
+    ) -> anyhow::Result<()> {
         let path = env::var("PATH").unwrap_or_default();
         let sirix_bin = self.sirix_home.join("bin");
         let separator = if cfg!(windows) { ';' } else { ':' };
@@ -376,12 +378,14 @@ impl TerminalManager {
         } else {
             format!("{}{}{}", sirix_bin.display(), separator, path)
         };
+        let runtime_executable = resolve_codex_executable()?;
         builder.env("PATH", &augmented_path);
         builder.env("SIRIX_HOME", &self.sirix_home);
-        builder.env("SIRIX_CODEX_EXECUTABLE", resolve_codex_executable());
+        builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
         if let Some(terminal_id) = terminal_id {
             builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
         }
+        Ok(())
     }
 
     async fn create_process_terminal(
@@ -788,13 +792,57 @@ fn resolve_shell(requested: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn resolve_codex_executable() -> String {
+pub(crate) fn resolve_codex_executable() -> anyhow::Result<String> {
     if let Ok(codex) = env::var("SIRIX_CODEX_EXECUTABLE") {
         if !codex.trim().is_empty() {
-            return codex;
+            return Ok(codex);
         }
     }
-    "codex".to_string()
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            let runtime_name = if cfg!(windows) {
+                "sirix-runtime.exe"
+            } else {
+                "sirix-runtime"
+            };
+            let runtime = parent.join(runtime_name);
+            if runtime.is_file() {
+                return Ok(runtime.display().to_string());
+            }
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["debug", "release"] {
+        let runtime = manifest_dir
+            .join("..")
+            .join("third_party")
+            .join("codex-rs")
+            .join("target")
+            .join(profile)
+            .join(if cfg!(windows) {
+                "sirix-runtime.exe"
+            } else {
+                "sirix-runtime"
+            });
+        if runtime.is_file() {
+            return Ok(runtime.display().to_string());
+        }
+    }
+
+    let path_entry = if cfg!(windows) {
+        "sirix-runtime.exe"
+    } else {
+        "sirix-runtime"
+    };
+    if executable_in_path(path_entry) {
+        return Ok(path_entry.to_string());
+    }
+
+    anyhow::bail!(
+        "Sirix AI runtime executable not found. Expected `sirix-runtime` next to the app, in `third_party/codex-rs/target/{{debug,release}}`, or on PATH."
+    )
 }
 
 fn resolve_cwd(raw: &str) -> Option<PathBuf> {
@@ -802,4 +850,11 @@ fn resolve_cwd(raw: &str) -> Option<PathBuf> {
         return env::var("HOME").ok().map(PathBuf::from);
     }
     Some(PathBuf::from(raw))
+}
+
+fn executable_in_path(name: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    env::split_paths(&path).any(|directory| directory.join(name).is_file())
 }

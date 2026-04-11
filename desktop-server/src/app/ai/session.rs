@@ -4,7 +4,10 @@ use anyhow::Context;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::app::{ai::config::SirixConfigStore, state::AppState};
+use crate::app::{
+    ai::config::{ProviderConfig, SirixConfigStore},
+    state::AppState,
+};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AiSessionLaunchResponse {
@@ -45,6 +48,7 @@ pub struct AiSessionRegistry {
 struct AiSessionRegistryState {
     sessions: HashMap<Uuid, AiSessionRecord>,
     terminal_index: HashMap<Uuid, Uuid>,
+    provider_index: HashMap<Uuid, ProviderConfig>,
 }
 
 impl AiSessionRegistry {
@@ -52,7 +56,7 @@ impl AiSessionRegistry {
         Self::default()
     }
 
-    pub async fn insert(&self, record: AiSessionRecord) {
+    pub async fn insert(&self, record: AiSessionRecord, provider: ProviderConfig) {
         let ai_session_id = record.ai_session_id;
         let terminal_id = record.terminal_id;
         let mut state = self.state.write().await;
@@ -60,7 +64,9 @@ impl AiSessionRegistry {
             state.terminal_index.insert(terminal_id, ai_session_id)
         {
             state.sessions.remove(&previous_ai_session_id);
+            state.provider_index.remove(&previous_ai_session_id);
         }
+        state.provider_index.insert(ai_session_id, provider);
         state.sessions.insert(ai_session_id, record);
     }
 
@@ -78,6 +84,11 @@ impl AiSessionRegistry {
         }
         let mapped = state.terminal_index.get(&any_id).copied()?;
         state.sessions.get(&mapped).cloned()
+    }
+
+    pub async fn resolve_provider(&self, ai_session_id: Uuid) -> Option<ProviderConfig> {
+        let state = self.state.read().await;
+        state.provider_index.get(&ai_session_id).cloned()
     }
 }
 
@@ -122,7 +133,11 @@ pub async fn launch_ai_session(
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
-    config_store.write_codex_bridge_config(&launch, cwd)?;
+    let resolved_provider = launch.provider.clone();
+    let runtime = state.runtime.read().await;
+    let local_ws_port = runtime.local_ws_port;
+    drop(runtime);
+    config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
     state
         .terminal_manager
         .create_codex_terminal(terminal_id, launch, cols, rows, mirrored_to_backend)
@@ -138,7 +153,7 @@ pub async fn launch_ai_session(
             agent_id: resolved_agent_id,
             model_id: resolved_model_id,
             mirrored_to_backend,
-        })
+        }, resolved_provider)
         .await;
 
     let runtime = state.runtime.read().await;
@@ -170,7 +185,10 @@ pub async fn launch_ai_session_in_current_terminal(
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
-    config_store.write_codex_bridge_config(&launch, cwd)?;
+    let runtime = state.runtime.read().await;
+    let local_ws_port = runtime.local_ws_port;
+    drop(runtime);
+    config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
 
     state
         .ai_session_registry
@@ -181,7 +199,7 @@ pub async fn launch_ai_session_in_current_terminal(
             agent_id: resolved_agent_id,
             model_id: resolved_model_id,
             mirrored_to_backend: false,
-        })
+        }, launch.provider.clone())
         .await;
 
     let runtime = state.runtime.read().await;
@@ -193,7 +211,7 @@ pub async fn launch_ai_session_in_current_terminal(
         created_locally: true,
         reuse_current_terminal: true,
         current_terminal_launch: Some(CurrentTerminalLaunch {
-            codex_executable: super::super::terminal::manager::resolve_codex_executable(),
+            codex_executable: super::super::terminal::manager::resolve_codex_executable()?,
             workspace_root: launch.workspace_root.display().to_string(),
             codex_home: launch.codex_home.display().to_string(),
             provider_api_key_env: (!launch.provider.api_key_env.trim().is_empty())
@@ -221,6 +239,28 @@ async fn remote_sync_available(state: &AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::ai::config::{ModelConfig, ModelKind, ProviderKind};
+
+    fn test_provider(id: &str) -> ProviderConfig {
+        ProviderConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://example.com/v1".to_string(),
+            api_key_env: "TEST_API_KEY".to_string(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "model".to_string(),
+                display_name: "Model".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: 32_000,
+                supports_images: false,
+                enabled: true,
+            }],
+        }
+    }
 
     #[tokio::test]
     async fn insert_replaces_previous_session_for_same_terminal() {
@@ -243,8 +283,8 @@ mod tests {
             mirrored_to_backend: true,
         };
 
-        registry.insert(first.clone()).await;
-        registry.insert(second.clone()).await;
+        registry.insert(first.clone(), test_provider("provider-a")).await;
+        registry.insert(second.clone(), test_provider("provider-b")).await;
 
         assert_eq!(registry.list().await, vec![second.clone()]);
         assert!(registry.resolve(first.ai_session_id).await.is_none());
@@ -252,7 +292,12 @@ mod tests {
             registry.resolve(second.ai_session_id).await,
             Some(second.clone())
         );
-        assert_eq!(registry.resolve(terminal_id).await, Some(second));
+        assert_eq!(registry.resolve(terminal_id).await, Some(second.clone()));
+        assert!(registry.resolve_provider(first.ai_session_id).await.is_none());
+        assert_eq!(
+            registry.resolve_provider(second.ai_session_id).await.map(|provider| provider.id),
+            Some("provider-b".to_string())
+        );
     }
 }
 

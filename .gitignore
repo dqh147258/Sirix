@@ -2,3 +2,4 @@
 /backend-server/target
 /desktop-server/runtime
 backend-server/deploy/runtime-logs
+/third_party/crossterm/.git

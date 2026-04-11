@@ -15,6 +15,7 @@ class AiSettingsState {
   const AiSettingsState({
     this.loading = false,
     this.saving = false,
+    this.discoveringProviderIds = const [],
     this.errorMessage,
     this.noticeMessage,
     this.selectedSection = AiSettingsSection.cli,
@@ -24,6 +25,7 @@ class AiSettingsState {
 
   final bool loading;
   final bool saving;
+  final List<String> discoveringProviderIds;
   final String? errorMessage;
   final String? noticeMessage;
   final AiSettingsSection selectedSection;
@@ -33,6 +35,7 @@ class AiSettingsState {
   AiSettingsState copyWith({
     bool? loading,
     bool? saving,
+    List<String>? discoveringProviderIds,
     String? errorMessage,
     String? noticeMessage,
     AiSettingsSection? selectedSection,
@@ -44,6 +47,7 @@ class AiSettingsState {
     return AiSettingsState(
       loading: loading ?? this.loading,
       saving: saving ?? this.saving,
+      discoveringProviderIds: discoveringProviderIds ?? this.discoveringProviderIds,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       noticeMessage: clearNotice ? null : (noticeMessage ?? this.noticeMessage),
       selectedSection: selectedSection ?? this.selectedSection,

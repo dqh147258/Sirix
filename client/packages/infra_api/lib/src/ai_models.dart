@@ -1,7 +1,5 @@
 import 'package:flutter/foundation.dart';
 
-String _enumName(Object value) => value.toString().split('.').last;
-
 enum ProviderKind {
   openAiCompatible,
   openAiResponses,
@@ -24,25 +22,63 @@ enum ApprovalMode {
   deny,
 }
 
+String _providerKindJson(ProviderKind value) {
+  return switch (value) {
+    ProviderKind.openAiCompatible => 'open_ai_compatible',
+    ProviderKind.openAiResponses => 'open_ai_responses',
+    ProviderKind.gemini => 'gemini',
+    ProviderKind.anthropic => 'anthropic',
+  };
+}
+
+String _modelKindJson(ModelKind value) {
+  return switch (value) {
+    ModelKind.text => 'text',
+    ModelKind.imageGeneration => 'image_generation',
+    ModelKind.asr => 'asr',
+    ModelKind.tts => 'tts',
+    ModelKind.embedding => 'embedding',
+  };
+}
+
+String _approvalModeJson(ApprovalMode value) {
+  return switch (value) {
+    ApprovalMode.allow => 'allow',
+    ApprovalMode.askOnce => 'ask_once',
+    ApprovalMode.askEachTime => 'ask_each_time',
+    ApprovalMode.deny => 'deny',
+  };
+}
+
 ProviderKind providerKindFromJson(String? raw) {
-  return ProviderKind.values.firstWhere(
-    (item) => _enumName(item) == raw,
-    orElse: () => ProviderKind.openAiResponses,
-  );
+  return switch (raw) {
+    'open_ai_compatible' || 'openAiCompatible' => ProviderKind.openAiCompatible,
+    'open_ai_responses' || 'openAiResponses' => ProviderKind.openAiResponses,
+    'gemini' => ProviderKind.gemini,
+    'anthropic' => ProviderKind.anthropic,
+    _ => ProviderKind.openAiResponses,
+  };
 }
 
 ModelKind modelKindFromJson(String? raw) {
-  return ModelKind.values.firstWhere(
-    (item) => _enumName(item) == raw,
-    orElse: () => ModelKind.text,
-  );
+  return switch (raw) {
+    'text' => ModelKind.text,
+    'image_generation' || 'imageGeneration' => ModelKind.imageGeneration,
+    'asr' => ModelKind.asr,
+    'tts' => ModelKind.tts,
+    'embedding' => ModelKind.embedding,
+    _ => ModelKind.text,
+  };
 }
 
 ApprovalMode approvalModeFromJson(String? raw) {
-  return ApprovalMode.values.firstWhere(
-    (item) => _enumName(item) == raw,
-    orElse: () => ApprovalMode.allow,
-  );
+  return switch (raw) {
+    'allow' => ApprovalMode.allow,
+    'ask_once' || 'askOnce' => ApprovalMode.askOnce,
+    'ask_each_time' || 'askEachTime' => ApprovalMode.askEachTime,
+    'deny' => ApprovalMode.deny,
+    _ => ApprovalMode.allow,
+  };
 }
 
 @immutable
@@ -107,7 +143,7 @@ class AiModelConfig {
     return {
       'id': id,
       'display_name': displayName,
-      'model_kind': _enumName(modelKind),
+      'model_kind': _modelKindJson(modelKind),
       'context_window': contextWindow,
       'supports_images': supportsImages,
       'enabled': enabled,
@@ -179,7 +215,7 @@ class AiProviderConfig {
     return {
       'id': id,
       'name': name,
-      'kind': _enumName(kind),
+      'kind': _providerKindJson(kind),
       'base_url': baseUrl,
       'api_key_env': apiKeyEnv,
       'api_key': apiKey,
@@ -308,7 +344,7 @@ class McpServerConfigModel {
       'id': id,
       'name': name,
       'enabled': enabled,
-      'approval_mode': _enumName(approvalMode),
+      'approval_mode': _approvalModeJson(approvalMode),
       'enabled_tools': enabledTools,
       'disabled_tools': disabledTools,
       'json_config': jsonConfig,
@@ -397,7 +433,7 @@ class AgentCapabilityRuleModel {
   Map<String, dynamic> toJson() {
     return {
       'key': key,
-      'approval_mode': _enumName(approvalMode),
+      'approval_mode': _approvalModeJson(approvalMode),
     };
   }
 

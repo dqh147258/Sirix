@@ -28,6 +28,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/ai/config/effective", get(ai::get_effective_ai_config))
         .route(
+            "/ai/providers/models",
+            axum::routing::post(ai::discover_provider_models),
+        )
+        .route(
             "/ai/sessions",
             get(ai::list_sessions).post(ai::launch_session),
         )

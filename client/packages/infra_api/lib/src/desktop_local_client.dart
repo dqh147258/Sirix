@@ -146,6 +146,20 @@ class DesktopLocalClient {
     return SirixAiConfig.fromJson(_decodeMap(response));
   }
 
+  Future<List<AiModelConfig>> discoverProviderModels(AiProviderConfig provider) async {
+    final response = await _request(
+      'POST',
+      '/ai/providers/models',
+      body: provider.toJson(),
+    );
+    final decoded = _decodeMap(response);
+    final models = decoded['models'] as List<dynamic>? ?? const [];
+    return models
+        .whereType<Map<String, dynamic>>()
+        .map(AiModelConfig.fromJson)
+        .toList(growable: false);
+  }
+
   Future<Map<String, dynamic>> checkAiApproval({
     required String sessionId,
     required String capabilityKey,

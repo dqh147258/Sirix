@@ -99,6 +99,60 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     );
   }
 
+  Future<void> discoverProviderModels(AiProviderConfig provider) async {
+    final providerId = provider.id.trim();
+    if (providerId.isEmpty || state.discoveringProviderIds.contains(providerId)) {
+      return;
+    }
+
+    state = state.copyWith(
+      discoveringProviderIds: [...state.discoveringProviderIds, providerId],
+      clearError: true,
+      clearNotice: true,
+    );
+    AppLogger.info(
+      '[AI_PROVIDER_DISCOVERY] start provider_id=$providerId base_url=${provider.baseUrl}',
+    );
+
+    try {
+      final discovered = await _localClient.discoverProviderModels(provider);
+      final existingModelsById = {
+        for (final model in provider.models) model.id: model,
+      };
+      final merged = discovered
+          .map((model) {
+            final existing = existingModelsById[model.id];
+            if (existing == null) {
+              return model;
+            }
+            return model.copyWith(enabled: existing.enabled);
+          })
+          .toList(growable: false);
+      upsertProvider(provider.copyWith(models: merged));
+      state = state.copyWith(
+        noticeMessage: merged.isEmpty
+            ? 'No models were returned for ${provider.name}.'
+            : 'Fetched ${merged.length} models for ${provider.name}. Review inferred capabilities before saving.',
+        clearError: true,
+      );
+      AppLogger.info(
+        '[AI_PROVIDER_DISCOVERY] success provider_id=$providerId model_count=${merged.length}',
+      );
+    } catch (error, stackTrace) {
+      state = state.copyWith(
+        errorMessage: 'Failed to fetch models for ${provider.name}: $error',
+      );
+      AppLogger.warn('[AI_PROVIDER_DISCOVERY] failed provider_id=$providerId error=$error');
+      AppLogger.warn('[AI_PROVIDER_DISCOVERY] stack provider_id=$providerId stack=$stackTrace');
+    } finally {
+      state = state.copyWith(
+        discoveringProviderIds: state.discoveringProviderIds
+            .where((item) => item != providerId)
+            .toList(growable: false),
+      );
+    }
+  }
+
   void upsertModel({
     required String providerId,
     required AiModelConfig model,

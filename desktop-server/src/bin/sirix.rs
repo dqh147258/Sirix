@@ -1,6 +1,7 @@
 use std::{
     env,
     io::{self, Read, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -220,7 +221,8 @@ async fn launch_session(
         "rows": rows,
     });
     if let Some(reuse_terminal_id) = reuse_terminal_id.filter(|value| !value.trim().is_empty()) {
-        request_body["reuse_terminal_id"] = serde_json::Value::String(reuse_terminal_id.to_string());
+        request_body["reuse_terminal_id"] =
+            serde_json::Value::String(reuse_terminal_id.to_string());
     }
     let response = client
         .post(local_http_url(port, "/ai/sessions"))
@@ -283,8 +285,9 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
         .current_terminal_launch
         .as_ref()
         .context("current terminal launch payload missing")?;
+    let resolved_executable = resolve_launch_executable(&current.codex_executable)?;
 
-    let mut command = Command::new(&current.codex_executable);
+    let mut command = Command::new(&resolved_executable);
     command.arg("--config");
     command.arg("approval_policy=\"never\"");
     command.current_dir(&current.workspace_root);
@@ -309,12 +312,71 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
 
     #[cfg(not(unix))]
     {
-        let status = command.status().context("failed to spawn codex in current terminal")?;
+        let status = command
+            .status()
+            .context("failed to spawn codex in current terminal")?;
         if status.success() {
             return Ok(());
         }
         anyhow::bail!("codex exited with status {status}");
     }
+}
+
+fn resolve_launch_executable(raw: &str) -> anyhow::Result<PathBuf> {
+    let candidate = raw.trim();
+    if candidate.is_empty() {
+        anyhow::bail!("codex executable path is empty");
+    }
+
+    let resolved = find_executable(candidate)
+        .with_context(|| format!("codex executable not found: {candidate}"))?;
+    let metadata = std::fs::metadata(&resolved)
+        .with_context(|| format!("failed to stat codex executable {}", resolved.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("codex executable is not a file: {}", resolved.display());
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("codex executable is not executable: {}", resolved.display());
+        }
+    }
+
+    Ok(resolved)
+}
+
+fn find_executable(raw: &str) -> Option<PathBuf> {
+    let candidate = Path::new(raw);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+
+    let path = env::var_os("PATH")?;
+    for directory in env::split_paths(&path) {
+        let resolved = directory.join(candidate);
+        if resolved.is_file() {
+            return Some(resolved);
+        }
+
+        #[cfg(windows)]
+        {
+            let extensions = env::var_os("PATHEXT")
+                .map(|value| env::split_paths(&value).collect::<Vec<_>>())
+                .unwrap_or_default();
+            for extension in extensions {
+                let suffix = extension.to_string_lossy();
+                let resolved = directory.join(format!("{raw}{suffix}"));
+                if resolved.is_file() {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 async fn resolve_terminal_id(port: u16, session_or_terminal_id: &str) -> anyhow::Result<String> {

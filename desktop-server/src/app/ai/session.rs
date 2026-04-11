@@ -17,7 +17,7 @@ pub struct AiSessionLaunchResponse {
     pub current_terminal_launch: Option<CurrentTerminalLaunch>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AiSessionRecord {
     pub ai_session_id: Uuid,
     pub terminal_id: Uuid,
@@ -38,8 +38,13 @@ pub struct CurrentTerminalLaunch {
 
 #[derive(Default)]
 pub struct AiSessionRegistry {
-    sessions: Arc<RwLock<HashMap<Uuid, AiSessionRecord>>>,
-    terminal_index: Arc<RwLock<HashMap<Uuid, Uuid>>>,
+    state: Arc<RwLock<AiSessionRegistryState>>,
+}
+
+#[derive(Default)]
+struct AiSessionRegistryState {
+    sessions: HashMap<Uuid, AiSessionRecord>,
+    terminal_index: HashMap<Uuid, Uuid>,
 }
 
 impl AiSessionRegistry {
@@ -50,32 +55,29 @@ impl AiSessionRegistry {
     pub async fn insert(&self, record: AiSessionRecord) {
         let ai_session_id = record.ai_session_id;
         let terminal_id = record.terminal_id;
-        let mut sessions = self.sessions.write().await;
-        let mut terminal_index = self.terminal_index.write().await;
-        if let Some(previous_ai_session_id) = terminal_index.insert(terminal_id, ai_session_id) {
-            sessions.remove(&previous_ai_session_id);
+        let mut state = self.state.write().await;
+        if let Some(previous_ai_session_id) =
+            state.terminal_index.insert(terminal_id, ai_session_id)
+        {
+            state.sessions.remove(&previous_ai_session_id);
         }
-        sessions.insert(ai_session_id, record);
+        state.sessions.insert(ai_session_id, record);
     }
 
     pub async fn list(&self) -> Vec<AiSessionRecord> {
-        let mut items = self
-            .sessions
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let state = self.state.read().await;
+        let mut items = state.sessions.values().cloned().collect::<Vec<_>>();
         items.sort_by(|left, right| left.ai_session_id.cmp(&right.ai_session_id));
         items
     }
 
     pub async fn resolve(&self, any_id: Uuid) -> Option<AiSessionRecord> {
-        if let Some(record) = self.sessions.read().await.get(&any_id).cloned() {
+        let state = self.state.read().await;
+        if let Some(record) = state.sessions.get(&any_id).cloned() {
             return Some(record);
         }
-        let mapped = self.terminal_index.read().await.get(&any_id).copied()?;
-        self.sessions.read().await.get(&mapped).cloned()
+        let mapped = state.terminal_index.get(&any_id).copied()?;
+        state.sessions.get(&mapped).cloned()
     }
 }
 
@@ -214,6 +216,44 @@ async fn remote_sync_available(state: &AppState) -> bool {
     };
 
     !session.access_token.trim().is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn insert_replaces_previous_session_for_same_terminal() {
+        let registry = AiSessionRegistry::new();
+        let terminal_id = Uuid::new_v4();
+        let first = AiSessionRecord {
+            ai_session_id: Uuid::new_v4(),
+            terminal_id,
+            cwd: "/tmp/first".to_string(),
+            agent_id: "agent-a".to_string(),
+            model_id: "model-a".to_string(),
+            mirrored_to_backend: false,
+        };
+        let second = AiSessionRecord {
+            ai_session_id: Uuid::new_v4(),
+            terminal_id,
+            cwd: "/tmp/second".to_string(),
+            agent_id: "agent-b".to_string(),
+            model_id: "model-b".to_string(),
+            mirrored_to_backend: true,
+        };
+
+        registry.insert(first.clone()).await;
+        registry.insert(second.clone()).await;
+
+        assert_eq!(registry.list().await, vec![second.clone()]);
+        assert!(registry.resolve(first.ai_session_id).await.is_none());
+        assert_eq!(
+            registry.resolve(second.ai_session_id).await,
+            Some(second.clone())
+        );
+        assert_eq!(registry.resolve(terminal_id).await, Some(second));
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]

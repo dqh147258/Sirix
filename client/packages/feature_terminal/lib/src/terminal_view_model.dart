@@ -37,12 +37,13 @@ class TerminalPageConfig {
     return identical(this, other) ||
         other is TerminalPageConfig &&
             runtimeType == other.runtimeType &&
+            accessToken == other.accessToken &&
             deviceId == other.deviceId &&
             sessionId == other.sessionId;
   }
 
   @override
-  int get hashCode => Object.hash(deviceId, sessionId);
+  int get hashCode => Object.hash(accessToken, deviceId, sessionId);
 }
 
 class TerminalViewModel extends BaseViewModel<TerminalState> {
@@ -501,16 +502,49 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     required String terminalId,
     required String text,
   }) {
-    final terminal = _createTerminal(terminalId);
+    final terminal = terminalFor(terminalId) ?? _createTerminal(terminalId);
+    _resetTerminalSnapshot(terminal);
     if (text.isNotEmpty) {
       terminal.write(text);
+      return;
     }
-    _terminalCache[terminalId] = terminal;
+
+    terminal.notifyListeners();
   }
 
   void _pruneTerminalCache(Iterable<String> terminalIds) {
     final allowed = terminalIds.toSet();
-    _terminalCache.removeWhere((key, _) => !allowed.contains(key));
+    final removed = _terminalCache.keys
+        .where((terminalId) => !allowed.contains(terminalId))
+        .toList(growable: false);
+    for (final terminalId in removed) {
+      _disposeCachedTerminal(terminalId);
+    }
+  }
+
+  void _resetTerminalSnapshot(Terminal terminal) {
+    terminal.mainBuffer.clear();
+    terminal.altBuffer.clear();
+    terminal.setCursor(0, 0);
+  }
+
+  void _disposeCachedTerminal(String terminalId) {
+    final terminal = _terminalCache.remove(terminalId);
+    if (terminal == null) {
+      return;
+    }
+
+    // xterm does not expose a full dispose API, so detach callbacks and clear
+    // buffers before dropping the cached instance.
+    terminal.onOutput = null;
+    terminal.onResize = null;
+    terminal.onBell = null;
+    terminal.onTitleChange = null;
+    terminal.onIconChange = null;
+    terminal.onPrivateOSC = null;
+    terminal.listeners.clear();
+    terminal.mainBuffer.clear();
+    terminal.altBuffer.clear();
   }
 
   Future<void> _detachChannel() async {
@@ -786,15 +820,18 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
             remaining: remaining,
           )
         : state.activeTerminalId;
+    final closedMessage =
+        closingActive && nextActiveId == null ? '[terminal closed]' : null;
     state = state.copyWith(
       terminals: remaining,
       pendingApprovalRequests: state.pendingApprovalRequests
           .where((request) => request.terminalId != terminalId)
           .toList(growable: false),
       activeTerminalId: nextActiveId,
+      errorMessage: closedMessage,
       clearActiveTerminalId: closingActive && nextActiveId == null,
     );
-    _terminalCache.remove(terminalId);
+    _disposeCachedTerminal(terminalId);
   }
 
   Future<void> resolveApprovalRequest({
@@ -1101,6 +1138,10 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   void dispose() {
     unawaited(_detachChannel());
     unawaited(_sessionChannelSubscription?.cancel());
+    final cachedTerminalIds = _terminalCache.keys.toList(growable: false);
+    for (final terminalId in cachedTerminalIds) {
+      _disposeCachedTerminal(terminalId);
+    }
     super.dispose();
   }
 

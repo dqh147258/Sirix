@@ -947,12 +947,18 @@ fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
 }
 
 fn looks_like_legacy_codex_config(table: &toml::map::Map<String, TomlValue>) -> bool {
+    if ["version", "cli", "providers", "mcp", "agents"]
+        .iter()
+        .any(|key| table.contains_key(*key))
+    {
+        return false;
+    }
+
     [
         "model",
         "model_provider",
         "model_providers",
         "profiles",
-        "mcp_servers",
         "preferred_auth_method",
         "sandbox_workspace_write",
         "web_search",
@@ -960,6 +966,10 @@ fn looks_like_legacy_codex_config(table: &toml::map::Map<String, TomlValue>) -> 
     ]
     .iter()
     .any(|key| table.contains_key(*key))
+        || (table.contains_key("mcp_servers")
+            && ["instructions", "model_context_window", "skills"]
+                .iter()
+                .any(|key| table.contains_key(*key)))
 }
 
 fn legacy_provider_to_sirix(
@@ -1546,14 +1556,27 @@ config = [
     }
 
     #[test]
-    fn legacy_mcp_only_config_falls_back_to_defaults() {
+    fn legacy_mcp_only_config_is_not_detected_as_legacy() {
         let raw = r#"
 [mcp_servers]
 value = "unexpected"
 "#;
 
-        let parsed = parse_legacy_codex_config(raw).expect("legacy mcp-only config should parse");
-        assert_eq!(parsed.providers[0].id, DEFAULT_PROVIDER_ID);
-        assert!(parsed.mcp_servers.is_empty());
+        let value = toml::from_str::<TomlValue>(raw).expect("config should be valid toml");
+        let table = value.as_table().expect("config root should be table");
+
+        assert!(!looks_like_legacy_codex_config(table));
+    }
+
+    #[test]
+    fn legacy_model_only_config_is_still_detected() {
+        let raw = r#"
+model = "gpt-5.4"
+"#;
+
+        let value = toml::from_str::<TomlValue>(raw).expect("config should be valid toml");
+        let table = value.as_table().expect("config root should be table");
+
+        assert!(looks_like_legacy_codex_config(table));
     }
 }

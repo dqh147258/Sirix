@@ -31,6 +31,7 @@ use crate::app::{
     ai::{
         approval::{ApprovalDecision, ApprovalRecord, ApprovalScope},
         config::{
+            effective_model_context_window, infer_provider_default_context_window,
             validate_sirix_config, ApprovalMode, ModelConfig, ModelKind, ProviderConfig,
             ProviderKind, SirixConfig,
         },
@@ -396,7 +397,7 @@ fn session_models_payload(providers: &[ProviderConfig], active_provider_id: &str
                 "id": model.id,
                 "display_name": model.display_name,
                 "owned_by": provider.name,
-                "context_window": model.context_window,
+                "context_window": effective_model_context_window(provider, model),
                 "supports_images": model.supports_images,
             }));
         }
@@ -724,7 +725,7 @@ fn parse_provider_models(
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| prettify_model_id(id)),
             model_kind: infer_model_kind(id, object),
-            context_window: infer_context_window(provider, id, object),
+            context_window: Some(infer_context_window(provider, id, object)),
             supports_images: infer_supports_images(provider, id, object),
             enabled: true,
         });
@@ -780,13 +781,9 @@ fn infer_context_window(
         }
     }
 
-    match provider.kind {
-        ProviderKind::Anthropic => 200_000,
-        ProviderKind::Gemini => 1_048_576,
-        ProviderKind::OpenAiResponses if model_id.starts_with("gpt-5") => 400_000,
-        ProviderKind::OpenAiResponses => 200_000,
-        ProviderKind::OpenAiCompatible => 128_000,
-    }
+    provider
+        .default_context_window
+        .unwrap_or_else(|| infer_provider_default_context_window(&provider.kind, model_id))
 }
 
 fn infer_supports_images(
@@ -1430,6 +1427,7 @@ mod tests {
             id: "provider".to_string(),
             name: "Provider".to_string(),
             kind,
+            default_context_window: None,
             base_url: base_url.to_string(),
             api_key_env: String::new(),
             api_key: String::new(),
@@ -1444,6 +1442,21 @@ mod tests {
         let provider = provider(ProviderKind::OpenAiResponses, "");
         let url = normalized_provider_base_url(&provider).expect("url should normalize");
         assert_eq!(url.as_str(), "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn trailing_slash_base_url_keeps_compatible_models_and_responses_joinable() {
+        let provider = provider(ProviderKind::OpenAiCompatible, "https://example.com/v1/");
+        let base_url = normalized_provider_base_url(&provider).expect("url should normalize");
+        let models_url = provider_models_url(&provider, &base_url).expect("models url should join");
+        let responses_url =
+            compatible_chat_completions_url(&base_url).expect("chat completions url should join");
+
+        assert_eq!(models_url.as_str(), "https://example.com/v1/models");
+        assert_eq!(
+            responses_url.as_str(),
+            "https://example.com/v1/chat/completions"
+        );
     }
 
     #[test]
@@ -1488,7 +1501,7 @@ mod tests {
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].display_name, "GPT-4.1");
-        assert_eq!(models[0].context_window, 1_048_576);
+        assert_eq!(models[0].context_window, Some(1_048_576));
         assert!(models[0].supports_images);
     }
 
@@ -1558,7 +1571,7 @@ mod tests {
             id: "shared-model".to_string(),
             display_name: "GLM Shared".to_string(),
             model_kind: ModelKind::Text,
-            context_window: 128_000,
+            context_window: Some(128_000),
             supports_images: false,
             enabled: true,
         }];
@@ -1571,7 +1584,7 @@ mod tests {
                 id: "gpt-5".to_string(),
                 display_name: "GPT-5".to_string(),
                 model_kind: ModelKind::Text,
-                context_window: 400_000,
+                context_window: Some(400_000),
                 supports_images: true,
                 enabled: true,
             },
@@ -1579,7 +1592,7 @@ mod tests {
                 id: "shared-model".to_string(),
                 display_name: "OpenAI Shared".to_string(),
                 model_kind: ModelKind::Text,
-                context_window: 400_000,
+                context_window: Some(400_000),
                 supports_images: true,
                 enabled: true,
             },

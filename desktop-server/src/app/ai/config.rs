@@ -70,7 +70,8 @@ pub struct ModelConfig {
     pub id: String,
     pub display_name: String,
     pub model_kind: ModelKind,
-    pub context_window: u32,
+    #[serde(default)]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub supports_images: bool,
     #[serde(default = "default_true")]
@@ -82,6 +83,8 @@ pub struct ProviderConfig {
     pub id: String,
     pub name: String,
     pub kind: ProviderKind,
+    #[serde(default)]
+    pub default_context_window: Option<u32>,
     #[serde(default)]
     pub base_url: String,
     #[serde(default)]
@@ -201,6 +204,7 @@ impl Default for SirixConfig {
                 id: DEFAULT_PROVIDER_ID.to_string(),
                 name: "OpenAI".to_string(),
                 kind: ProviderKind::OpenAiResponses,
+                default_context_window: Some(200_000),
                 base_url: "https://api.openai.com/v1".to_string(),
                 api_key_env: "OPENAI_API_KEY".to_string(),
                 api_key: String::new(),
@@ -210,7 +214,7 @@ impl Default for SirixConfig {
                     id: DEFAULT_MODEL_ID.to_string(),
                     display_name: "GPT-5".to_string(),
                     model_kind: ModelKind::Text,
-                    context_window: 200_000,
+                    context_window: None,
                     supports_images: true,
                     enabled: true,
                 }],
@@ -539,19 +543,47 @@ fn resolve_agent(config: &SirixConfig, preferred: Option<&str>) -> anyhow::Resul
         if let Some(agent) = config
             .agents
             .iter()
-            .find(|item| item.id == preferred && item.enabled)
+            .find(|item| item.id == preferred && item.enabled && is_agent_launchable(config, item))
             .cloned()
         {
             return Ok(agent);
         }
     }
 
+    // Sirix CLI 默认启动不显式传 agent_id，所以这里优先解析 `default-agent`。
+    // 这样 Provider/Model 页面上设置的“默认模型”可以直接反映到 CLI 启动结果。
+    if let Some(default_agent) = config
+        .agents
+        .iter()
+        .find(|item| {
+            item.id == DEFAULT_AGENT_ID && item.enabled && is_agent_launchable(config, item)
+        })
+        .cloned()
+    {
+        return Ok(default_agent);
+    }
+
     config
         .agents
         .iter()
-        .find(|item| item.enabled)
+        .find(|item| item.enabled && is_agent_launchable(config, item))
         .cloned()
         .context("no enabled agent configured")
+}
+
+fn is_agent_launchable(config: &SirixConfig, agent: &AgentConfig) -> bool {
+    let Some(provider) = config
+        .providers
+        .iter()
+        .find(|item| item.id == agent.provider_id && item.enabled)
+    else {
+        return false;
+    };
+
+    provider
+        .models
+        .iter()
+        .any(|item| item.id == agent.model_id && item.enabled)
 }
 
 fn build_codex_bridge_toml(
@@ -625,8 +657,11 @@ fn build_codex_bridge_toml(
         TomlValue::Table(model_providers),
     );
 
-    let picker_models =
-        build_bridge_models_for_session(&launch.session_providers, &launch.provider.id);
+    let picker_models = build_bridge_models_for_session(
+        &launch.session_providers,
+        &launch.provider.id,
+        &launch.model.id,
+    );
     if !picker_models.is_empty() {
         root.insert("models".to_string(), TomlValue::Array(picker_models));
     }
@@ -755,6 +790,7 @@ fn build_codex_bridge_toml(
 fn build_bridge_models_for_session(
     providers: &[ProviderConfig],
     active_provider_id: &str,
+    default_model_id: &str,
 ) -> Vec<TomlValue> {
     let mut ordered_providers = providers
         .iter()
@@ -810,7 +846,12 @@ fn build_bridge_models_for_session(
                 "additional_speed_tiers".to_string(),
                 TomlValue::Array(Vec::new()),
             );
-            entry.insert("is_default".to_string(), TomlValue::Boolean(false));
+            // Mark the launch-selected model as the picker default so the embedded
+            // Sirix CLI and the runtime model catalog stay aligned.
+            entry.insert(
+                "is_default".to_string(),
+                TomlValue::Boolean(model.id == default_model_id),
+            );
             entry.insert("show_in_picker".to_string(), TomlValue::Boolean(true));
             entry.insert("supported_in_api".to_string(), TomlValue::Boolean(true));
             entry.insert(
@@ -869,6 +910,12 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
         if provider.name.trim().is_empty() {
             anyhow::bail!("provider {} name cannot be empty", provider.id);
         }
+        if provider.default_context_window == Some(0) {
+            anyhow::bail!(
+                "provider {} default_context_window must be greater than zero",
+                provider.id
+            );
+        }
         ensure_unique_ids(provider.models.iter().map(|item| item.id.as_str()), "model")?;
         for model in &provider.models {
             if model.id.trim().is_empty() {
@@ -877,7 +924,7 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
             if model.display_name.trim().is_empty() {
                 anyhow::bail!("model {} display_name cannot be empty", model.id);
             }
-            if model.context_window == 0 {
+            if model.context_window == Some(0) {
                 anyhow::bail!(
                     "model {} context_window must be greater than zero",
                     model.id
@@ -972,6 +1019,26 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn effective_model_context_window(provider: &ProviderConfig, model: &ModelConfig) -> u32 {
+    // 用户现在可以只在 Provider 上配置默认上下文窗口，而把具体 Model 留空。
+    // 这里统一收敛“model 显式值 -> provider 默认值 -> Sirix 供应商兜底”的生效顺序，
+    // 保证设置页、模型发现结果和运行时暴露给 CLI 的 catalog 使用同一套结果。
+    model
+        .context_window
+        .or(provider.default_context_window)
+        .unwrap_or_else(|| infer_provider_default_context_window(&provider.kind, &model.id))
+}
+
+pub fn infer_provider_default_context_window(kind: &ProviderKind, model_id: &str) -> u32 {
+    match kind {
+        ProviderKind::Anthropic => 200_000,
+        ProviderKind::Gemini => 1_048_576,
+        ProviderKind::OpenAiResponses if model_id.starts_with("gpt-5") => 400_000,
+        ProviderKind::OpenAiResponses => 200_000,
+        ProviderKind::OpenAiCompatible => 128_000,
+    }
+}
+
 fn parse_config_with_compat(raw: &str, source: &Path) -> anyhow::Result<SirixConfig> {
     match toml::from_str::<SirixConfig>(raw) {
         Ok(parsed) => Ok(parsed),
@@ -1035,10 +1102,11 @@ fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
             id: model_id.clone(),
             display_name: model_id.clone(),
             model_kind: ModelKind::Text,
-            context_window,
+            context_window: None,
             supports_images: true,
             enabled: true,
         }];
+        default_provider.default_context_window = Some(context_window);
     }
 
     if let Some(skills_value) = table.get("skills") {
@@ -1166,6 +1234,7 @@ fn legacy_provider_to_sirix(
             .unwrap_or(id)
             .to_string(),
         kind: legacy_provider_kind(table),
+        default_context_window: Some(context_window),
         base_url: table
             .get("base_url")
             .and_then(TomlValue::as_str)
@@ -1187,7 +1256,7 @@ fn legacy_provider_to_sirix(
             id: default_model_id.to_string(),
             display_name: default_model_id.to_string(),
             model_kind: ModelKind::Text,
-            context_window,
+            context_window: None,
             supports_images: true,
             enabled: true,
         }],
@@ -1698,6 +1767,7 @@ mod tests {
             id: "glm".to_string(),
             name: "GLM".to_string(),
             kind: ProviderKind::OpenAiCompatible,
+            default_context_window: Some(128_000),
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
             api_key_env: "GLM_API_KEY".to_string(),
             api_key: String::new(),
@@ -1707,7 +1777,7 @@ mod tests {
                 id: "glm-5-turbo".to_string(),
                 display_name: "GLM 5 Turbo".to_string(),
                 model_kind: ModelKind::Text,
-                context_window: 128_000,
+                context_window: None,
                 supports_images: false,
                 enabled: true,
             }],
@@ -1773,6 +1843,7 @@ mod tests {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
             kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(200_000),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key_env: "OPENAI_API_KEY".to_string(),
             api_key: String::new(),
@@ -1783,7 +1854,7 @@ mod tests {
                     id: "gpt-5".to_string(),
                     display_name: "GPT-5".to_string(),
                     model_kind: ModelKind::Text,
-                    context_window: 200_000,
+                    context_window: None,
                     supports_images: true,
                     enabled: true,
                 },
@@ -1791,7 +1862,7 @@ mod tests {
                     id: "tts-1".to_string(),
                     display_name: "TTS".to_string(),
                     model_kind: ModelKind::Tts,
-                    context_window: 0,
+                    context_window: None,
                     supports_images: false,
                     enabled: true,
                 },
@@ -1799,7 +1870,7 @@ mod tests {
                     id: "gpt-disabled".to_string(),
                     display_name: "Disabled".to_string(),
                     model_kind: ModelKind::Text,
-                    context_window: 128_000,
+                    context_window: Some(128_000),
                     supports_images: false,
                     enabled: false,
                 },
@@ -1867,6 +1938,10 @@ mod tests {
             model.get("show_in_picker").and_then(TomlValue::as_bool),
             Some(true)
         );
+        assert_eq!(
+            model.get("is_default").and_then(TomlValue::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
@@ -1877,6 +1952,7 @@ mod tests {
             id: "glm".to_string(),
             name: "GLM".to_string(),
             kind: ProviderKind::OpenAiCompatible,
+            default_context_window: Some(128_000),
             base_url: "https://example.com/v1".to_string(),
             api_key_env: String::new(),
             api_key: String::new(),
@@ -1886,7 +1962,7 @@ mod tests {
                 id: "glm-5".to_string(),
                 display_name: "GLM 5".to_string(),
                 model_kind: ModelKind::Text,
-                context_window: 128_000,
+                context_window: None,
                 supports_images: false,
                 enabled: true,
             }],
@@ -1895,6 +1971,7 @@ mod tests {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
             kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(200_000),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key_env: String::new(),
             api_key: String::new(),
@@ -1905,7 +1982,7 @@ mod tests {
                     id: "gpt-5".to_string(),
                     display_name: "GPT-5".to_string(),
                     model_kind: ModelKind::Text,
-                    context_window: 400_000,
+                    context_window: Some(400_000),
                     supports_images: true,
                     enabled: true,
                 },
@@ -1913,7 +1990,7 @@ mod tests {
                     id: "glm-5".to_string(),
                     display_name: "Duplicate GLM".to_string(),
                     model_kind: ModelKind::Text,
-                    context_window: 128_000,
+                    context_window: Some(128_000),
                     supports_images: true,
                     enabled: true,
                 },
@@ -2010,7 +2087,8 @@ config = [
         assert_eq!(parsed.providers[0].id, "crs");
         assert_eq!(parsed.providers[0].kind, ProviderKind::OpenAiResponses);
         assert_eq!(parsed.providers[0].models[0].id, "gpt-5.4");
-        assert_eq!(parsed.providers[0].models[0].context_window, 400000);
+        assert_eq!(parsed.providers[0].default_context_window, Some(400000));
+        assert_eq!(parsed.providers[0].models[0].context_window, None);
         assert_eq!(parsed.agents.len(), 1);
         assert_eq!(parsed.agents[0].provider_id, "crs");
         assert_eq!(parsed.agents[0].model_id, "gpt-5.4");
@@ -2086,5 +2164,33 @@ model = "gpt-5.4"
         );
 
         fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn model_context_window_falls_back_to_provider_default() {
+        let provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(222_000),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "gpt-5".to_string(),
+                display_name: "GPT-5".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: None,
+                supports_images: true,
+                enabled: true,
+            }],
+        };
+
+        assert_eq!(
+            effective_model_context_window(&provider, &provider.models[0]),
+            222_000
+        );
     }
 }

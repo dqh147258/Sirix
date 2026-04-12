@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+const Object _unset = Object();
+
 enum ProviderKind {
   openAiCompatible,
   openAiResponses,
@@ -124,7 +126,7 @@ class AiModelConfig {
     required this.id,
     required this.displayName,
     required this.modelKind,
-    required this.contextWindow,
+    this.contextWindow,
     this.supportsImages = false,
     this.enabled = true,
   });
@@ -132,7 +134,7 @@ class AiModelConfig {
   final String id;
   final String displayName;
   final ModelKind modelKind;
-  final int contextWindow;
+  final int? contextWindow;
   final bool supportsImages;
   final bool enabled;
 
@@ -141,7 +143,7 @@ class AiModelConfig {
       id: json['id'] as String? ?? '',
       displayName: json['display_name'] as String? ?? '',
       modelKind: modelKindFromJson(json['model_kind'] as String?),
-      contextWindow: (json['context_window'] as num?)?.toInt() ?? 0,
+      contextWindow: (json['context_window'] as num?)?.toInt(),
       supportsImages: json['supports_images'] as bool? ?? false,
       enabled: json['enabled'] as bool? ?? true,
     );
@@ -162,7 +164,7 @@ class AiModelConfig {
     String? id,
     String? displayName,
     ModelKind? modelKind,
-    int? contextWindow,
+    Object? contextWindow = _unset,
     bool? supportsImages,
     bool? enabled,
   }) {
@@ -170,7 +172,7 @@ class AiModelConfig {
       id: id ?? this.id,
       displayName: displayName ?? this.displayName,
       modelKind: modelKind ?? this.modelKind,
-      contextWindow: contextWindow ?? this.contextWindow,
+      contextWindow: identical(contextWindow, _unset) ? this.contextWindow : contextWindow as int?,
       supportsImages: supportsImages ?? this.supportsImages,
       enabled: enabled ?? this.enabled,
     );
@@ -183,6 +185,7 @@ class AiProviderConfig {
     required this.id,
     required this.name,
     required this.kind,
+    this.defaultContextWindow,
     this.baseUrl = '',
     this.apiKeyEnv = '',
     this.apiKey = '',
@@ -194,6 +197,7 @@ class AiProviderConfig {
   final String id;
   final String name;
   final ProviderKind kind;
+  final int? defaultContextWindow;
   final String baseUrl;
   final String apiKeyEnv;
   final String apiKey;
@@ -207,6 +211,7 @@ class AiProviderConfig {
       id: json['id'] as String? ?? '',
       name: json['name'] as String? ?? '',
       kind: providerKindFromJson(json['kind'] as String?),
+      defaultContextWindow: (json['default_context_window'] as num?)?.toInt(),
       baseUrl: json['base_url'] as String? ?? '',
       apiKeyEnv: json['api_key_env'] as String? ?? '',
       apiKey: json['api_key'] as String? ?? '',
@@ -224,6 +229,7 @@ class AiProviderConfig {
       'id': id,
       'name': name,
       'kind': _providerKindJson(kind),
+      'default_context_window': defaultContextWindow,
       'base_url': baseUrl,
       'api_key_env': apiKeyEnv,
       'api_key': apiKey,
@@ -237,6 +243,7 @@ class AiProviderConfig {
     String? id,
     String? name,
     ProviderKind? kind,
+    Object? defaultContextWindow = _unset,
     String? baseUrl,
     String? apiKeyEnv,
     String? apiKey,
@@ -248,6 +255,9 @@ class AiProviderConfig {
       id: id ?? this.id,
       name: name ?? this.name,
       kind: kind ?? this.kind,
+      defaultContextWindow: identical(defaultContextWindow, _unset)
+          ? this.defaultContextWindow
+          : defaultContextWindow as int?,
       baseUrl: baseUrl ?? this.baseUrl,
       apiKeyEnv: apiKeyEnv ?? this.apiKeyEnv,
       apiKey: apiKey ?? this.apiKey,

@@ -5,6 +5,8 @@ import 'package:infra_api/infra_api.dart';
 
 import 'ai_settings_state.dart';
 
+const String _defaultAgentId = 'default-agent';
+
 class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   AiSettingsViewModel(this._localClient) : super(const AiSettingsState());
 
@@ -86,7 +88,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   void upsertProvider(AiProviderConfig provider) {
     final next = _upsertById(state.config.providers, provider, (item) => item.id);
     state = state.copyWith(
-      config: state.config.copyWith(providers: next),
+      config: _reconcileDefaultAgent(state.config.copyWith(providers: next)),
       clearError: true,
       clearNotice: true,
     );
@@ -100,10 +102,28 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         .where((item) => item.providerId != providerId)
         .toList(growable: false);
     state = state.copyWith(
-      config: state.config.copyWith(
+      config: _reconcileDefaultAgent(state.config.copyWith(
         providers: providers,
         agents: agents,
-      ),
+      )),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateProviderDefaultContextWindow({
+    required String providerId,
+    required int? contextWindow,
+  }) {
+    final providers = [
+      for (final provider in state.config.providers)
+        if (provider.id == providerId)
+          provider.copyWith(defaultContextWindow: contextWindow)
+        else
+          provider,
+    ];
+    state = state.copyWith(
+      config: _reconcileDefaultAgent(state.config.copyWith(providers: providers)),
       clearError: true,
       clearNotice: true,
     );
@@ -177,7 +197,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
           provider,
     ];
     state = state.copyWith(
-      config: state.config.copyWith(providers: providers),
+      config: _reconcileDefaultAgent(state.config.copyWith(providers: providers)),
       clearError: true,
       clearNotice: true,
     );
@@ -201,9 +221,24 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         .where((item) => !(item.providerId == providerId && item.modelId == modelId))
         .toList(growable: false);
     state = state.copyWith(
-      config: state.config.copyWith(
+      config: _reconcileDefaultAgent(state.config.copyWith(
         providers: providers,
         agents: agents,
+      )),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void setDefaultModel({
+    required String providerId,
+    required String modelId,
+  }) {
+    state = state.copyWith(
+      config: _reconcileDefaultAgent(
+        state.config,
+        preferredProviderId: providerId,
+        preferredModelId: modelId,
       ),
       clearError: true,
       clearNotice: true,
@@ -279,7 +314,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   void upsertAgent(AgentConfigModel agent) {
     final next = _upsertById(state.config.agents, agent, (item) => item.id);
     state = state.copyWith(
-      config: state.config.copyWith(agents: next),
+      config: _reconcileDefaultAgent(state.config.copyWith(agents: next)),
       clearError: true,
       clearNotice: true,
     );
@@ -289,7 +324,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     final agents =
         state.config.agents.where((item) => item.id != agentId).toList(growable: false);
     state = state.copyWith(
-      config: state.config.copyWith(agents: agents),
+      config: _reconcileDefaultAgent(state.config.copyWith(agents: agents)),
       clearError: true,
       clearNotice: true,
     );
@@ -298,6 +333,81 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   String createStableId(String prefix) {
     final micros = DateTime.now().microsecondsSinceEpoch;
     return '$prefix-$micros';
+  }
+
+  SirixAiConfig _reconcileDefaultAgent(
+    SirixAiConfig config, {
+    String? preferredProviderId,
+    String? preferredModelId,
+  }) {
+    // Provider/Model 页面现在直接维护 Sirix CLI 的“默认模型”。
+    // 运行时默认启动链路仍然以 `default-agent` 为入口，所以这里把页面上的
+    // 默认模型选择同步收敛到 `default-agent`，避免再引入第二套默认模型存储。
+    final providers = config.providers;
+    final existingDefaultAgent = _firstWhereOrNull(
+      config.agents,
+      (item) => item.id == _defaultAgentId,
+    );
+    final eligibleModels = [
+      for (final provider in providers)
+        if (provider.enabled)
+          for (final model in provider.models)
+            if (model.enabled && model.modelKind == ModelKind.text)
+              (providerId: provider.id, modelId: model.id),
+    ];
+
+    ({String providerId, String modelId})? selected;
+    if (preferredProviderId != null &&
+        preferredModelId != null &&
+        eligibleModels.any(
+          (item) => item.providerId == preferredProviderId && item.modelId == preferredModelId,
+        )) {
+      selected = (providerId: preferredProviderId, modelId: preferredModelId);
+    } else if (existingDefaultAgent != null &&
+        eligibleModels.any(
+          (item) =>
+              item.providerId == existingDefaultAgent.providerId &&
+              item.modelId == existingDefaultAgent.modelId,
+        )) {
+      selected = (
+        providerId: existingDefaultAgent.providerId,
+        modelId: existingDefaultAgent.modelId,
+      );
+    } else {
+      selected = eligibleModels.isEmpty ? null : eligibleModels.first;
+    }
+
+    final otherAgents =
+        config.agents.where((item) => item.id != _defaultAgentId).toList(growable: false);
+    if (selected == null) {
+      return config.copyWith(agents: otherAgents);
+    }
+
+    final defaultAgent = (existingDefaultAgent ?? _buildDefaultAgent()).copyWith(
+      id: _defaultAgentId,
+      name: existingDefaultAgent?.name ?? 'Default Agent',
+      providerId: selected.providerId,
+      modelId: selected.modelId,
+      enabled: true,
+    );
+
+    return config.copyWith(agents: [defaultAgent, ...otherAgents]);
+  }
+
+  AgentConfigModel _buildDefaultAgent() {
+    return const AgentConfigModel(
+      id: _defaultAgentId,
+      name: 'Default Agent',
+      providerId: '',
+      modelId: '',
+      builtinToolsEnabled: true,
+      capabilityRules: [
+        AgentCapabilityRuleModel(key: 'builtin.shell', approvalMode: ApprovalMode.allow),
+        AgentCapabilityRuleModel(key: 'builtin.edit', approvalMode: ApprovalMode.allow),
+        AgentCapabilityRuleModel(key: 'builtin.plan', approvalMode: ApprovalMode.allow),
+      ],
+      enabled: true,
+    );
   }
 }
 
@@ -315,6 +425,15 @@ List<T> _upsertById<T>(
   final next = [...items];
   next[index] = incoming;
   return next;
+}
+
+T? _firstWhereOrNull<T>(Iterable<T> items, bool Function(T) test) {
+  for (final item in items) {
+    if (test(item)) {
+      return item;
+    }
+  }
+  return null;
 }
 
 final aiSettingsViewModelProvider =

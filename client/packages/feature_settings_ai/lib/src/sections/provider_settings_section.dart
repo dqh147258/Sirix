@@ -21,6 +21,10 @@ class ProviderSettingsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final defaultAgent = state.config.agents.where((item) => item.id == 'default-agent').isEmpty
+        ? null
+        : state.config.agents.firstWhere((item) => item.id == 'default-agent');
+
     return ListView(
       children: [
         AiSettingsSectionHeader(
@@ -50,8 +54,14 @@ class ProviderSettingsSection extends StatelessWidget {
         for (final provider in state.config.providers) ...[
           _ProviderCard(
             provider: provider,
+            defaultProviderId: defaultAgent?.providerId,
+            defaultModelId: defaultAgent?.modelId,
             discoveringModels: state.discoveringProviderIds.contains(provider.id),
             onToggleEnabled: (value) => vm.upsertProvider(provider.copyWith(enabled: value)),
+            onSetDefaultProviderContext: (value) => vm.updateProviderDefaultContextWindow(
+              providerId: provider.id,
+              contextWindow: value,
+            ),
             onEdit: () async {
               final edited = await _showProviderDialog(
                 context,
@@ -89,6 +99,10 @@ class ProviderSettingsSection extends StatelessWidget {
                 vm.upsertModel(providerId: provider.id, model: edited);
               }
             },
+            onSetDefaultModel: (modelId) => vm.setDefaultModel(
+              providerId: provider.id,
+              modelId: modelId,
+            ),
             onDeleteModel: (modelId) => vm.removeModel(providerId: provider.id, modelId: modelId),
           ),
           const SizedBox(height: 12),
@@ -101,24 +115,32 @@ class ProviderSettingsSection extends StatelessWidget {
 class _ProviderCard extends StatelessWidget {
   const _ProviderCard({
     required this.provider,
+    required this.defaultProviderId,
+    required this.defaultModelId,
     required this.discoveringModels,
     required this.onToggleEnabled,
+    required this.onSetDefaultProviderContext,
     required this.onEdit,
     required this.onDelete,
     required this.onDiscoverModels,
     required this.onAddModel,
     required this.onEditModel,
+    required this.onSetDefaultModel,
     required this.onDeleteModel,
   });
 
   final AiProviderConfig provider;
+  final String? defaultProviderId;
+  final String? defaultModelId;
   final bool discoveringModels;
   final ValueChanged<bool> onToggleEnabled;
+  final ValueChanged<int?> onSetDefaultProviderContext;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
   final VoidCallback onDiscoverModels;
   final VoidCallback onAddModel;
   final ValueChanged<AiModelConfig> onEditModel;
+  final ValueChanged<String> onSetDefaultModel;
   final ValueChanged<String> onDeleteModel;
 
   @override
@@ -164,6 +186,10 @@ class _ProviderCard extends StatelessWidget {
               AiSettingsChip(label: provider.id),
               AiSettingsChip(label: _providerKindLabel(provider.kind)),
               AiSettingsChip(label: provider.enabled ? 'Enabled' : 'Disabled'),
+              AiSettingsChip(
+                label: 'default ctx=${_providerContextLabel(provider)}',
+              ),
+              if (provider.id == defaultProviderId) const AiSettingsChip(label: 'CLI default'),
             ],
           ),
           const SizedBox(height: 12),
@@ -172,6 +198,32 @@ class _ProviderCard extends StatelessWidget {
               padding: const EdgeInsets.only(bottom: 8),
               child: Text('Base URL: ${provider.baseUrl}'),
             ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Provider default context window: ${_providerContextLabel(provider)}',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: () async {
+                    final updated = await _showProviderContextWindowDialog(
+                      context,
+                      provider: provider,
+                    );
+                    if (updated != null) {
+                      onSetDefaultProviderContext(updated);
+                    }
+                  },
+                  icon: const Icon(Icons.tune_rounded),
+                  label: const Text('Edit Default Context'),
+                ),
+              ],
+            ),
+          ),
           Text(
             'Models',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
@@ -204,10 +256,14 @@ class _ProviderCard extends StatelessWidget {
                           runSpacing: 8,
                           children: [
                             AiSettingsChip(label: _modelKindLabel(model.modelKind)),
-                            AiSettingsChip(label: 'ctx=${model.contextWindow}'),
+                            AiSettingsChip(
+                              label: 'ctx=${_effectiveContextWindowLabel(provider, model)}',
+                            ),
                             AiSettingsChip(
                               label: model.supportsImages ? 'images:on' : 'images:off',
                             ),
+                            if (_isDefaultModel(provider, model))
+                              const AiSettingsChip(label: 'CLI default'),
                           ],
                         ),
                       ],
@@ -223,6 +279,19 @@ class _ProviderCard extends StatelessWidget {
                       IconButton(
                         onPressed: () => onEditModel(model),
                         icon: const Icon(Icons.edit_outlined),
+                      ),
+                      IconButton(
+                        onPressed: model.enabled && model.modelKind == ModelKind.text
+                            ? () => onSetDefaultModel(model.id)
+                            : null,
+                        icon: Icon(
+                          _isDefaultModel(provider, model)
+                              ? Icons.star_rounded
+                              : Icons.star_outline_rounded,
+                        ),
+                        tooltip: _isDefaultModel(provider, model)
+                            ? 'Current CLI default model'
+                            : 'Set as CLI default model',
                       ),
                       IconButton(
                         onPressed: () => onDeleteModel(model.id),
@@ -260,6 +329,10 @@ class _ProviderCard extends StatelessWidget {
       ),
     );
   }
+
+  bool _isDefaultModel(AiProviderConfig provider, AiModelConfig model) {
+    return provider.id == defaultProviderId && model.id == defaultModelId;
+  }
 }
 
 Future<_ProviderDialogResult?> _showProviderDialog(
@@ -279,6 +352,9 @@ Future<_ProviderDialogResult?> _showProviderDialog(
   );
   final apiKeyEnvController = TextEditingController(
     text: existing?.apiKeyEnv ?? initialTemplate?.apiKeyEnv ?? '',
+  );
+  final defaultContextWindowController = TextEditingController(
+    text: (existing?.defaultContextWindow ?? initialTemplate?.defaultContextWindow)?.toString() ?? '',
   );
   final apiKeyController = TextEditingController(text: existing?.apiKey ?? '');
   final headersController = TextEditingController(
@@ -328,6 +404,8 @@ Future<_ProviderDialogResult?> _showProviderDialog(
                   nameController.text = template.name;
                   baseUrlController.text = template.baseUrl;
                   apiKeyEnvController.text = template.apiKeyEnv;
+                  defaultContextWindowController.text =
+                      template.defaultContextWindow?.toString() ?? '';
                   headersController.text = template.headersJson;
                   kind = template.kind;
                   fetchModelsAfterSave = true;
@@ -369,6 +447,14 @@ Future<_ProviderDialogResult?> _showProviderDialog(
             TextField(
               controller: baseUrlController,
               decoration: const InputDecoration(labelText: 'Base URL'),
+            ),
+            TextField(
+              controller: defaultContextWindowController,
+              decoration: const InputDecoration(
+                labelText: 'Provider Default Context Window',
+                hintText: 'Leave blank to use Sirix vendor defaults',
+              ),
+              keyboardType: TextInputType.number,
             ),
             TextField(
               controller: apiKeyEnvController,
@@ -421,6 +507,7 @@ Future<_ProviderDialogResult?> _showProviderDialog(
       id: idController.text.trim(),
       name: nameController.text.trim(),
       kind: kind,
+      defaultContextWindow: int.tryParse(defaultContextWindowController.text.trim()),
       baseUrl: baseUrlController.text.trim(),
       apiKeyEnv: apiKeyEnvController.text.trim(),
       apiKey: apiKeyController.text.trim(),
@@ -441,7 +528,7 @@ Future<AiModelConfig?> _showModelDialog(
   final idController = TextEditingController(text: existing?.id ?? vm.createStableId('model'));
   final nameController = TextEditingController(text: existing?.displayName ?? 'New Model');
   final contextController = TextEditingController(
-    text: (existing?.contextWindow ?? 128000).toString(),
+    text: existing?.contextWindow?.toString() ?? '',
   );
   var kind = existing?.modelKind ?? ModelKind.text;
   var supportsImages = existing?.supportsImages ?? false;
@@ -483,7 +570,10 @@ Future<AiModelConfig?> _showModelDialog(
             ),
             TextField(
               controller: contextController,
-              decoration: const InputDecoration(labelText: 'Context Window'),
+              decoration: const InputDecoration(
+                labelText: 'Context Window (optional)',
+                hintText: 'Leave blank to use the provider default context window',
+              ),
               keyboardType: TextInputType.number,
             ),
             Wrap(
@@ -520,10 +610,43 @@ Future<AiModelConfig?> _showModelDialog(
     id: idController.text.trim(),
     displayName: nameController.text.trim(),
     modelKind: kind,
-    contextWindow: int.tryParse(contextController.text.trim()) ?? 128000,
+    contextWindow: int.tryParse(contextController.text.trim()),
     supportsImages: supportsImages,
     enabled: enabled,
   );
+}
+
+Future<int?> _showProviderContextWindowDialog(
+  BuildContext context, {
+  required AiProviderConfig provider,
+}) async {
+  final controller = TextEditingController(
+    text: provider.defaultContextWindow?.toString() ?? '',
+  );
+  final submitted = await showAiSettingsDialog<bool>(
+    context: context,
+    title: 'Provider Default Context',
+    subtitle:
+        'Models without an explicit context window inherit this provider-level default. Leave blank to fall back to Sirix vendor heuristics.',
+    width: 520,
+    child: TextField(
+      controller: controller,
+      decoration: const InputDecoration(
+        labelText: 'Default Context Window',
+        hintText: 'Leave blank to use Sirix defaults',
+      ),
+      keyboardType: TextInputType.number,
+    ),
+    actions: [
+      TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+      FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Save')),
+    ],
+  );
+
+  if (submitted != true) {
+    return null;
+  }
+  return int.tryParse(controller.text.trim());
 }
 
 class _ProviderDialogResult {
@@ -536,6 +659,25 @@ class _ProviderDialogResult {
   final bool fetchModelsAfterSave;
 }
 
+String _providerContextLabel(AiProviderConfig provider) {
+  final value = provider.defaultContextWindow;
+  return value == null ? 'auto' : value.toString();
+}
+
+String _effectiveContextWindowLabel(AiProviderConfig provider, AiModelConfig model) {
+  // 模型上下文长度允许留空；当留空时明确展示它会回退到 Provider 默认值，
+  // 这样设置页里能直接看出最终生效来源，而不是只看到一个空字段。
+  final modelContext = model.contextWindow;
+  if (modelContext != null) {
+    return modelContext.toString();
+  }
+  final providerDefault = provider.defaultContextWindow;
+  if (providerDefault != null) {
+    return '$providerDefault · provider';
+  }
+  return 'auto';
+}
+
 class _ProviderTemplate {
   const _ProviderTemplate({
     required this.id,
@@ -544,6 +686,7 @@ class _ProviderTemplate {
     required this.baseUrl,
     required this.apiKeyEnv,
     required this.description,
+    this.defaultContextWindow,
     this.headersJson = '{}',
   });
 
@@ -553,6 +696,7 @@ class _ProviderTemplate {
   final String baseUrl;
   final String apiKeyEnv;
   final String description;
+  final int? defaultContextWindow;
   final String headersJson;
 }
 
@@ -566,6 +710,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.openai.com/v1',
     apiKeyEnv: 'OPENAI_API_KEY',
     description: 'OpenAI native Responses API endpoint.',
+    defaultContextWindow: 200000,
   ),
   _ProviderTemplate(
     id: 'openrouter',
@@ -574,6 +719,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://openrouter.ai/api/v1',
     apiKeyEnv: 'OPENROUTER_API_KEY',
     description: 'OpenAI-compatible router with a large multi-vendor model catalog.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'gemini',
@@ -582,6 +728,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     apiKeyEnv: 'GEMINI_API_KEY',
     description: 'Gemini OpenAI compatibility endpoint.',
+    defaultContextWindow: 1048576,
   ),
   _ProviderTemplate(
     id: 'anthropic',
@@ -590,6 +737,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.anthropic.com/v1',
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     description: 'Anthropic native API endpoint.',
+    defaultContextWindow: 200000,
   ),
   _ProviderTemplate(
     id: 'groq',
@@ -598,6 +746,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.groq.com/openai/v1',
     apiKeyEnv: 'GROQ_API_KEY',
     description: 'Groq OpenAI-compatible endpoint for fast inference.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'xai',
@@ -606,6 +755,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.x.ai/v1',
     apiKeyEnv: 'XAI_API_KEY',
     description: 'xAI OpenAI-compatible endpoint.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'mistral',
@@ -614,6 +764,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.mistral.ai/v1',
     apiKeyEnv: 'MISTRAL_API_KEY',
     description: 'Mistral model management and chat endpoint.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'moonshot',
@@ -622,6 +773,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.moonshot.ai/v1',
     apiKeyEnv: 'MOONSHOT_API_KEY',
     description: 'Moonshot OpenAI-compatible endpoint.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'together',
@@ -630,6 +782,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.together.xyz/v1',
     apiKeyEnv: 'TOGETHER_API_KEY',
     description: 'Together AI OpenAI-compatible endpoint.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'sambanova',
@@ -638,6 +791,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'https://api.sambanova.ai/v1',
     apiKeyEnv: 'SAMBANOVA_API_KEY',
     description: 'SambaNova OpenAI-compatible endpoint.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'ollama',
@@ -646,6 +800,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'http://localhost:11434/v1',
     apiKeyEnv: '',
     description: 'Local Ollama server exposing OpenAI-compatible routes.',
+    defaultContextWindow: 128000,
   ),
   _ProviderTemplate(
     id: 'lmstudio',
@@ -654,6 +809,7 @@ const List<_ProviderTemplate> _providerTemplates = [
     baseUrl: 'http://localhost:1234/v1',
     apiKeyEnv: '',
     description: 'Local LM Studio OpenAI-compatible endpoint.',
+    defaultContextWindow: 128000,
   ),
 ];
 

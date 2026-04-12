@@ -27,8 +27,8 @@ class SkillsSettingsSection extends StatelessWidget {
     return ListView(
       children: [
         AiSettingsSectionHeader(
-          title: 'Skills',
-          subtitle: 'Import local skill folders, decide whether they are active, and control whether their scripts may step outside the sandbox.',
+          title: 'Skills Management',
+          subtitle: 'Configure and deploy computational capabilities for the orchestration layer. Manage sandbox permissions and runtime paths for your AI agents.',
           action: Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -71,80 +71,276 @@ class SkillsSettingsSection extends StatelessWidget {
             ],
           ),
         ),
-        if (state.config.skills.isEmpty)
-          const AiSettingsEmptyState(text: 'No skills configured.'),
-        for (final skill in state.config.skills) ...[
-          AiSettingsCard(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        const SizedBox(height: 16),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final cardWidth = constraints.maxWidth < 600 ? constraints.maxWidth : (constraints.maxWidth - 16) / 2;
+            return Wrap(
+              spacing: 16,
+              runSpacing: 16,
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(skill.name, style: Theme.of(context).textTheme.titleMedium),
-                    ),
-                    IconButton(
-                      onPressed: () async {
+                for (final skill in state.config.skills)
+                  SizedBox(
+                    width: cardWidth,
+                    child: _SkillGridCard(
+                      skill: skill,
+                      vm: vm,
+                      onEdit: () async {
                         final edited = await _showSkillDialog(context, vm: vm, existing: skill);
                         if (edited != null) {
                           vm.upsertSkill(edited);
                         }
                       },
-                      icon: const Icon(Icons.edit_outlined),
                     ),
-                    IconButton(
-                      onPressed: () => vm.removeSkill(skill.id),
-                      icon: const Icon(Icons.delete_outline_rounded),
-                    ),
-                  ],
-                ),
-                Text(
-                  skill.path,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: palette.textSecondary,
+                  ),
+                SizedBox(
+                  width: cardWidth,
+                  child: InkWell(
+                    onTap: () async {
+                      final created = await _showSkillDialog(context, vm: vm, existing: null);
+                      if (created != null) {
+                        vm.upsertSkill(created);
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      height: 250,
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: palette.glassStroke,
+                          style: BorderStyle.solid, 
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                        color: Colors.transparent,
                       ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: palette.surfaceRaised,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(Icons.add_rounded, color: palette.textMuted),
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Register New Skill',
+                            style: TextStyle(
+                              color: palette.textSecondary,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'OR IMPORT FOLDER',
+                            style: TextStyle(
+                              color: palette.textMuted,
+                              fontSize: 10,
+                              fontFamily: 'JetBrains Mono',
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    AiSettingsChip(label: skill.id),
-                    AiSettingsChip(
-                      label: skill.enabled ? 'enabled' : 'disabled',
-                    ),
-                    AiSettingsChip(
-                      label: skill.allowOutsideSandbox ? 'sandbox:outside' : 'sandbox:workspace',
-                    ),
-                  ],
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _SkillGridCard extends StatelessWidget {
+  const _SkillGridCard({
+    required this.skill,
+    required this.vm,
+    required this.onEdit,
+  });
+
+  final SkillConfigModel skill;
+  final AiSettingsViewModel vm;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.surfaceRaised,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header Area
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: palette.primaryBright.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Icon(Icons.public_rounded, color: palette.primaryBright, size: 24),
                 ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 16,
-                  runSpacing: 8,
-                  children: [
-                    AiSettingsToggleTile(
-                      title: 'Enabled',
-                      value: skill.enabled,
-                      onChanged: (value) => vm.upsertSkill(skill.copyWith(enabled: value)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        skill.name,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'ID: ${skill.id}',
+                        style: TextStyle(
+                          fontFamily: 'JetBrains Mono',
+                          fontSize: 10,
+                          color: palette.primaryBright.withValues(alpha: 0.7),
+                          letterSpacing: 1.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Switch(
+                  value: skill.enabled,
+                  onChanged: (val) => vm.upsertSkill(skill.copyWith(enabled: val)),
+                  activeThumbColor: palette.primaryBright,
+                ),
+                PopupMenuButton<_SkillCardAction>(
+                  icon: Icon(Icons.more_vert_rounded, color: palette.textMuted, size: 20),
+                  color: palette.surfaceRaised,
+                  onSelected: (action) {
+                    // Run actions after the popup closes so edit/delete stays reliable.
+                    switch (action) {
+                      case _SkillCardAction.edit:
+                        onEdit();
+                        break;
+                      case _SkillCardAction.delete:
+                        vm.removeSkill(skill.id);
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: _SkillCardAction.edit,
+                      child: Text('Edit Skill'),
                     ),
-                    AiSettingsToggleTile(
-                      title: 'Allow Outside Sandbox',
-                      subtitle: 'Use only for trusted local skills.',
-                      width: 340,
-                      value: skill.allowOutsideSandbox,
-                      onChanged: (value) =>
-                          vm.upsertSkill(skill.copyWith(allowOutsideSandbox: value)),
+                    PopupMenuItem(
+                      value: _SkillCardAction.delete,
+                      child: Text('Delete Skill', style: TextStyle(color: palette.error)),
                     ),
                   ],
                 ),
               ],
             ),
           ),
+          
+          // Execution Path
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'EXECUTION PATH',
+                  style: TextStyle(
+                    fontFamily: 'Inter',
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.2,
+                    color: palette.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: palette.surfaceMuted.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+                  ),
+                  child: Text(
+                    skill.path,
+                    style: TextStyle(
+                      fontFamily: 'JetBrains Mono',
+                      fontSize: 11,
+                      color: palette.secondary,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // Allow Outside Sandbox
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: palette.error.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: palette.error.withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded, color: palette.error, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Allow Outside Sandbox',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: palette.textPrimary,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    height: 24,
+                    child: Switch(
+                      value: skill.allowOutsideSandbox,
+                      onChanged: (val) => vm.upsertSkill(skill.copyWith(allowOutsideSandbox: val)),
+                      activeThumbColor: palette.error,
+                      inactiveThumbColor: palette.textMuted,
+                      inactiveTrackColor: palette.surfaceMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ],
-      ],
+      ),
     );
   }
 }
@@ -156,6 +352,11 @@ String _folderName(String path) {
     return 'Imported Skill';
   }
   return parts.last;
+}
+
+enum _SkillCardAction {
+  edit,
+  delete,
 }
 
 Future<SkillConfigModel?> _showSkillDialog(

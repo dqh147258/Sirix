@@ -38,8 +38,17 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
       padding: const EdgeInsets.all(20),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final isNarrow = constraints.maxWidth < 1100;
-          final nav = _NavPane(state: state, vm: vm, compact: isNarrow);
+          // Keep the desktop shell anchored to the left; when space shrinks,
+          // collapse the nav into icon-only mode instead of switching to chips.
+          final useCollapsedNav = constraints.maxWidth < 1280;
+          final navWidth = useCollapsedNav ? 88.0 : 260.0;
+          final contentMaxWidth = constraints.maxWidth - navWidth - 18;
+          final isTightContent = contentMaxWidth < 900;
+          final nav = _NavPane(
+            state: state,
+            vm: vm,
+            mode: useCollapsedNav ? _NavPaneMode.collapsed : _NavPaneMode.full,
+          );
           final content = Container(
             decoration: BoxDecoration(
               color: palette.surface,
@@ -72,7 +81,9 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       SizedBox(
-                        width: isNarrow ? constraints.maxWidth - 44 : 480,
+                        width: isTightContent
+                            ? (contentMaxWidth - 44).clamp(260.0, 520.0)
+                            : 480,
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -150,20 +161,10 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
             ),
           );
 
-          if (isNarrow) {
-            return Column(
-              children: [
-                nav,
-                const SizedBox(height: 14),
-                Expanded(child: content),
-              ],
-            );
-          }
-
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(width: 260, child: nav),
+              SizedBox(width: navWidth, child: nav),
               const SizedBox(width: 18),
               Expanded(child: content),
             ],
@@ -178,16 +179,17 @@ class _NavPane extends StatelessWidget {
   const _NavPane({
     required this.state,
     required this.vm,
-    required this.compact,
+    required this.mode,
   });
 
   final AiSettingsState state;
   final AiSettingsViewModel vm;
-  final bool compact;
+  final _NavPaneMode mode;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
+    final isCollapsed = mode == _NavPaneMode.collapsed;
     final items = [
       (AiSettingsSection.cli, 'CLI', 'Global prompt and runtime defaults', Icons.code_rounded),
       (AiSettingsSection.providers, 'Providers', 'Model backends and capabilities', Icons.hub_rounded),
@@ -196,54 +198,44 @@ class _NavPane extends StatelessWidget {
       (AiSettingsSection.agents, 'Agents', 'Profiles, approvals, and tool routing', Icons.smart_toy_rounded),
     ];
 
-    if (compact) {
-      return AiSettingsCard(
-        padding: const EdgeInsets.all(12),
-        child: Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: [
-            for (final item in items)
-              ChoiceChip(
-                label: Text(item.$2),
-                selected: state.selectedSection == item.$1,
-                onSelected: (_) => vm.selectSection(item.$1),
-              ),
-          ],
-        ),
-      );
-    }
-
     return Container(
       decoration: BoxDecoration(
         color: palette.surfaceRaised,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
       ),
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 16, 14, 16),
+        padding: EdgeInsets.fromLTRB(isCollapsed ? 8 : 14, 16, isCollapsed ? 8 : 14, 16),
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(6, 2, 6, 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Control Surface',
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontFamily: 'Space Grotesk',
-                        fontWeight: FontWeight.w700,
+            padding: EdgeInsets.fromLTRB(isCollapsed ? 0 : 6, 2, isCollapsed ? 0 : 6, 16),
+            child: isCollapsed
+                ? Tooltip(
+                    message: 'Control Surface',
+                    child: Icon(
+                      Icons.dashboard_customize_rounded,
+                      color: palette.primaryBright,
+                    ),
+                  )
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Control Surface',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontFamily: 'Space Grotesk',
+                              fontWeight: FontWeight.w700,
+                            ),
                       ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'A desktop-native shell for local AI runtime controls, aligned with the rest of the Sirix workspace.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: palette.textMuted,
+                      const SizedBox(height: 4),
+                      Text(
+                        'A desktop-native shell for local AI runtime controls, aligned with the rest of the Sirix workspace.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: palette.textMuted,
+                            ),
                       ),
-                ),
-              ],
-            ),
+                    ],
+                  ),
           ),
           for (final item in items)
             _NavItem(
@@ -251,6 +243,7 @@ class _NavPane extends StatelessWidget {
               label: item.$2,
               subtitle: item.$3,
               active: state.selectedSection == item.$1,
+              collapsed: isCollapsed,
               onTap: () => vm.selectSection(item.$1),
             ),
         ],
@@ -284,6 +277,7 @@ class _NavItem extends StatelessWidget {
     required this.label,
     required this.subtitle,
     required this.active,
+    required this.collapsed,
     required this.onTap,
   });
 
@@ -291,6 +285,7 @@ class _NavItem extends StatelessWidget {
   final String label;
   final String subtitle;
   final bool active;
+  final bool collapsed;
   final VoidCallback onTap;
 
   @override
@@ -298,70 +293,90 @@ class _NavItem extends StatelessWidget {
     final palette = context.sirix;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          borderRadius: BorderRadius.circular(18),
+          borderRadius: BorderRadius.circular(4),
           onTap: onTap,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            decoration: BoxDecoration(
-              color: active
-                  ? palette.primary.withValues(alpha: 0.14)
-                  : palette.surface.withValues(alpha: 0.28),
-              borderRadius: BorderRadius.circular(18),
-              border: active
-                  ? Border.all(color: palette.primaryBright.withValues(alpha: 0.24))
-                  : Border.all(color: Colors.white.withValues(alpha: 0.03)),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    color: active
-                        ? palette.primary.withValues(alpha: 0.18)
-                        : palette.surfaceMuted.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Icon(
-                    icon,
-                    size: 18,
-                    color: active ? palette.primaryBright : palette.textMuted,
+          child: Tooltip(
+            message: label,
+            waitDuration: const Duration(milliseconds: 250),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: collapsed ? 12 : 16,
+                vertical: 12,
+              ),
+              decoration: BoxDecoration(
+                color: active
+                    ? palette.surfaceMuted.withValues(alpha: 0.7)
+                    : Colors.transparent,
+                border: Border(
+                  left: BorderSide(
+                    color: active ? palette.primaryBright : Colors.transparent,
+                    width: 3,
                   ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        label,
-                        style: TextStyle(
-                          color: active ? palette.primaryBright : palette.textPrimary,
-                          fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+              ),
+              child: collapsed
+                  ? Center(
+                      child: Icon(
+                        icon,
+                        size: 20,
+                        color: active ? palette.primaryBright : palette.textMuted,
+                      ),
+                    )
+                  : Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        Icon(
+                          icon,
+                          size: 20,
+                          color: active ? palette.primaryBright : palette.textMuted,
                         ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        subtitle,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: palette.textMuted,
-                            ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                label,
+                                style: TextStyle(
+                                  color: active ? palette.primaryBright : palette.textSecondary,
+                                  fontWeight: active ? FontWeight.w700 : FontWeight.w600,
+                                  fontSize: 12,
+                                  letterSpacing: 0.5,
+                                  fontFamily: 'Inter',
+                                ).copyWith(
+                                  fontFamily: 'Space Grotesk', // Override for titles
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                subtitle,
+                                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      fontSize: 10,
+                                      color: palette.textMuted,
+                                    ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
             ),
           ),
         ),
       ),
     );
   }
+}
+
+enum _NavPaneMode {
+  full,
+  collapsed,
 }
 
 class _Banner extends StatelessWidget {

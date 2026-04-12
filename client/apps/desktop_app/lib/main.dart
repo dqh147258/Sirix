@@ -139,6 +139,9 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
     ];
     final currentSection =
         sections[_navigationIndex.clamp(0, sections.length - 1)];
+    final viewportWidth = MediaQuery.sizeOf(context).width;
+    final useCollapsedSidebar = viewportWidth < 1320;
+    final sidebarWidth = useCollapsedSidebar ? 84.0 : 240.0;
 
     return Scaffold(
       backgroundColor:
@@ -279,7 +282,7 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                   children: [
                     // --- SIDEBAR ---
                     Container(
-                      width: 240,
+                      width: sidebarWidth,
                       decoration: BoxDecoration(
                         color: const Color(
                             0xFF0C0E11), // surface-container-lowest equivalent
@@ -293,99 +296,98 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Padding(
-                            padding: const EdgeInsets.fromLTRB(20, 24, 20, 24),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'RemoteTerm Pro',
-                                  style: TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.w900,
-                                    fontFamily: 'Space Grotesk',
-                                    color: palette.textPrimary,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'CONNECTED: ${authorizeState.pendingRequests.length} NODES',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: palette.textMuted,
-                                    fontFamily: 'Space Grotesk',
-                                    letterSpacing: 1.2,
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ],
+                            padding: EdgeInsets.fromLTRB(
+                              useCollapsedSidebar ? 12 : 20,
+                              24,
+                              useCollapsedSidebar ? 12 : 20,
+                              24,
                             ),
-                          ),
-                          Expanded(
-                            child: ListView(
-                              padding: const EdgeInsets.symmetric(horizontal: 12),
-                              children: sections.asMap().entries.map((entry) {
-                                final isActive = _navigationIndex == entry.key;
-                                return Padding(
-                                  padding: const EdgeInsets.only(bottom: 4),
-                                  child: Material(
-                                    color: Colors.transparent,
-                                    child: InkWell(
-                                      borderRadius: BorderRadius.circular(8),
-                                      onTap: () {
-                                        setState(() => _navigationIndex = entry.key);
-                                      },
+                            child: useCollapsedSidebar
+                                ? Center(
+                                    child: Tooltip(
+                                      message:
+                                          'RemoteTerm Pro\nCONNECTED: ${authorizeState.pendingRequests.length} NODES',
+                                      waitDuration: const Duration(milliseconds: 250),
                                       child: Container(
+                                        width: 44,
+                                        height: 44,
                                         decoration: BoxDecoration(
-                                          color: isActive
-                                              ? palette.primary.withValues(alpha: 0.15)
-                                              : Colors.transparent,
-                                          borderRadius: BorderRadius.circular(8),
+                                          color: palette.surfaceRaised,
+                                          borderRadius: BorderRadius.circular(12),
+                                          border: Border.all(
+                                            color: Colors.white.withValues(alpha: 0.05),
+                                          ),
                                         ),
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 12, vertical: 12),
-                                        child: Row(
-                                          children: [
-                                            Icon(
-                                              entry.value.icon,
-                                              size: 18,
-                                              color: isActive
-                                                  ? palette.primaryBright
-                                                  : palette.textMuted,
-                                            ),
-                                            const SizedBox(width: 12),
-                                            Text(
-                                              entry.value.label,
-                                              style: TextStyle(
-                                                color: isActive
-                                                    ? palette.primaryBright
-                                                    : palette.textMuted,
-                                                fontSize: 13,
-                                                fontWeight:
-                                                    isActive ? FontWeight.w600 : FontWeight.w500,
-                                              ),
-                                            ),
-                                          ],
+                                        child: Icon(
+                                          Icons.terminal_rounded,
+                                          color: palette.primaryBright,
                                         ),
                                       ),
                                     ),
+                                  )
+                                : Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'RemoteTerm Pro',
+                                        style: TextStyle(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.w900,
+                                          fontFamily: 'Space Grotesk',
+                                          color: palette.textPrimary,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 6),
+                                      Text(
+                                        'CONNECTED: ${authorizeState.pendingRequests.length} NODES',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          color: palette.textMuted,
+                                          fontFamily: 'Space Grotesk',
+                                          letterSpacing: 1.2,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ],
                                   ),
+                          ),
+                          Expanded(
+                            child: ListView(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: useCollapsedSidebar ? 10 : 12,
+                              ),
+                              children: sections.asMap().entries.map((entry) {
+                                final isActive = _navigationIndex == entry.key;
+                                return _DesktopSidebarNavItem(
+                                  icon: entry.value.icon,
+                                  label: entry.value.label,
+                                  active: isActive,
+                                  collapsed: useCollapsedSidebar,
+                                  palette: palette,
+                                  onTap: () {
+                                    setState(() => _navigationIndex = entry.key);
+                                  },
                                 );
                               }).toList(),
                             ),
                           ),
                           const SizedBox(height: 16),
                           Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 12),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: useCollapsedSidebar ? 10 : 12,
+                            ),
                             child: Column(
                               children: [
                                 _SidebarFooterItem(
                                   icon: Icons.help_outline_rounded,
                                   label: 'Support',
+                                  collapsed: useCollapsedSidebar,
                                   palette: palette,
                                 ),
                                 _SidebarFooterItem(
                                   icon: Icons.history_rounded,
                                   label: 'Logs',
+                                  collapsed: useCollapsedSidebar,
                                   palette: palette,
                                 ),
                               ],
@@ -485,11 +487,13 @@ class _SidebarFooterItem extends StatelessWidget {
   const _SidebarFooterItem({
     required this.icon,
     required this.label,
+    required this.collapsed,
     required this.palette,
   });
 
   final IconData icon;
   final String label;
+  final bool collapsed;
   final SirixTheme palette;
 
   @override
@@ -501,25 +505,112 @@ class _SidebarFooterItem extends StatelessWidget {
         child: InkWell(
           borderRadius: BorderRadius.circular(8),
           onTap: () {},
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 16,
-                  color: palette.textMuted,
-                ),
-                const SizedBox(width: 12),
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: palette.textMuted,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
+          child: Tooltip(
+            message: label,
+            waitDuration: const Duration(milliseconds: 250),
+            child: Container(
+              padding: EdgeInsets.symmetric(
+                horizontal: collapsed ? 12 : 12,
+                vertical: 10,
+              ),
+              child: collapsed
+                  ? Center(
+                      child: Icon(
+                        icon,
+                        size: 16,
+                        color: palette.textMuted,
+                      ),
+                    )
+                  : Row(
+                      children: [
+                        Icon(
+                          icon,
+                          size: 16,
+                          color: palette.textMuted,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: palette.textMuted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DesktopSidebarNavItem extends StatelessWidget {
+  const _DesktopSidebarNavItem({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.collapsed,
+    required this.palette,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool active;
+  final bool collapsed;
+  final SirixTheme palette;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onTap,
+          child: Tooltip(
+            message: label,
+            waitDuration: const Duration(milliseconds: 250),
+            child: Container(
+              decoration: BoxDecoration(
+                color: active ? palette.primary.withValues(alpha: 0.15) : Colors.transparent,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              padding: EdgeInsets.symmetric(
+                horizontal: collapsed ? 12 : 12,
+                vertical: 12,
+              ),
+              child: collapsed
+                  ? Center(
+                      child: Icon(
+                        icon,
+                        size: 18,
+                        color: active ? palette.primaryBright : palette.textMuted,
+                      ),
+                    )
+                  : Row(
+                      children: [
+                        Icon(
+                          icon,
+                          size: 18,
+                          color: active ? palette.primaryBright : palette.textMuted,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: active ? palette.primaryBright : palette.textMuted,
+                            fontSize: 13,
+                            fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
             ),
           ),
         ),

@@ -112,7 +112,7 @@ class ProviderSettingsSection extends StatelessWidget {
   }
 }
 
-class _ProviderCard extends StatelessWidget {
+class _ProviderCard extends StatefulWidget {
   const _ProviderCard({
     required this.provider,
     required this.defaultProviderId,
@@ -144,194 +144,540 @@ class _ProviderCard extends StatelessWidget {
   final ValueChanged<String> onDeleteModel;
 
   @override
+  State<_ProviderCard> createState() => _ProviderCardState();
+}
+
+class _ProviderCardState extends State<_ProviderCard> {
+  bool _expanded = true;
+
+  bool _isDefaultModel(AiProviderConfig provider, AiModelConfig model) {
+    return provider.id == widget.defaultProviderId && model.id == widget.defaultModelId;
+  }
+
+  @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
+    final defaultModelConfig = widget.provider.models
+        .where((m) => _isDefaultModel(widget.provider, m))
+        .firstOrNull;
 
-    return AiSettingsCard(
-      padding: const EdgeInsets.all(18),
+    return Container(
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: palette.surfaceRaised,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(provider.name, style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 2),
-                    Text(
-                      '${provider.id} · ${_providerKindLabel(provider.kind)}',
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: palette.textMuted,
-                            fontFamily: 'JetBrains Mono',
-                          ),
-                    ),
-                  ],
-                ),
-              ),
-              Container(
-                margin: const EdgeInsets.only(right: 8),
-                child: Switch(value: provider.enabled, onChanged: onToggleEnabled),
-              ),
-              IconButton(onPressed: onEdit, icon: const Icon(Icons.edit_outlined)),
-              IconButton(onPressed: onDelete, icon: const Icon(Icons.delete_outline_rounded)),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              AiSettingsChip(label: provider.id),
-              AiSettingsChip(label: _providerKindLabel(provider.kind)),
-              AiSettingsChip(label: provider.enabled ? 'Enabled' : 'Disabled'),
-              AiSettingsChip(
-                label: 'default ctx=${_providerContextLabel(provider)}',
-              ),
-              if (provider.id == defaultProviderId) const AiSettingsChip(label: 'CLI default'),
-            ],
-          ),
-          const SizedBox(height: 12),
-          if (provider.baseUrl.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Text('Base URL: ${provider.baseUrl}'),
-            ),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    'Provider default context window: ${_providerContextLabel(provider)}',
-                    style: Theme.of(context).textTheme.bodyMedium,
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed: () async {
-                    final updated = await _showProviderContextWindowDialog(
-                      context,
-                      provider: provider,
-                    );
-                    if (updated != null) {
-                      onSetDefaultProviderContext(updated);
-                    }
-                  },
-                  icon: const Icon(Icons.tune_rounded),
-                  label: const Text('Edit Default Context'),
-                ),
-              ],
-            ),
-          ),
-          Text(
-            'Models',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          if (provider.models.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 4),
-              child: Text('No models configured.'),
-            ),
-          for (final model in provider.models)
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: palette.surface.withValues(alpha: 0.4),
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+          // Header / Summary Area
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    // Keep the new dense summary styling, but split it into two rows
+                    // before the header runs out of horizontal space on 1100px layouts.
+                    final useStackedSummary = constraints.maxWidth < 980;
+                    final summaryChildren = [
+                      _MetricBlock(
+                        label: 'Context Window',
+                        value: _providerContextLabel(widget.provider),
+                        valueColor: palette.secondary,
+                        alignStart: useStackedSummary,
+                      ),
+                      _MetricBlock(
+                        label: 'CLI Default Model',
+                        value: defaultModelConfig?.displayName ?? 'Not Set',
+                        valueColor: palette.textPrimary,
+                        alignStart: useStackedSummary,
+                      ),
+                      _ProviderStatusBlock(
+                        enabled: widget.provider.enabled,
+                        alignStart: useStackedSummary,
+                        onChanged: widget.onToggleEnabled,
+                      ),
+                      _ProviderActionMenu(
+                        provider: widget.provider,
+                        onEdit: widget.onEdit,
+                        onDelete: widget.onDelete,
+                        onSetDefaultProviderContext: widget.onSetDefaultProviderContext,
+                      ),
+                    ];
+
+                    final leading = Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text('${model.displayName} (${model.id})'),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            AiSettingsChip(label: _modelKindLabel(model.modelKind)),
-                            AiSettingsChip(
-                              label: 'ctx=${_effectiveContextWindowLabel(provider, model)}',
-                            ),
-                            AiSettingsChip(
-                              label: model.supportsImages ? 'images:on' : 'images:off',
-                            ),
-                            if (_isDefaultModel(provider, model))
-                              const AiSettingsChip(label: 'CLI default'),
-                          ],
+                        Icon(
+                          _expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                          color: palette.textMuted,
+                        ),
+                        const SizedBox(width: 16),
+                        Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: palette.surfaceMuted,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(Icons.hub_outlined, color: palette.secondary, size: 20),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                widget.provider.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                      fontFamily: 'Space Grotesk',
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'ID: ${widget.provider.id}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                      fontFamily: 'JetBrains Mono',
+                                      fontSize: 10,
+                                      color: palette.textMuted,
+                                    ),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    children: [
-                      Switch(
-                        value: model.enabled,
-                        onChanged: (value) => onEditModel(model.copyWith(enabled: value)),
-                      ),
-                      IconButton(
-                        onPressed: () => onEditModel(model),
-                        icon: const Icon(Icons.edit_outlined),
-                      ),
-                      IconButton(
-                        onPressed: model.enabled && model.modelKind == ModelKind.text
-                            ? () => onSetDefaultModel(model.id)
-                            : null,
-                        icon: Icon(
-                          _isDefaultModel(provider, model)
-                              ? Icons.star_rounded
-                              : Icons.star_outline_rounded,
+                    );
+
+                    if (useStackedSummary) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          leading,
+                          const SizedBox(height: 16),
+                          Wrap(
+                            spacing: 24,
+                            runSpacing: 16,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: summaryChildren,
+                          ),
+                        ],
+                      );
+                    }
+
+                    return Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(child: leading),
+                        const SizedBox(width: 24),
+                        Flexible(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: Wrap(
+                              spacing: 24,
+                              runSpacing: 16,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              alignment: WrapAlignment.end,
+                              children: summaryChildren,
+                            ),
+                          ),
                         ),
-                        tooltip: _isDefaultModel(provider, model)
-                            ? 'Current CLI default model'
-                            : 'Set as CLI default model',
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+          // Expanded Content Area (Models Table)
+          if (_expanded)
+            Container(
+              color: palette.background.withValues(alpha: 0.3),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Models',
+                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                              fontFamily: 'Space Grotesk',
+                              letterSpacing: 1.2,
+                              color: palette.textSecondary,
+                            ),
                       ),
-                      IconButton(
-                        onPressed: () => onDeleteModel(model.id),
-                        icon: const Icon(Icons.delete_outline_rounded),
+                      Row(
+                        children: [
+                          if (widget.discoveringModels)
+                            SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: palette.primaryBright,
+                              ),
+                            )
+                          else
+                            TextButton.icon(
+                              onPressed: widget.onDiscoverModels,
+                              icon: const Icon(Icons.sync_rounded, size: 16),
+                              label: const Text('Fetch Models'),
+                              style: TextButton.styleFrom(
+                                foregroundColor: palette.textSecondary,
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                minimumSize: Size.zero,
+                              ),
+                            ),
+                          const SizedBox(width: 12),
+                          TextButton.icon(
+                            onPressed: widget.onAddModel,
+                            icon: const Icon(Icons.add_rounded, size: 16),
+                            label: const Text('Add Model'),
+                            style: TextButton.styleFrom(
+                              foregroundColor: palette.primaryBright,
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              minimumSize: Size.zero,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  if (widget.provider.models.isEmpty)
+                    Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24.0),
+                        child: Text(
+                          'No models configured.',
+                          style: TextStyle(color: palette.textMuted),
+                        ),
+                      ),
+                    )
+                  else
+                    // Models list mapping the exact aesthetic of table row from reference
+                    ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: widget.provider.models.length,
+                      itemBuilder: (context, index) {
+                        final model = widget.provider.models[index];
+                        final isDefault = _isDefaultModel(widget.provider, model);
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 4),
+                          decoration: BoxDecoration(
+                            color: palette.surfaceMuted.withValues(alpha: 0.3),
+                            borderRadius: BorderRadius.circular(6),
+                            border: isDefault
+                                ? Border(
+                                    left: BorderSide(color: palette.primaryBright, width: 3),
+                                  )
+                                : null,
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  flex: 2,
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Text(
+                                            model.displayName,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              color: palette.textPrimary,
+                                            ),
+                                          ),
+                                          if (isDefault) ...[
+                                            const SizedBox(width: 8),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                              decoration: BoxDecoration(
+                                                color: palette.primaryBright.withValues(alpha: 0.2),
+                                                borderRadius: BorderRadius.circular(4),
+                                              ),
+                                              child: Text(
+                                                'CLI DEFAULT',
+                                                style: TextStyle(
+                                                  fontSize: 8,
+                                                  fontWeight: FontWeight.w800,
+                                                  color: palette.primaryBright,
+                                                  letterSpacing: 0.5,
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 2,
+                                  child: Text(
+                                    model.id,
+                                    style: TextStyle(
+                                      fontFamily: 'JetBrains Mono',
+                                      fontSize: 11,
+                                      color: palette.textMuted,
+                                    ),
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 1,
+                                  child: Text(
+                                    _effectiveContextWindowLabel(widget.provider, model),
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontFamily: 'JetBrains Mono',
+                                      fontSize: 12,
+                                      color: palette.secondary,
+                                    ),
+                                  ),
+                                ),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Switch(
+                                      value: model.enabled,
+                                      onChanged: (value) => widget.onEditModel(model.copyWith(enabled: value)),
+                                      activeThumbColor: palette.primaryBright,
+                                    ),
+                                    PopupMenuButton<_ProviderModelAction>(
+                                      icon: Icon(Icons.more_vert_rounded, color: palette.textMuted, size: 20),
+                                      color: palette.surfaceRaised,
+                                      onSelected: (action) {
+                                        // Route model actions through onSelected so dialog/menu
+                                        // timing stays stable after the popup is dismissed.
+                                        switch (action) {
+                                          case _ProviderModelAction.edit:
+                                            widget.onEditModel(model);
+                                            break;
+                                          case _ProviderModelAction.setCliDefault:
+                                            widget.onSetDefaultModel(model.id);
+                                            break;
+                                          case _ProviderModelAction.delete:
+                                            widget.onDeleteModel(model.id);
+                                            break;
+                                        }
+                                      },
+                                      itemBuilder: (context) => [
+                                        const PopupMenuItem(
+                                          value: _ProviderModelAction.edit,
+                                          child: Text('Edit Model'),
+                                        ),
+                                        if (model.enabled && model.modelKind == ModelKind.text)
+                                          const PopupMenuItem(
+                                            value: _ProviderModelAction.setCliDefault,
+                                            child: Text('Set as CLI Default'),
+                                          ),
+                                        PopupMenuItem(
+                                          value: _ProviderModelAction.delete,
+                                          child: Text('Delete Model', style: TextStyle(color: palette.error)),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              OutlinedButton.icon(
-                onPressed: discoveringModels ? null : onDiscoverModels,
-                icon: discoveringModels
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.sync_rounded),
-                label: Text(discoveringModels ? 'Fetching…' : 'Fetch Models'),
-              ),
-              const SizedBox(width: 8),
-              TextButton.icon(
-                onPressed: onAddModel,
-                icon: const Icon(Icons.add_rounded),
-                label: const Text('Add Model'),
-              ),
-            ],
-          ),
         ],
       ),
     );
   }
+}
 
-  bool _isDefaultModel(AiProviderConfig provider, AiModelConfig model) {
-    return provider.id == defaultProviderId && model.id == defaultModelId;
+class _MetricBlock extends StatelessWidget {
+  const _MetricBlock({
+    required this.label,
+    required this.value,
+    required this.valueColor,
+    this.alignStart = false,
+  });
+
+  final String label;
+  final String value;
+  final Color valueColor;
+  final bool alignStart;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: alignStart ? CrossAxisAlignment.start : CrossAxisAlignment.end,
+      children: [
+        Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                fontSize: 10,
+                fontFamily: 'JetBrains Mono',
+                color: context.sirix.textMuted,
+                letterSpacing: 1.2,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: TextStyle(
+            fontFamily: 'JetBrains Mono',
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: valueColor,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+enum _ProviderActionMenuItem {
+  edit,
+  editContextWindow,
+  delete,
+}
+
+enum _ProviderModelAction {
+  edit,
+  setCliDefault,
+  delete,
+}
+
+class _ProviderStatusBlock extends StatelessWidget {
+  const _ProviderStatusBlock({
+    required this.enabled,
+    required this.alignStart,
+    required this.onChanged,
+  });
+
+  final bool enabled;
+  final bool alignStart;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Column(
+      crossAxisAlignment: alignStart ? CrossAxisAlignment.start : CrossAxisAlignment.end,
+      children: [
+        Text(
+          'Status',
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                fontSize: 10,
+                fontFamily: 'JetBrains Mono',
+                color: palette.textMuted,
+                letterSpacing: 1.2,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              enabled ? 'ENABLED' : 'DISABLED',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: enabled ? palette.primaryBright : palette.textMuted,
+              ),
+            ),
+            const SizedBox(width: 8),
+            SizedBox(
+              height: 24,
+              child: Switch(
+                value: enabled,
+                onChanged: onChanged,
+                activeThumbColor: palette.primaryBright,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _ProviderActionMenu extends StatelessWidget {
+  const _ProviderActionMenu({
+    required this.provider,
+    required this.onEdit,
+    required this.onDelete,
+    required this.onSetDefaultProviderContext,
+  });
+
+  final AiProviderConfig provider;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final ValueChanged<int?> onSetDefaultProviderContext;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return PopupMenuButton<_ProviderActionMenuItem>(
+      icon: Icon(Icons.more_vert_rounded, color: palette.textMuted),
+      color: palette.surfaceRaised,
+      onSelected: (action) async {
+        // Using onSelected avoids racing the popup dismissal with a dialog open.
+        switch (action) {
+          case _ProviderActionMenuItem.edit:
+            onEdit();
+            break;
+          case _ProviderActionMenuItem.editContextWindow:
+            final updated = await _showProviderContextWindowDialog(
+              context,
+              provider: provider,
+            );
+            if (!context.mounted || updated == null) {
+              return;
+            }
+            onSetDefaultProviderContext(updated);
+            break;
+          case _ProviderActionMenuItem.delete:
+            onDelete();
+            break;
+        }
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: _ProviderActionMenuItem.edit,
+          child: Text('Edit Provider'),
+        ),
+        const PopupMenuItem(
+          value: _ProviderActionMenuItem.editContextWindow,
+          child: Text('Edit Context Window'),
+        ),
+        PopupMenuItem(
+          value: _ProviderActionMenuItem.delete,
+          child: Text('Delete Provider', style: TextStyle(color: palette.error)),
+        ),
+      ],
+    );
   }
 }
 

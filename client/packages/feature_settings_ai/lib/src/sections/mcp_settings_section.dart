@@ -24,121 +24,515 @@ class McpSettingsSection extends StatelessWidget {
 
     return ListView(
       children: [
-        AiSettingsSectionHeader(
-          title: 'MCP',
-          subtitle: 'Control which external tool servers are available, which transports are allowed, and how each server is filtered.',
-          action: FilledButton.icon(
-            onPressed: () async {
-              final created = await _showMcpDialog(context, vm: vm, existing: null);
-              if (created != null) {
-                vm.upsertMcpServer(created);
-              }
-            },
-            icon: const Icon(Icons.add_rounded),
-            label: const Text('Add MCP Server'),
+        // Global MCP Toggle Area
+        Container(
+          margin: const EdgeInsets.only(bottom: 32),
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: palette.surfaceRaised,
+            borderRadius: BorderRadius.circular(12),
+            border: Border(
+              left: BorderSide(color: palette.primaryBright, width: 4),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
-        ),
-        AiSettingsCard(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.all(16),
-          child: Wrap(
-            spacing: 20,
-            runSpacing: 8,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AiSettingsToggleTile(
-                title: 'MCP Enabled',
-                value: mcpGlobal.enabled,
-                onChanged: (value) => vm.updateMcpGlobal(mcpGlobal.copyWith(enabled: value)),
+              Text(
+                'MODEL CONTEXT PROTOCOL',
+                style: TextStyle(
+                  fontFamily: 'Space Grotesk',
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                  color: palette.primaryBright,
+                  letterSpacing: -0.5,
+                ),
               ),
-              AiSettingsToggleTile(
-                title: 'Allow Stdio Transport',
-                width: 300,
-                value: mcpGlobal.allowStdio,
-                onChanged: (value) =>
-                    vm.updateMcpGlobal(mcpGlobal.copyWith(allowStdio: value)),
+              const SizedBox(height: 8),
+              Text(
+                'Configure and manage secure communication layers for local and remote model context delivery. MCP enables agents to safely interact with your local environment.',
+                style: TextStyle(
+                  color: palette.textSecondary,
+                  fontSize: 14,
+                  height: 1.5,
+                ),
               ),
-              AiSettingsToggleTile(
-                title: 'Allow HTTP Transport',
-                width: 300,
-                value: mcpGlobal.allowHttp,
-                onChanged: (value) => vm.updateMcpGlobal(mcpGlobal.copyWith(allowHttp: value)),
+              const SizedBox(height: 24),
+              Wrap(
+                spacing: 16,
+                runSpacing: 16,
+                children: [
+                  _GlobalToggle(
+                    label: 'ENABLE MCP',
+                    value: mcpGlobal.enabled,
+                    onChanged: (val) => vm.updateMcpGlobal(mcpGlobal.copyWith(enabled: val)),
+                  ),
+                  _GlobalToggle(
+                    label: 'ALLOW STDIO',
+                    value: mcpGlobal.allowStdio,
+                    onChanged: (val) => vm.updateMcpGlobal(mcpGlobal.copyWith(allowStdio: val)),
+                  ),
+                  _GlobalToggle(
+                    label: 'ALLOW HTTP',
+                    value: mcpGlobal.allowHttp,
+                    onChanged: (val) => vm.updateMcpGlobal(mcpGlobal.copyWith(allowHttp: val)),
+                  ),
+                ],
               ),
             ],
           ),
         ),
-        if (state.config.mcpServers.isEmpty)
-          const AiSettingsEmptyState(text: 'No MCP servers configured.'),
-        for (final server in state.config.mcpServers) ...[
-          AiSettingsCard(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+
+        // Header & Add Action
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(server.name, style: Theme.of(context).textTheme.titleMedium),
+                Icon(Icons.dns_rounded, color: palette.secondary, size: 24),
+                const SizedBox(width: 12),
+                Text(
+                  'REGISTERED MCP SERVERS',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 2.0,
+                    color: palette.textSecondary,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: palette.surfaceRaised,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(
+                    '${state.config.mcpServers.where((s) => s.enabled).length} ACTIVE',
+                    style: TextStyle(
+                      fontFamily: 'JetBrains Mono',
+                      fontSize: 10,
+                      color: palette.secondary,
+                      fontWeight: FontWeight.w700,
                     ),
-                    IconButton(
-                      onPressed: () async {
+                  ),
+                ),
+              ],
+            ),
+            TextButton.icon(
+              onPressed: () async {
+                final created = await _showMcpDialog(context, vm: vm, existing: null);
+                if (created != null) {
+                  vm.upsertMcpServer(created);
+                }
+              },
+              icon: const Icon(Icons.add_rounded, size: 18),
+              label: const Text('ADD SERVER'),
+              style: TextButton.styleFrom(
+                foregroundColor: palette.primaryBright,
+                textStyle: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.0),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 24),
+
+        // Bento Grid of Servers
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final cardWidth = constraints.maxWidth < 650 ? constraints.maxWidth : (constraints.maxWidth - 24) / 2;
+            return Wrap(
+              spacing: 24,
+              runSpacing: 24,
+              children: [
+                for (final server in state.config.mcpServers)
+                  SizedBox(
+                    width: cardWidth,
+                    child: _McpServerCard(
+                      server: server,
+                      vm: vm,
+                      onEdit: () async {
                         final edited = await _showMcpDialog(context, vm: vm, existing: server);
                         if (edited != null) {
                           vm.upsertMcpServer(edited);
                         }
                       },
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                    IconButton(
-                      onPressed: () => vm.removeMcpServer(server.id),
-                      icon: const Icon(Icons.delete_outline_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    AiSettingsChip(label: server.id),
-                    AiSettingsChip(label: 'approval=${_enumName(server.approvalMode)}'),
-                    AiSettingsChip(label: server.enabled ? 'enabled' : 'disabled'),
-                  ],
-                ),
-                if (server.enabledTools.isNotEmpty || server.disabledTools.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 10),
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        if (server.enabledTools.isNotEmpty)
-                          AiSettingsChip(label: 'enabled: ${server.enabledTools.join(', ')}'),
-                        if (server.disabledTools.isNotEmpty)
-                          AiSettingsChip(label: 'disabled: ${server.disabledTools.join(', ')}'),
-                      ],
                     ),
                   ),
-                const SizedBox(height: 14),
-                AiSettingsToggleTile(
-                  title: 'Enabled',
-                  value: server.enabled,
-                  onChanged: (value) => vm.upsertMcpServer(server.copyWith(enabled: value)),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  server.jsonConfig,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        fontFamily: 'JetBrains Mono',
+                SizedBox(
+                  width: cardWidth,
+                  child: InkWell(
+                    onTap: () async {
+                      final created = await _showMcpDialog(context, vm: vm, existing: null);
+                      if (created != null) {
+                        vm.upsertMcpServer(created);
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      height: 380, // Matches approximate height of cards
+                      decoration: BoxDecoration(
+                        border: Border.all(
+                          color: palette.glassStroke,
+                          style: BorderStyle.solid,
+                        ),
+                        borderRadius: BorderRadius.circular(8),
+                        color: palette.surfaceRaised.withValues(alpha: 0.3),
                       ),
-                  maxLines: 8,
-                  overflow: TextOverflow.ellipsis,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            width: 64,
+                            height: 64,
+                            decoration: BoxDecoration(
+                              color: palette.surfaceRaised,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(Icons.add_box_rounded, color: palette.textMuted, size: 32),
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            'PROVISION NEW SERVER',
+                            style: TextStyle(
+                              fontFamily: 'Space Grotesk',
+                              color: palette.textPrimary,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Bootstrap a new MCP compliant endpoint',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: palette.textMuted,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+}
+
+class _GlobalToggle extends StatelessWidget {
+  const _GlobalToggle({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String label;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1.5,
+              color: palette.textSecondary,
+            ),
+          ),
+          const SizedBox(width: 16),
+          SizedBox(
+            height: 20,
+            child: Switch(
+              value: value,
+              onChanged: onChanged,
+              activeColor: palette.primaryBright,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _McpServerCard extends StatelessWidget {
+  const _McpServerCard({
+    required this.server,
+    required this.vm,
+    required this.onEdit,
+  });
+
+  final McpServerConfigModel server;
+  final AiSettingsViewModel vm;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final isEnabled = server.enabled;
+    
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.surfaceRaised,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      foregroundDecoration: isEnabled
+          ? null
+          : BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(8),
+            ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: isEnabled ? palette.primaryBright.withValues(alpha: 0.1) : palette.surfaceMuted,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Icon(
+                    isEnabled ? Icons.storage_rounded : Icons.cloud_off_rounded,
+                    color: isEnabled ? palette.primaryBright : palette.textMuted,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        server.name,
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontFamily: 'Space Grotesk',
+                              fontWeight: FontWeight.w700,
+                              color: isEnabled ? palette.textPrimary : palette.textMuted,
+                            ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'ID: ${server.id}',
+                        style: TextStyle(
+                          fontFamily: 'JetBrains Mono',
+                          fontSize: 11,
+                          color: palette.textMuted,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      isEnabled ? 'ACTIVE' : 'DISABLED',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.0,
+                        color: isEnabled ? palette.primaryBright : palette.textMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 20,
+                      child: Switch(
+                        value: isEnabled,
+                        onChanged: (val) => vm.upsertMcpServer(server.copyWith(enabled: val)),
+                        activeColor: palette.primaryBright,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          
+          Divider(height: 1, color: palette.glassStroke),
+          
+          // Body
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Approval Mode 
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'APPROVAL MODE',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 1.5,
+                        color: palette.textMuted,
+                      ),
+                    ),
+                    Row(
+                      children: ApprovalMode.values.map((mode) {
+                        final isSelected = server.approvalMode == mode;
+                        return Padding(
+                          padding: const EdgeInsets.only(left: 4),
+                          child: InkWell(
+                            onTap: () => vm.upsertMcpServer(server.copyWith(approvalMode: mode)),
+                            borderRadius: BorderRadius.circular(4),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: isSelected ? palette.primaryBright : palette.surfaceMuted,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _enumName(mode).toUpperCase(),
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                  color: isSelected ? Colors.black : palette.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+                
+                const SizedBox(height: 24),
+                
+                // Config Editor
+                Text(
+                  'CONFIG EDITOR',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5,
+                    color: palette.textMuted,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  height: 140,
+                  decoration: BoxDecoration(
+                    color: palette.surfaceMuted.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border(left: BorderSide(color: palette.primaryBright.withValues(alpha: 0.3), width: 2)),
+                  ),
+                  child: Stack(
+                    children: [
+                      SingleChildScrollView(
+                        padding: const EdgeInsets.all(16),
+                        child: Text(
+                          server.jsonConfig.isEmpty ? '{}' : server.jsonConfig,
+                          style: TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontSize: 11,
+                            color: palette.primaryBright.withValues(alpha: 0.8),
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: IconButton(
+                          onPressed: onEdit,
+                          icon: Icon(Icons.edit_rounded, size: 16, color: palette.textMuted),
+                          style: IconButton.styleFrom(
+                            backgroundColor: palette.surfaceRaised,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          
+          // Footer
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            decoration: BoxDecoration(
+              color: palette.surfaceMuted.withValues(alpha: 0.5),
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Last updated: recently',
+                  style: TextStyle(fontSize: 10, color: palette.textMuted),
+                ),
+                Row(
+                  children: [
+                    TextButton(
+                      onPressed: onEdit,
+                      style: TextButton.styleFrom(
+                        foregroundColor: palette.secondary,
+                        textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                      ),
+                      child: const Text('Edit Config'),
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton(
+                      onPressed: () => vm.removeMcpServer(server.id),
+                      style: TextButton.styleFrom(
+                        foregroundColor: palette.error,
+                        textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+                      ),
+                      child: const Text('Remove'),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
         ],
-      ],
+      ),
     );
   }
 }
@@ -202,6 +596,7 @@ Future<McpServerConfigModel?> _showMcpDialog(
               decoration: const InputDecoration(
                 labelText: 'JSON Config',
                 border: OutlineInputBorder(),
+                hintText: '{\n  "command": "node",\n  "args": ["..."]\n}',
               ),
             ),
             TextField(

@@ -19,57 +19,163 @@ Future<T?> showAiSettingsDialog<T>(
       child: Container(
         constraints: BoxConstraints(maxWidth: width),
         decoration: BoxDecoration(
-          color: const Color(0xFF101821),
-          borderRadius: BorderRadius.circular(28),
+          color: palette.surfaceRaised,
+          borderRadius: BorderRadius.circular(16),
           border: Border.all(color: palette.glassStroke),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.28),
+              color: Colors.black.withValues(alpha: 0.4),
               blurRadius: 40,
               offset: const Offset(0, 24),
             ),
           ],
         ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                      fontFamily: 'Space Grotesk',
-                      fontWeight: FontWeight.w700,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(32, 28, 32, 24),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          style: TextStyle(
+                            fontFamily: 'Space Grotesk',
+                            fontSize: 24,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: -0.5,
+                            color: palette.textPrimary,
+                          ),
+                        ),
+                        if (subtitle != null && subtitle.trim().isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontFamily: 'Inter',
+                              fontSize: 10,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 2.0,
+                              color: palette.textMuted,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: Icon(Icons.close_rounded, color: palette.textMuted),
+                    hoverColor: palette.surfaceMuted,
+                  ),
+                ],
               ),
-              if (subtitle != null && subtitle.trim().isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text(
-                  subtitle,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            ),
+            Divider(height: 1, color: palette.glassStroke),
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(32),
+                child: Theme(
+                  data: Theme.of(context).copyWith(
+                    textTheme: Theme.of(context).textTheme.copyWith(
+                          bodyLarge: TextStyle(
+                            fontFamily: 'JetBrains Mono',
+                            fontSize: 13,
+                            color: palette.primaryBright.withValues(alpha: 0.9),
+                            height: 1.5,
+                          ),
+                        ),
+                    textSelectionTheme: TextSelectionThemeData(
+                      cursorColor: palette.primaryBright,
+                      selectionColor: palette.primaryBright.withValues(alpha: 0.3),
+                      selectionHandleColor: palette.primaryBright,
+                    ),
+                    inputDecorationTheme: InputDecorationTheme(
+                      filled: true,
+                      fillColor: palette.surfaceMuted.withValues(alpha: 0.3),
+                      labelStyle: TextStyle(
+                        fontFamily: 'Inter',
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 1.2,
                         color: palette.textMuted,
                       ),
-                ),
-              ],
-              const SizedBox(height: 18),
-              Flexible(
-                child: SingleChildScrollView(
+                      hintStyle: TextStyle(
+                        fontFamily: 'JetBrains Mono',
+                        fontSize: 12,
+                        color: palette.textMuted.withValues(alpha: 0.5),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: palette.glassStroke),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: palette.glassStroke),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(6),
+                        borderSide: BorderSide(color: palette.primaryBright),
+                      ),
+                    ),
+                  ),
                   child: child,
                 ),
               ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: actions
-                    .map((widget) => Padding(
-                          padding: const EdgeInsets.only(left: 10),
-                          child: widget,
-                        ))
-                    .toList(growable: false),
+            ),
+            if (actions.isNotEmpty) ...[
+              Divider(height: 1, color: palette.glassStroke),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20),
+                child: Theme(
+                  data: Theme.of(context).copyWith(
+                    filledButtonTheme: FilledButtonThemeData(
+                      style: FilledButton.styleFrom(
+                        backgroundColor: palette.primaryBright,
+                        foregroundColor: Colors.black, // High contrast text
+                        textStyle: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 1.0,
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                      ),
+                    ),
+                    textButtonTheme: TextButtonThemeData(
+                      style: TextButton.styleFrom(
+                        foregroundColor: palette.textSecondary,
+                        textStyle: const TextStyle(
+                          fontFamily: 'Inter',
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.5,
+                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                      ),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: actions
+                        .map((widget) => Padding(
+                              padding: const EdgeInsets.only(left: 12),
+                              child: widget,
+                            ))
+                        .toList(growable: false),
+                  ),
+                ),
               ),
             ],
-          ),
+          ],
         ),
       ),
     ),
@@ -97,8 +203,8 @@ class AiSettingsCard extends StatelessWidget {
       padding: padding,
       decoration: BoxDecoration(
         color: palette.surfaceRaised,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
       ),
       child: child,
     );
@@ -231,49 +337,65 @@ class AiSettingsToggleTile extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.subtitle,
-    this.width = 280,
+    this.width,
   });
 
   final String title;
   final String? subtitle;
   final bool value;
   final ValueChanged<bool> onChanged;
-  final double width;
+  final double? width;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
-    return SizedBox(
-      width: width,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: palette.surfaceMuted.withValues(alpha: 0.56),
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title),
-                  if (subtitle != null && subtitle!.trim().isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle!,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: palette.textMuted,
-                          ),
-                    ),
-                  ],
+    return Container(
+      width: width ?? 320, // Provide a safe fallback width so Wrap doesn't throw if unbounded
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: palette.glassStroke), // Add faint stroke like inputs
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        fontFamily: 'Inter',
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                        color: palette.textPrimary,
+                      ),
+                  softWrap: true,
+                ),
+                if (subtitle != null && subtitle!.trim().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle!,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          fontSize: 10,
+                          color: palette.textMuted,
+                        ),
+                    softWrap: true,
+                  ),
                 ],
-              ),
+              ],
             ),
-            const SizedBox(width: 10),
-            Switch(value: value, onChanged: onChanged),
-          ],
-        ),
+          ),
+          const SizedBox(width: 16),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            activeColor: palette.primaryBright,
+          ),
+        ],
       ),
     );
   }

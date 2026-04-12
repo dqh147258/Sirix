@@ -7,7 +7,7 @@ import '../ai_settings_state.dart';
 import '../settings_ui.dart';
 import '../ai_settings_view_model.dart';
 
-class AgentSettingsSection extends StatelessWidget {
+class AgentSettingsSection extends StatefulWidget {
   const AgentSettingsSection({
     super.key,
     required this.state,
@@ -18,103 +18,751 @@ class AgentSettingsSection extends StatelessWidget {
   final AiSettingsViewModel vm;
 
   @override
+  State<AgentSettingsSection> createState() => _AgentSettingsSectionState();
+}
+
+class _AgentSettingsSectionState extends State<AgentSettingsSection> {
+  String? _selectedAgentId;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.state.config.agents.isNotEmpty) {
+      _selectedAgentId = widget.state.config.agents.first.id;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AgentSettingsSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_selectedAgentId != null &&
+        !widget.state.config.agents.any((a) => a.id == _selectedAgentId)) {
+      _selectedAgentId = null;
+    }
+    if (_selectedAgentId == null && widget.state.config.agents.isNotEmpty) {
+      _selectedAgentId = widget.state.config.agents.first.id;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
 
-    return ListView(
-      children: [
-        AiSettingsSectionHeader(
-          title: 'Agents',
-          subtitle: 'Bind providers and models into reusable execution profiles, then tune how each profile uses tools, skills, MCP, and approvals.',
-          action: FilledButton.icon(
-            onPressed: () async {
-              final created =
-                  await _showAgentDialog(context, state: state, vm: vm, existing: null);
-              if (created != null) {
-                vm.upsertAgent(created);
-              }
-            },
-            icon: const Icon(Icons.add_rounded),
-            label: const Text('Add Agent'),
-          ),
-        ),
-        if (state.config.agents.isEmpty)
-          const AiSettingsEmptyState(text: 'No agents configured.'),
-        for (final agent in state.config.agents) ...[
-          AiSettingsCard(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(agent.name, style: Theme.of(context).textTheme.titleMedium),
-                    ),
-                    IconButton(
-                      onPressed: () async {
-                        final edited = await _showAgentDialog(
-                          context,
-                          state: state,
-                          vm: vm,
-                          existing: agent,
-                        );
-                        if (edited != null) {
-                          vm.upsertAgent(edited);
-                        }
-                      },
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                    IconButton(
-                      onPressed: () => vm.removeAgent(agent.id),
-                      icon: const Icon(Icons.delete_outline_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    AiSettingsChip(label: agent.id),
-                    AiSettingsChip(label: 'provider=${agent.providerId}'),
-                    AiSettingsChip(label: 'model=${agent.modelId}'),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                Wrap(
-                  spacing: 18,
-                  runSpacing: 6,
-                  children: [
-                    AiSettingsToggleTile(
-                      title: 'Enabled',
-                      value: agent.enabled,
-                      onChanged: (value) => vm.upsertAgent(agent.copyWith(enabled: value)),
-                    ),
-                    AiSettingsToggleTile(
-                      title: 'Builtin Tools Enabled',
-                      width: 320,
-                      value: agent.builtinToolsEnabled,
-                      onChanged: (value) => vm.upsertAgent(
-                        agent.copyWith(builtinToolsEnabled: value),
-                      ),
-                    ),
-                  ],
-                ),
-                if (agent.systemPrompt.trim().isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    agent.systemPrompt,
-                    maxLines: 6,
-                    overflow: TextOverflow.ellipsis,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // The page shell already collapses at 1100px, so the agent workspace
+        // needs three internal modes: full sidebar, icon-only sidebar, then stacked.
+        final useStackedLayout = constraints.maxWidth < 680;
+        final useCollapsedSidebar = !useStackedLayout && constraints.maxWidth < 980;
+        final listPane = _AgentListPane(
+          mode: useStackedLayout
+              ? _AgentListPaneMode.stacked
+              : useCollapsedSidebar
+                  ? _AgentListPaneMode.collapsed
+                  : _AgentListPaneMode.full,
+          state: widget.state,
+          selectedAgentId: _selectedAgentId,
+          onSelect: (agentId) => setState(() => _selectedAgentId = agentId),
+          onCreate: () async {
+            final created = await _showAgentDialog(
+              context,
+              state: widget.state,
+              vm: widget.vm,
+              existing: null,
+            );
+            if (created != null) {
+              widget.vm.upsertAgent(created);
+              setState(() => _selectedAgentId = created.id);
+            }
+          },
+        );
+
+        final detailPane = Container(
+          color: palette.background.withValues(alpha: 0.5),
+          child: _selectedAgentId == null
+              ? Center(
+                  child: Text(
+                    'Select or create an agent.',
+                    style: TextStyle(color: palette.textMuted),
                   ),
-                ],
-              ],
-            ),
+                )
+              : _AgentDetailForm(
+                  agent: widget.state.config.agents.firstWhere((a) => a.id == _selectedAgentId),
+                  state: widget.state,
+                  vm: widget.vm,
+                  onEditForm: () async {
+                    final agent = widget.state.config.agents.firstWhere(
+                      (a) => a.id == _selectedAgentId,
+                    );
+                    final edited = await _showAgentDialog(
+                      context,
+                      state: widget.state,
+                      vm: widget.vm,
+                      existing: agent,
+                    );
+                    if (edited != null) {
+                      widget.vm.upsertAgent(edited);
+                    }
+                  },
+                ),
+        );
+
+        if (useStackedLayout) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(height: 240, child: listPane),
+              const SizedBox(height: 12),
+              Expanded(child: detailPane),
+            ],
+          );
+        }
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(width: useCollapsedSidebar ? 88 : 280, child: listPane),
+            Expanded(child: detailPane),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _AgentListPane extends StatelessWidget {
+  const _AgentListPane({
+    required this.mode,
+    required this.state,
+    required this.selectedAgentId,
+    required this.onSelect,
+    required this.onCreate,
+  });
+
+  final _AgentListPaneMode mode;
+  final AiSettingsState state;
+  final String? selectedAgentId;
+  final ValueChanged<String> onSelect;
+  final Future<void> Function() onCreate;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final isCollapsed = mode == _AgentListPaneMode.collapsed;
+    final isStacked = mode == _AgentListPaneMode.stacked;
+    return Container(
+      decoration: BoxDecoration(
+        border: isStacked
+            ? Border(bottom: BorderSide(color: palette.glassStroke))
+            : Border(right: BorderSide(color: palette.glassStroke)),
+        color: palette.surface,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: EdgeInsets.all(isCollapsed ? 16 : 20),
+            child: isCollapsed
+                ? Tooltip(
+                    message: 'Agents',
+                    child: Icon(
+                      Icons.smart_toy_rounded,
+                      color: palette.primaryBright,
+                    ),
+                  )
+                : Text(
+                    'ACTIVE AGENTS',
+                    style: TextStyle(
+                      fontFamily: 'Space Grotesk',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 2.0,
+                      color: palette.primaryBright,
+                    ),
+                  ),
+          ),
+          Expanded(
+            child: state.config.agents.isEmpty
+                ? Center(
+                    child: isCollapsed
+                        ? Tooltip(
+                            message: 'No agents configured.',
+                            child: Icon(
+                              Icons.info_outline_rounded,
+                              color: palette.textMuted,
+                            ),
+                          )
+                        : Text(
+                            'No agents configured.',
+                            style: TextStyle(color: palette.textMuted),
+                          ),
+                  )
+                : ListView.builder(
+                    itemCount: state.config.agents.length,
+                    itemBuilder: (context, index) {
+                      final agent = state.config.agents[index];
+                      final isSelected = agent.id == selectedAgentId;
+                      return Tooltip(
+                        message: agent.name,
+                        waitDuration: const Duration(milliseconds: 250),
+                        child: InkWell(
+                          onTap: () => onSelect(agent.id),
+                          child: Container(
+                            padding: EdgeInsets.all(isCollapsed ? 12 : 16),
+                            decoration: BoxDecoration(
+                              color: isSelected ? palette.surfaceRaised : Colors.transparent,
+                              border: Border(
+                                bottom: BorderSide(color: palette.surfaceMuted),
+                                left: BorderSide(
+                                  color: isSelected ? palette.primaryBright : Colors.transparent,
+                                  width: 3,
+                                ),
+                              ),
+                            ),
+                            child: isCollapsed
+                                ? Center(
+                                    child: Icon(
+                                      Icons.smart_toy_rounded,
+                                      size: 22,
+                                      color: isSelected
+                                          ? palette.primaryBright
+                                          : agent.enabled
+                                              ? palette.textSecondary
+                                              : palette.textMuted,
+                                    ),
+                                  )
+                                : Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              agent.name,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontFamily: 'JetBrains Mono',
+                                                fontWeight: FontWeight.w700,
+                                                color: isSelected ? Colors.white : palette.textSecondary,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'ID: ${agent.id}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontFamily: 'JetBrains Mono',
+                                                fontSize: 10,
+                                                color: palette.textMuted,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Row(
+                                              children: [
+                                                Container(
+                                                  width: 6,
+                                                  height: 6,
+                                                  decoration: BoxDecoration(
+                                                    color: agent.enabled
+                                                        ? palette.primaryBright
+                                                        : palette.textMuted,
+                                                    shape: BoxShape.circle,
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 6),
+                                                Text(
+                                                  agent.enabled ? 'ACTIVE' : 'OFFLINE',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w800,
+                                                    color: agent.enabled
+                                                        ? palette.primaryBright
+                                                        : palette.textMuted,
+                                                    letterSpacing: 0.5,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          Padding(
+            padding: EdgeInsets.all(isCollapsed ? 12 : 16),
+            child: isCollapsed
+                ? Tooltip(
+                    message: 'New Agent',
+                    child: FilledButton(
+                      onPressed: onCreate,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: palette.surfaceMuted,
+                        foregroundColor: palette.primaryBright,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                      child: const Icon(Icons.add_rounded),
+                    ),
+                  )
+                : FilledButton.icon(
+                    onPressed: onCreate,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('NEW AGENT'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: palette.surfaceMuted,
+                      foregroundColor: palette.primaryBright,
+                      textStyle: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.5),
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                    ),
+                  ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+enum _AgentListPaneMode {
+  full,
+  collapsed,
+  stacked,
+}
+
+class _AgentDetailForm extends StatelessWidget {
+  const _AgentDetailForm({
+    required this.agent,
+    required this.state,
+    required this.vm,
+    required this.onEditForm,
+  });
+
+  final AgentConfigModel agent;
+  final AiSettingsState state;
+  final AiSettingsViewModel vm;
+  final VoidCallback onEditForm;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Preserve the split-panel aesthetic, but stack high-density rows when
+        // the details pane narrows so the page still works at the minimum desktop size.
+        final useCompactDetails = constraints.maxWidth < 860;
+        return ListView(
+          padding: const EdgeInsets.all(40),
+          children: [
+            if (useCompactDetails)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _AgentHeading(agent: agent),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Switch(
+                        value: agent.enabled,
+                        onChanged: (val) => vm.upsertAgent(agent.copyWith(enabled: val)),
+                        activeThumbColor: palette.primaryBright,
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: onEditForm,
+                        icon: const Icon(Icons.edit_rounded, size: 16),
+                        label: const Text('Edit Full Config'),
+                      ),
+                      IconButton(
+                        onPressed: () => vm.removeAgent(agent.id),
+                        icon: const Icon(Icons.delete_outline_rounded),
+                        color: palette.error,
+                        tooltip: 'Delete Agent',
+                      ),
+                    ],
+                  ),
+                ],
+              )
+            else
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _AgentHeading(agent: agent),
+                  Row(
+                    children: [
+                      Switch(
+                        value: agent.enabled,
+                        onChanged: (val) => vm.upsertAgent(agent.copyWith(enabled: val)),
+                        activeThumbColor: palette.primaryBright,
+                      ),
+                      const SizedBox(width: 16),
+                      OutlinedButton.icon(
+                        onPressed: onEditForm,
+                        icon: const Icon(Icons.edit_rounded, size: 16),
+                        label: const Text('Edit Full Config'),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: () => vm.removeAgent(agent.id),
+                        icon: const Icon(Icons.delete_outline_rounded),
+                        color: palette.error,
+                        tooltip: 'Delete Agent',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            const SizedBox(height: 40),
+
+            _SectionHeader(title: '01. Agent Identity & Model', color: palette.secondary),
+            const SizedBox(height: 16),
+            if (useCompactDetails) ...[
+              _DetailBox(label: 'PROVIDER', value: agent.providerId),
+              const SizedBox(height: 16),
+              _DetailBox(label: 'MODEL', value: agent.modelId),
+            ] else
+              Row(
+                children: [
+                  Expanded(
+                    child: _DetailBox(label: 'PROVIDER', value: agent.providerId),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _DetailBox(label: 'MODEL', value: agent.modelId),
+                  ),
+                ],
+              ),
+
+            const SizedBox(height: 32),
+            _SectionHeader(title: '02. Capabilities', color: palette.secondary),
+            const SizedBox(height: 16),
+            if (useCompactDetails) ...[
+              _CapabilityPanel(
+                title: 'MCP Servers',
+                icon: Icons.extension_rounded,
+                enabledIds: agent.enabledMcpServerIds,
+                allCount: agent.enabledMcpServerIds.length + agent.disabledMcpServerIds.length,
+              ),
+              const SizedBox(height: 16),
+              _CapabilityPanel(
+                title: 'Local Skills',
+                icon: Icons.terminal_rounded,
+                enabledIds: agent.enabledSkillIds,
+                allCount: agent.enabledSkillIds.length + agent.disabledSkillIds.length,
+              ),
+              const SizedBox(height: 16),
+              _CapabilityPanel(
+                title: 'Builtin Tools',
+                icon: Icons.build_circle_rounded,
+                isToggleOnly: true,
+                isToggledOn: agent.builtinToolsEnabled,
+                onToggle: (val) => vm.upsertAgent(agent.copyWith(builtinToolsEnabled: val)),
+              ),
+            ] else
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: _CapabilityPanel(
+                      title: 'MCP Servers',
+                      icon: Icons.extension_rounded,
+                      enabledIds: agent.enabledMcpServerIds,
+                      allCount: agent.enabledMcpServerIds.length + agent.disabledMcpServerIds.length,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _CapabilityPanel(
+                      title: 'Local Skills',
+                      icon: Icons.terminal_rounded,
+                      enabledIds: agent.enabledSkillIds,
+                      allCount: agent.enabledSkillIds.length + agent.disabledSkillIds.length,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: _CapabilityPanel(
+                      title: 'Builtin Tools',
+                      icon: Icons.build_circle_rounded,
+                      isToggleOnly: true,
+                      isToggledOn: agent.builtinToolsEnabled,
+                      onToggle: (val) => vm.upsertAgent(agent.copyWith(builtinToolsEnabled: val)),
+                    ),
+                  ),
+                ],
+              ),
+
+            const SizedBox(height: 32),
+            _SectionHeader(title: '03. System Prompt', color: palette.secondary),
+            const SizedBox(height: 16),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: palette.surfaceRaised,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: palette.glassStroke),
+              ),
+              child: Text(
+                agent.systemPrompt.isEmpty ? 'No custom system prompt configured.' : agent.systemPrompt,
+                style: TextStyle(
+                  fontFamily: 'JetBrains Mono',
+                  fontSize: 12,
+                  color: agent.systemPrompt.isEmpty ? palette.textMuted : palette.textPrimary,
+                  height: 1.6,
+                ),
+              ),
+            ),
+
+            const SizedBox(height: 32),
+            _SectionHeader(title: '04. Capability Rules', color: palette.secondary),
+            const SizedBox(height: 16),
+            if (agent.capabilityRules.isEmpty)
+              const Text('No capability rules configured.')
+            else
+              Container(
+                decoration: BoxDecoration(
+                  color: palette.surfaceRaised,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: palette.glassStroke),
+                ),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  itemCount: agent.capabilityRules.length,
+                  separatorBuilder: (context, index) => Divider(height: 1, color: palette.glassStroke),
+                  itemBuilder: (context, index) {
+                    final rule = agent.capabilityRules[index];
+                    return Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              rule.key,
+                              style: TextStyle(fontFamily: 'JetBrains Mono', color: palette.textPrimary),
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: rule.approvalMode == ApprovalMode.allow
+                                  ? palette.primaryBright.withValues(alpha: 0.1)
+                                  : rule.approvalMode == ApprovalMode.deny
+                                      ? palette.error.withValues(alpha: 0.1)
+                                      : palette.secondary.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              rule.approvalMode.name.toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: rule.approvalMode == ApprovalMode.allow
+                                    ? palette.primaryBright
+                                    : rule.approvalMode == ApprovalMode.deny
+                                        ? palette.error
+                                        : palette.secondary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _AgentHeading extends StatelessWidget {
+  const _AgentHeading({required this.agent});
+
+  final AgentConfigModel agent;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          agent.name,
+          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                fontFamily: 'Space Grotesk',
+                fontWeight: FontWeight.w700,
+                color: palette.primaryBright,
+              ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Configuration for ${agent.id}',
+          style: TextStyle(
+            color: palette.textMuted,
+            fontFamily: 'JetBrains Mono',
+            fontSize: 12,
+          ),
+        ),
       ],
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({required this.title, required this.color});
+  final String title;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      title,
+      style: TextStyle(
+        fontSize: 12,
+        fontWeight: FontWeight.w900,
+        letterSpacing: 3.0,
+        color: color,
+        fontFamily: 'Space Grotesk',
+      ),
+    );
+  }
+}
+
+class _DetailBox extends StatelessWidget {
+  const _DetailBox({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w800,
+            color: context.sirix.textMuted,
+            letterSpacing: 1.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: context.sirix.surfaceMuted,
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            value.isEmpty ? 'Not Set' : value,
+            style: const TextStyle(fontFamily: 'JetBrains Mono'),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _CapabilityPanel extends StatelessWidget {
+  const _CapabilityPanel({
+    required this.title,
+    required this.icon,
+    this.enabledIds = const [],
+    this.allCount = 0,
+    this.isToggleOnly = false,
+    this.isToggledOn = false,
+    this.onToggle,
+  });
+
+  final String title;
+  final IconData icon;
+  final List<String> enabledIds;
+  final int allCount;
+  final bool isToggleOnly;
+  final bool isToggledOn;
+  final ValueChanged<bool>? onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceRaised,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(icon, size: 16, color: palette.textMuted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title.toUpperCase(),
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1.5,
+                    color: palette.textMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          if (isToggleOnly) ...[
+             Switch(
+               value: isToggledOn,
+               onChanged: onToggle,
+               activeThumbColor: palette.primaryBright,
+             ),
+          ] else ...[
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                if (enabledIds.isEmpty && allCount == 0)
+                  Text('None', style: TextStyle(color: palette.textMuted, fontSize: 12)),
+                for (final id in enabledIds)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: palette.primaryBright.withValues(alpha: 0.1),
+                      border: Border.all(color: palette.primaryBright.withValues(alpha: 0.3)),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    child: Text(
+                      id,
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w800,
+                        color: palette.primaryBright,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

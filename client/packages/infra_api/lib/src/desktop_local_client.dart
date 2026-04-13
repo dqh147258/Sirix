@@ -146,6 +146,43 @@ class DesktopLocalClient {
     return SirixAiConfig.fromJson(_decodeMap(response));
   }
 
+  Future<String> previewAgentSystemPrompt({
+    required SirixAiConfig config,
+    required String agentId,
+    String? cwd,
+  }) async {
+    final response = await _request(
+      'POST',
+      '/ai/config/system-prompt-preview',
+      body: {
+        'config': config.toJson(),
+        'agent_id': agentId,
+        'cwd': cwd,
+      },
+    );
+    final decoded = _decodeMap(response);
+    return decoded['prompt'] as String? ?? '';
+  }
+
+  Future<ShellRulesConfigModel> getShellRules() async {
+    final response = await _request('GET', '/ai/shell-rules');
+    return ShellRulesConfigModel.fromJson(_decodeMap(response));
+  }
+
+  Future<ShellRulesConfigModel> saveShellRules(ShellRulesConfigModel config) async {
+    final response = await _request(
+      'PATCH',
+      '/ai/shell-rules',
+      body: config.toJson(),
+    );
+    return ShellRulesConfigModel.fromJson(_decodeMap(response));
+  }
+
+  Future<LocalStatusOverview> getStatusOverview() async {
+    final response = await _request('GET', '/status/overview');
+    return LocalStatusOverview.fromJson(_decodeMap(response));
+  }
+
   Future<List<AiModelConfig>> discoverProviderModels(AiProviderConfig provider) async {
     final response = await _request(
       'POST',

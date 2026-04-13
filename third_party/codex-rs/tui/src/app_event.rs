@@ -23,6 +23,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::GetHistoryEntryResponseEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::ReviewDecision;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
 
@@ -97,6 +98,10 @@ pub(crate) enum RateLimitRefreshOrigin {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
+    /// Open the Sirix Agent picker for switching the current Agent profile.
+    OpenSirixAgentPicker,
+    /// Switch the current Sirix Agent profile.
+    SwitchSirixAgent(String),
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
@@ -106,6 +111,17 @@ pub(crate) enum AppEvent {
     SubmitThreadOp {
         thread_id: ThreadId,
         op: Op,
+    },
+
+    /// Resolve an exec approval and optionally persist a Sirix shell rule.
+    SubmitSirixExecApproval {
+        thread_id: ThreadId,
+        id: String,
+        command: Vec<String>,
+        decision: ReviewDecision,
+        persistence_scope: Option<String>,
+        persistence_decision: Option<String>,
+        prefix: Option<String>,
     },
 
     /// Deliver a synthetic history lookup response to a specific thread channel.

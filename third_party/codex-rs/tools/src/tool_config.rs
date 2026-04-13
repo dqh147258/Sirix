@@ -14,7 +14,19 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use serde::Deserialize;
+use std::collections::HashSet;
+use std::env;
+use std::fs;
 use std::path::PathBuf;
+
+const SIRIX_AGENT_RUNTIME_PATH_ENV: &str = "SIRIX_AGENT_RUNTIME_PATH";
+
+#[derive(Debug, Deserialize)]
+struct SirixAgentRuntimeFile {
+    #[serde(default)]
+    builtin_tool_ids: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ShellCommandBackendConfig {
@@ -112,6 +124,7 @@ pub struct ToolsConfig {
     pub agent_jobs_tools: bool,
     pub agent_jobs_worker_tools: bool,
     pub agent_type_description: String,
+    pub allowed_builtin_tools: Option<HashSet<String>>,
 }
 
 pub struct ToolsConfigParams<'a> {
@@ -233,6 +246,7 @@ impl ToolsConfig {
             agent_jobs_tools: include_agent_jobs,
             agent_jobs_worker_tools,
             agent_type_description: String::new(),
+            allowed_builtin_tools: load_sirix_allowed_builtin_tools(),
         }
     }
 
@@ -303,6 +317,12 @@ impl ToolsConfig {
         nested.code_mode_only_enabled = false;
         nested
     }
+
+    pub fn allows_builtin_tool(&self, id: &str) -> bool {
+        self.allowed_builtin_tools
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(id))
+    }
 }
 
 fn supports_image_generation(model_info: &ModelInfo) -> bool {
@@ -320,6 +340,13 @@ fn unified_exec_allowed_in_environment(
             sandbox_policy,
             SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
         ))
+}
+
+fn load_sirix_allowed_builtin_tools() -> Option<HashSet<String>> {
+    let path = env::var(SIRIX_AGENT_RUNTIME_PATH_ENV).ok()?;
+    let raw = fs::read_to_string(path).ok()?;
+    let parsed = serde_json::from_str::<SirixAgentRuntimeFile>(&raw).ok()?;
+    Some(parsed.builtin_tool_ids.into_iter().collect())
 }
 
 #[cfg(test)]

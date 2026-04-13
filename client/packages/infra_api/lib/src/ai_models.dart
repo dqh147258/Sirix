@@ -19,8 +19,7 @@ enum ModelKind {
 
 enum ApprovalMode {
   allow,
-  askOnce,
-  askEachTime,
+  ask,
   deny,
 }
 
@@ -46,8 +45,7 @@ String _modelKindJson(ModelKind value) {
 String _approvalModeJson(ApprovalMode value) {
   return switch (value) {
     ApprovalMode.allow => 'allow',
-    ApprovalMode.askOnce => 'ask_once',
-    ApprovalMode.askEachTime => 'ask_each_time',
+    ApprovalMode.ask => 'ask',
     ApprovalMode.deny => 'deny',
   };
 }
@@ -76,12 +74,41 @@ ModelKind modelKindFromJson(String? raw) {
 ApprovalMode approvalModeFromJson(String? raw) {
   return switch (raw) {
     'allow' => ApprovalMode.allow,
-    'ask_once' || 'askOnce' => ApprovalMode.askOnce,
-    'ask_each_time' || 'askEachTime' => ApprovalMode.askEachTime,
+    'ask' || 'ask_once' || 'askOnce' || 'ask_each_time' || 'askEachTime' => ApprovalMode.ask,
     'deny' => ApprovalMode.deny,
     _ => ApprovalMode.allow,
   };
 }
+
+/// Keep the client-side builtin tool catalog aligned with desktop-server so the
+/// settings page can render picker options without requiring a second discovery
+/// round-trip for static metadata.
+const List<String> kBuiltinToolCatalog = [
+  'shell',
+  'shell_command',
+  'exec_command',
+  'write_stdin',
+  'apply_patch',
+  'update_plan',
+  'request_user_input',
+  'request_permissions',
+  'view_image',
+  'web_search',
+  'image_generation',
+  'code_mode',
+  'js_repl',
+  'js_repl_reset',
+  'list_dir',
+  'list_mcp_resources',
+  'list_mcp_resource_templates',
+  'read_mcp_resource',
+  'spawn_agent',
+  'send_message',
+  'followup_task',
+  'wait_agent',
+  'close_agent',
+  'list_agents',
+];
 
 @immutable
 class CliSettingsConfig {
@@ -432,36 +459,52 @@ class McpGlobalConfigModel {
 }
 
 @immutable
-class AgentCapabilityRuleModel {
-  const AgentCapabilityRuleModel({
-    required this.key,
-    this.approvalMode = ApprovalMode.allow,
+class ShellRulesConfigModel {
+  const ShellRulesConfigModel({
+    this.version = 1,
+    this.mode = ApprovalMode.ask,
+    this.allow = const [],
+    this.deny = const ['rm -rf', 'sudo rm', 'mkfs'],
   });
 
-  final String key;
-  final ApprovalMode approvalMode;
+  final int version;
+  final ApprovalMode mode;
+  final List<String> allow;
+  final List<String> deny;
 
-  factory AgentCapabilityRuleModel.fromJson(Map<String, dynamic> json) {
-    return AgentCapabilityRuleModel(
-      key: json['key'] as String? ?? '',
-      approvalMode: approvalModeFromJson(json['approval_mode'] as String?),
+  factory ShellRulesConfigModel.fromJson(Map<String, dynamic> json) {
+    return ShellRulesConfigModel(
+      version: (json['version'] as num?)?.toInt() ?? 1,
+      mode: approvalModeFromJson(json['mode'] as String?),
+      allow: (json['allow'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
+      deny: (json['deny'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
     );
   }
 
   Map<String, dynamic> toJson() {
     return {
-      'key': key,
-      'approval_mode': _approvalModeJson(approvalMode),
+      'version': version,
+      'mode': _approvalModeJson(mode),
+      'allow': allow,
+      'deny': deny,
     };
   }
 
-  AgentCapabilityRuleModel copyWith({
-    String? key,
-    ApprovalMode? approvalMode,
+  ShellRulesConfigModel copyWith({
+    int? version,
+    ApprovalMode? mode,
+    List<String>? allow,
+    List<String>? deny,
   }) {
-    return AgentCapabilityRuleModel(
-      key: key ?? this.key,
-      approvalMode: approvalMode ?? this.approvalMode,
+    return ShellRulesConfigModel(
+      version: version ?? this.version,
+      mode: mode ?? this.mode,
+      allow: allow ?? this.allow,
+      deny: deny ?? this.deny,
     );
   }
 }
@@ -471,57 +514,68 @@ class AgentConfigModel {
   const AgentConfigModel({
     required this.id,
     required this.name,
+    this.description = '',
     required this.providerId,
     required this.modelId,
+    this.fallbackProviderId = '',
+    this.fallbackModelId = '',
     this.systemPrompt = '',
-    this.builtinToolsEnabled = true,
-    this.enabledSkillIds = const [],
-    this.disabledSkillIds = const [],
-    this.enabledMcpServerIds = const [],
-    this.disabledMcpServerIds = const [],
-    this.capabilityRules = const [],
+    this.approvalMode = ApprovalMode.ask,
+    this.builtinToolIds = kBuiltinToolCatalog,
+    this.skillIds = const [],
+    this.mcpServerIds = const [],
+    this.subAgentIds = const [],
     this.enabled = true,
   });
 
   final String id;
   final String name;
+  final String description;
   final String providerId;
   final String modelId;
+  final String fallbackProviderId;
+  final String fallbackModelId;
   final String systemPrompt;
-  final bool builtinToolsEnabled;
-  final List<String> enabledSkillIds;
-  final List<String> disabledSkillIds;
-  final List<String> enabledMcpServerIds;
-  final List<String> disabledMcpServerIds;
-  final List<AgentCapabilityRuleModel> capabilityRules;
+  final ApprovalMode approvalMode;
+  final List<String> builtinToolIds;
+  final List<String> skillIds;
+  final List<String> mcpServerIds;
+  final List<String> subAgentIds;
   final bool enabled;
 
   factory AgentConfigModel.fromJson(Map<String, dynamic> json) {
-    final rawRules = json['capability_rules'] as List<dynamic>? ?? const [];
+    final builtinToolIds = (json['builtin_tool_ids'] as List<dynamic>? ?? const [])
+        .whereType<String>()
+        .toList(growable: false);
+    final skillIds = (json['skill_ids'] as List<dynamic>? ??
+            json['enabled_skill_ids'] as List<dynamic>? ??
+            const [])
+        .whereType<String>()
+        .toList(growable: false);
+    final mcpServerIds = (json['mcp_server_ids'] as List<dynamic>? ??
+            json['enabled_mcp_server_ids'] as List<dynamic>? ??
+            const [])
+        .whereType<String>()
+        .toList(growable: false);
     return AgentConfigModel(
       id: json['id'] as String? ?? '',
       name: json['name'] as String? ?? '',
+      description: json['description'] as String? ?? '',
       providerId: json['provider_id'] as String? ?? '',
       modelId: json['model_id'] as String? ?? '',
+      fallbackProviderId: json['fallback_provider_id'] as String? ?? '',
+      fallbackModelId: json['fallback_model_id'] as String? ?? '',
       systemPrompt: json['system_prompt'] as String? ?? '',
-      builtinToolsEnabled: json['builtin_tools_enabled'] as bool? ?? true,
-      enabledSkillIds: (json['enabled_skill_ids'] as List<dynamic>? ?? const [])
+      approvalMode: approvalModeFromJson(json['approval_mode'] as String?),
+      builtinToolIds: builtinToolIds.isEmpty
+          ? (json['builtin_tools_enabled'] as bool? ?? true)
+              ? kBuiltinToolCatalog
+              : const <String>[]
+          : builtinToolIds,
+      skillIds: skillIds,
+      mcpServerIds: mcpServerIds,
+      subAgentIds: (json['sub_agent_ids'] as List<dynamic>? ?? const [])
           .whereType<String>()
-          .toList(growable: false),
-      disabledSkillIds: (json['disabled_skill_ids'] as List<dynamic>? ?? const [])
-          .whereType<String>()
-          .toList(growable: false),
-      enabledMcpServerIds:
-          (json['enabled_mcp_server_ids'] as List<dynamic>? ?? const [])
-              .whereType<String>()
-              .toList(growable: false),
-      disabledMcpServerIds:
-          (json['disabled_mcp_server_ids'] as List<dynamic>? ?? const [])
-              .whereType<String>()
-              .toList(growable: false),
-      capabilityRules: rawRules
-          .whereType<Map<String, dynamic>>()
-          .map(AgentCapabilityRuleModel.fromJson)
           .toList(growable: false),
       enabled: json['enabled'] as bool? ?? true,
     );
@@ -531,15 +585,17 @@ class AgentConfigModel {
     return {
       'id': id,
       'name': name,
+      'description': description,
       'provider_id': providerId,
       'model_id': modelId,
+      'fallback_provider_id': fallbackProviderId,
+      'fallback_model_id': fallbackModelId,
       'system_prompt': systemPrompt,
-      'builtin_tools_enabled': builtinToolsEnabled,
-      'enabled_skill_ids': enabledSkillIds,
-      'disabled_skill_ids': disabledSkillIds,
-      'enabled_mcp_server_ids': enabledMcpServerIds,
-      'disabled_mcp_server_ids': disabledMcpServerIds,
-      'capability_rules': capabilityRules.map((item) => item.toJson()).toList(growable: false),
+      'approval_mode': _approvalModeJson(approvalMode),
+      'builtin_tool_ids': builtinToolIds,
+      'skill_ids': skillIds,
+      'mcp_server_ids': mcpServerIds,
+      'sub_agent_ids': subAgentIds,
       'enabled': enabled,
     };
   }
@@ -547,29 +603,33 @@ class AgentConfigModel {
   AgentConfigModel copyWith({
     String? id,
     String? name,
+    String? description,
     String? providerId,
     String? modelId,
+    String? fallbackProviderId,
+    String? fallbackModelId,
     String? systemPrompt,
-    bool? builtinToolsEnabled,
-    List<String>? enabledSkillIds,
-    List<String>? disabledSkillIds,
-    List<String>? enabledMcpServerIds,
-    List<String>? disabledMcpServerIds,
-    List<AgentCapabilityRuleModel>? capabilityRules,
+    ApprovalMode? approvalMode,
+    List<String>? builtinToolIds,
+    List<String>? skillIds,
+    List<String>? mcpServerIds,
+    List<String>? subAgentIds,
     bool? enabled,
   }) {
     return AgentConfigModel(
       id: id ?? this.id,
       name: name ?? this.name,
+      description: description ?? this.description,
       providerId: providerId ?? this.providerId,
       modelId: modelId ?? this.modelId,
+      fallbackProviderId: fallbackProviderId ?? this.fallbackProviderId,
+      fallbackModelId: fallbackModelId ?? this.fallbackModelId,
       systemPrompt: systemPrompt ?? this.systemPrompt,
-      builtinToolsEnabled: builtinToolsEnabled ?? this.builtinToolsEnabled,
-      enabledSkillIds: enabledSkillIds ?? this.enabledSkillIds,
-      disabledSkillIds: disabledSkillIds ?? this.disabledSkillIds,
-      enabledMcpServerIds: enabledMcpServerIds ?? this.enabledMcpServerIds,
-      disabledMcpServerIds: disabledMcpServerIds ?? this.disabledMcpServerIds,
-      capabilityRules: capabilityRules ?? this.capabilityRules,
+      approvalMode: approvalMode ?? this.approvalMode,
+      builtinToolIds: builtinToolIds ?? this.builtinToolIds,
+      skillIds: skillIds ?? this.skillIds,
+      mcpServerIds: mcpServerIds ?? this.mcpServerIds,
+      subAgentIds: subAgentIds ?? this.subAgentIds,
       enabled: enabled ?? this.enabled,
     );
   }

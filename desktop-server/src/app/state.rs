@@ -8,6 +8,7 @@ use crate::app::{
     ai::{approval::AiApprovalRegistry, config::SirixConfigStore, session::AiSessionRegistry},
     auth::AuthSessionStore,
     runtime_logger::RuntimeLogger,
+    status::StatusRegistry,
     terminal::manager::TerminalManager,
 };
 use crate::bootstrap::config::AppConfig;
@@ -24,6 +25,7 @@ pub struct AppState {
     pub sirix_config_store: Arc<SirixConfigStore>,
     pub ai_session_registry: Arc<AiSessionRegistry>,
     pub ai_approval_registry: Arc<AiApprovalRegistry>,
+    pub status_registry: Arc<RwLock<StatusRegistry>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +77,7 @@ impl AppState {
                 AiApprovalRegistry::new(approval_storage_dir)
                     .expect("failed to initialize ai approval registry"),
             ),
+            status_registry: Arc::new(RwLock::new(StatusRegistry::default())),
         }
     }
 }

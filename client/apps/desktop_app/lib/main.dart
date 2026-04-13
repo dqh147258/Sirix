@@ -105,15 +105,11 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
         child: _DesktopDashboardPage(session: authState.session!),
       ),
       _DesktopSection(
-        label: l10n.terminalNav,
-        title: l10n.terminalPageTitle,
-        subtitle: l10n.terminalCapabilityHint,
-        icon: Icons.terminal_rounded,
-        child: TerminalPage(
-          accessToken: authState.session!.accessToken,
-          deviceId: authorizeState.registeredDeviceId,
-          showHeader: false,
-        ),
+        label: l10n.status,
+        title: 'Runtime Status',
+        subtitle: 'MCP health, backend connectivity, and runtime overview',
+        icon: Icons.monitor_heart_rounded,
+        child: const StatusPage(showHeader: false),
       ),
       _DesktopSection(
         label: l10n.authorizeNav,

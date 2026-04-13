@@ -140,6 +140,7 @@ mod resume_picker;
 mod selection_list;
 mod session_log;
 mod shimmer;
+mod sirix_local_api;
 mod skills_helpers;
 mod slash_command;
 mod status;

@@ -8,6 +8,7 @@ enum AiSettingsSection {
   skills,
   mcp,
   agents,
+  shellRules,
 }
 
 @immutable
@@ -20,6 +21,7 @@ class AiSettingsState {
     this.noticeMessage,
     this.selectedSection = AiSettingsSection.cli,
     this.config = const SirixAiConfig(),
+    this.shellRules = const ShellRulesConfigModel(),
     this.effective,
   });
 
@@ -30,6 +32,7 @@ class AiSettingsState {
   final String? noticeMessage;
   final AiSettingsSection selectedSection;
   final SirixAiConfig config;
+  final ShellRulesConfigModel shellRules;
   final EffectiveSirixAiConfig? effective;
 
   AiSettingsState copyWith({
@@ -40,6 +43,7 @@ class AiSettingsState {
     String? noticeMessage,
     AiSettingsSection? selectedSection,
     SirixAiConfig? config,
+    ShellRulesConfigModel? shellRules,
     EffectiveSirixAiConfig? effective,
     bool clearError = false,
     bool clearNotice = false,
@@ -52,6 +56,7 @@ class AiSettingsState {
       noticeMessage: clearNotice ? null : (noticeMessage ?? this.noticeMessage),
       selectedSection: selectedSection ?? this.selectedSection,
       config: config ?? this.config,
+      shellRules: shellRules ?? this.shellRules,
       effective: effective ?? this.effective,
     );
   }

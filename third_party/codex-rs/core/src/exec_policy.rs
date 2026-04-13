@@ -1,4 +1,5 @@
 use std::io::ErrorKind;
+use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_shell_command::is_dangerous_command::command_might_be_dangerous;
 use codex_shell_command::is_safe_command::is_known_safe_command;
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::fs;
 use tokio::task::spawn_blocking;
@@ -47,6 +49,13 @@ const REJECT_RULES_APPROVAL_REASON: &str =
 const RULES_DIR_NAME: &str = "rules";
 const RULE_EXTENSION: &str = "rules";
 const DEFAULT_POLICY_FILE: &str = "default.rules";
+const SIRIX_AGENT_RUNTIME_PATH_ENV: &str = "SIRIX_AGENT_RUNTIME_PATH";
+
+#[derive(Debug, Deserialize)]
+struct SirixAgentRuntimeFile {
+    #[serde(default)]
+    shell_mode: Option<String>,
+}
 static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["python3"],
     &["python3", "-"],
@@ -221,6 +230,10 @@ impl ExecPolicyManager {
 
     pub(crate) fn current(&self) -> Arc<Policy> {
         self.policy.load_full()
+    }
+
+    pub(crate) fn replace(&self, policy: Arc<Policy>) {
+        self.policy.store(policy);
     }
 
     pub(crate) async fn create_exec_approval_requirement_for_command(
@@ -542,6 +555,10 @@ pub fn render_decision_for_unmatched_command(
     sandbox_permissions: SandboxPermissions,
     used_complex_parsing: bool,
 ) -> Decision {
+    if let Some(mode) = sirix_shell_mode_override() {
+        return mode;
+    }
+
     if is_known_safe_command(command) && !used_complex_parsing {
         return Decision::Allow;
     }
@@ -623,6 +640,18 @@ pub fn render_decision_for_unmatched_command(
                 }
             }
         },
+    }
+}
+
+fn sirix_shell_mode_override() -> Option<Decision> {
+    let path = env::var(SIRIX_AGENT_RUNTIME_PATH_ENV).ok()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let parsed = serde_json::from_str::<SirixAgentRuntimeFile>(&raw).ok()?;
+    match parsed.shell_mode?.trim().to_ascii_lowercase().as_str() {
+        "allow" => Some(Decision::Allow),
+        "ask" => Some(Decision::Prompt),
+        "deny" => Some(Decision::Forbidden),
+        _ => None,
     }
 }
 

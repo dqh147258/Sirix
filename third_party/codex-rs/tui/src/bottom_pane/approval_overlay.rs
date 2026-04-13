@@ -105,6 +105,7 @@ pub(crate) struct ApprovalOverlay {
     app_event_tx: AppEventSender,
     list: ListSelectionView,
     options: Vec<ApprovalOption>,
+    pending_exec_prefix_selection: Option<PendingExecPrefixSelection>,
     current_complete: bool,
     done: bool,
     features: Features,
@@ -118,6 +119,7 @@ impl ApprovalOverlay {
             app_event_tx: app_event_tx.clone(),
             list: ListSelectionView::new(Default::default(), app_event_tx),
             options: Vec::new(),
+            pending_exec_prefix_selection: None,
             current_complete: false,
             done: false,
             features,
@@ -132,6 +134,7 @@ impl ApprovalOverlay {
 
     fn set_current(&mut self, request: ApprovalRequest) {
         self.current_complete = false;
+        self.pending_exec_prefix_selection = None;
         let header = build_header(&request);
         let (options, params) = Self::build_options(&request, header, &self.features);
         self.current_request = Some(request);
@@ -212,13 +215,14 @@ impl ApprovalOverlay {
         if self.current_complete {
             return;
         }
-        let Some(option) = self.options.get(actual_idx) else {
+        let Some(option_decision) = self.options.get(actual_idx).map(|option| option.decision.clone())
+        else {
             return;
         };
-        if let Some(request) = self.current_request.as_ref() {
-            match (request, &option.decision) {
+        if let Some(request) = self.current_request.clone() {
+            match (&request, option_decision) {
                 (ApprovalRequest::Exec { id, command, .. }, ApprovalDecision::Review(decision)) => {
-                    self.handle_exec_decision(id, command, decision.clone());
+                    self.handle_exec_decision(id, command, decision);
                 }
                 (
                     ApprovalRequest::Permissions {
@@ -227,9 +231,9 @@ impl ApprovalOverlay {
                         ..
                     },
                     ApprovalDecision::Review(decision),
-                ) => self.handle_permissions_decision(call_id, permissions, decision.clone()),
+                ) => self.handle_permissions_decision(call_id, permissions, decision),
                 (ApprovalRequest::ApplyPatch { id, .. }, ApprovalDecision::Review(decision)) => {
-                    self.handle_patch_decision(id, decision.clone());
+                    self.handle_patch_decision(id, decision);
                 }
                 (
                     ApprovalRequest::McpElicitation {
@@ -239,7 +243,44 @@ impl ApprovalOverlay {
                     },
                     ApprovalDecision::McpElicitation(decision),
                 ) => {
-                    self.handle_elicitation_decision(server_name, request_id, *decision);
+                    self.handle_elicitation_decision(server_name, request_id, decision);
+                }
+                (
+                    ApprovalRequest::Exec { command, .. },
+                    ApprovalDecision::SirixPersistedExec {
+                        review_decision,
+                        persistence_decision,
+                        persistence_scope,
+                    },
+                ) => {
+                    self.open_exec_prefix_selection(
+                        command,
+                        review_decision,
+                        persistence_decision,
+                        persistence_scope,
+                    );
+                    return;
+                }
+                (
+                    ApprovalRequest::Exec {
+                        thread_id, id, command, ..
+                    },
+                    ApprovalDecision::SirixPersistedExecPrefix {
+                        review_decision,
+                        persistence_decision,
+                        persistence_scope,
+                        prefix,
+                    },
+                ) => {
+                    self.app_event_tx.send(AppEvent::SubmitSirixExecApproval {
+                        thread_id: *thread_id,
+                        id: id.clone(),
+                        command: command.clone(),
+                        decision: review_decision,
+                        persistence_scope: Some(persistence_scope),
+                        persistence_decision: Some(persistence_decision),
+                        prefix: Some(prefix),
+                    });
                 }
                 _ => {}
             }
@@ -247,6 +288,76 @@ impl ApprovalOverlay {
 
         self.current_complete = true;
         self.advance_queue();
+    }
+
+    fn open_exec_prefix_selection(
+        &mut self,
+        command: &[String],
+        review_decision: ReviewDecision,
+        persistence_decision: &'static str,
+        persistence_scope: &'static str,
+    ) {
+        let prefixes = exec_prefix_candidates(command);
+        if prefixes.is_empty() {
+            return;
+        }
+        self.pending_exec_prefix_selection = Some(PendingExecPrefixSelection {
+            review_decision,
+            persistence_decision: persistence_decision.to_string(),
+            persistence_scope: persistence_scope.to_string(),
+        });
+        self.options = prefixes
+            .iter()
+            .enumerate()
+            .map(|(index, prefix)| ApprovalOption {
+                label: prefix.clone(),
+                decision: ApprovalDecision::SirixPersistedExecPrefix {
+                    review_decision: self
+                        .pending_exec_prefix_selection
+                        .as_ref()
+                        .expect("pending prefix selection")
+                        .review_decision
+                        .clone(),
+                    persistence_decision: self
+                        .pending_exec_prefix_selection
+                        .as_ref()
+                        .expect("pending prefix selection")
+                        .persistence_decision
+                        .clone(),
+                    persistence_scope: self
+                        .pending_exec_prefix_selection
+                        .as_ref()
+                        .expect("pending prefix selection")
+                        .persistence_scope
+                        .clone(),
+                    prefix: prefix.clone(),
+                },
+                display_shortcut: Some(numeric_shortcut(index)),
+                additional_shortcuts: Vec::new(),
+            })
+            .collect();
+        self.list = ListSelectionView::new(
+            SelectionViewParams {
+                header: Box::new(Paragraph::new(vec![
+                    Line::from("Choose the command prefix to persist.".bold()),
+                    Line::from(""),
+                    Line::from(strip_bash_lc_and_escape(command)),
+                ])),
+                items: self
+                    .options
+                    .iter()
+                    .map(|option| SelectionItem {
+                        name: option.label.clone(),
+                        display_shortcut: option.display_shortcut,
+                        dismiss_on_select: false,
+                        ..Default::default()
+                    })
+                    .collect(),
+                footer_hint: Some(Line::from("Press a number to persist that prefix.")),
+                ..Default::default()
+            },
+            self.app_event_tx.clone(),
+        );
     }
 
     fn handle_exec_decision(&self, id: &str, command: &[String], decision: ReviewDecision) {
@@ -622,6 +733,17 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
 enum ApprovalDecision {
     Review(ReviewDecision),
     McpElicitation(ElicitationAction),
+    SirixPersistedExec {
+        review_decision: ReviewDecision,
+        persistence_decision: &'static str,
+        persistence_scope: &'static str,
+    },
+    SirixPersistedExecPrefix {
+        review_decision: ReviewDecision,
+        persistence_decision: String,
+        persistence_scope: String,
+        prefix: String,
+    },
 }
 
 #[derive(Clone)]
@@ -630,6 +752,13 @@ struct ApprovalOption {
     decision: ApprovalDecision,
     display_shortcut: Option<KeyBinding>,
     additional_shortcuts: Vec<KeyBinding>,
+}
+
+#[derive(Clone)]
+struct PendingExecPrefixSelection {
+    review_decision: ReviewDecision,
+    persistence_decision: String,
+    persistence_scope: String,
 }
 
 impl ApprovalOption {
@@ -645,6 +774,83 @@ fn exec_options(
     network_approval_context: Option<&NetworkApprovalContext>,
     additional_permissions: Option<&PermissionProfile>,
 ) -> Vec<ApprovalOption> {
+    if network_approval_context.is_none() && additional_permissions.is_none() {
+        return vec![
+            ApprovalOption {
+                label: "Allow once".to_string(),
+                decision: ApprovalDecision::Review(ReviewDecision::Approved),
+                display_shortcut: Some(numeric_shortcut(0)),
+                additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
+            },
+            ApprovalOption {
+                label: "Allow session".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Approved,
+                    persistence_decision: "allow",
+                    persistence_scope: "session",
+                },
+                display_shortcut: Some(numeric_shortcut(1)),
+                additional_shortcuts: Vec::new(),
+            },
+            ApprovalOption {
+                label: "Allow workspace".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Approved,
+                    persistence_decision: "allow",
+                    persistence_scope: "workspace",
+                },
+                display_shortcut: Some(numeric_shortcut(2)),
+                additional_shortcuts: Vec::new(),
+            },
+            ApprovalOption {
+                label: "Allow global".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Approved,
+                    persistence_decision: "allow",
+                    persistence_scope: "global",
+                },
+                display_shortcut: Some(numeric_shortcut(3)),
+                additional_shortcuts: Vec::new(),
+            },
+            ApprovalOption {
+                label: "Deny once".to_string(),
+                decision: ApprovalDecision::Review(ReviewDecision::Denied),
+                display_shortcut: Some(numeric_shortcut(4)),
+                additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
+            },
+            ApprovalOption {
+                label: "Deny session".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Denied,
+                    persistence_decision: "deny",
+                    persistence_scope: "session",
+                },
+                display_shortcut: Some(numeric_shortcut(5)),
+                additional_shortcuts: Vec::new(),
+            },
+            ApprovalOption {
+                label: "Deny workspace".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Denied,
+                    persistence_decision: "deny",
+                    persistence_scope: "workspace",
+                },
+                display_shortcut: Some(numeric_shortcut(6)),
+                additional_shortcuts: Vec::new(),
+            },
+            ApprovalOption {
+                label: "Deny global".to_string(),
+                decision: ApprovalDecision::SirixPersistedExec {
+                    review_decision: ReviewDecision::Denied,
+                    persistence_decision: "deny",
+                    persistence_scope: "global",
+                },
+                display_shortcut: Some(numeric_shortcut(7)),
+                additional_shortcuts: Vec::new(),
+            },
+        ];
+    }
+
     available_decisions
         .iter()
         .filter_map(|decision| match decision {
@@ -728,6 +934,25 @@ fn exec_options(
             }),
         })
         .collect()
+}
+
+fn exec_prefix_candidates(command: &[String]) -> Vec<String> {
+    let full = strip_bash_lc_and_escape(command);
+    let tokens = full
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut prefixes = Vec::new();
+    for length in (1..=tokens.len()).rev() {
+        prefixes.push(tokens[..length].join(" "));
+    }
+    prefixes
+}
+
+fn numeric_shortcut(index: usize) -> KeyBinding {
+    let digit = char::from_u32(b'1' as u32 + index as u32).unwrap_or('1');
+    key_hint::plain(KeyCode::Char(digit))
 }
 
 pub(crate) fn format_additional_permissions_rule(

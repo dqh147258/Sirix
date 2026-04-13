@@ -637,6 +637,7 @@ async fn permissions_selection_sends_approvals_reviewer_in_override_turn_context
             summary: None,
             service_tier: None,
             collaboration_mode: None,
+            developer_instructions: None,
             personality: None,
         }
     );

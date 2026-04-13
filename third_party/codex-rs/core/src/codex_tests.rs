@@ -1374,6 +1374,7 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
             summary: None,
             service_tier: None,
             collaboration_mode: Some(collaboration_mode),
+            developer_instructions: None,
             personality: None,
         })
         .await?;
@@ -3270,6 +3271,7 @@ fn op_kind_distinguishes_turn_ops() {
             summary: None,
             service_tier: None,
             collaboration_mode: None,
+            developer_instructions: None,
             personality: None,
         }
         .kind(),

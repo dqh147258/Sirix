@@ -42,12 +42,9 @@ class _DesktopShellPageState extends ConsumerState<DesktopShellPage> {
     final session = authState.session!;
     final sections = [
       _DesktopShellSection(
-        label: context.l10n.terminal,
-        icon: Icons.terminal_rounded,
-        child: TerminalPage(
-          accessToken: session.accessToken,
-          deviceId: authorizeState.registeredDeviceId,
-        ),
+        label: context.l10n.status,
+        icon: Icons.monitor_heart_rounded,
+        child: const StatusPage(showHeader: false),
       ),
       _DesktopShellSection(
         label: context.l10n.authorize,

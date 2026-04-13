@@ -62,6 +62,7 @@ pub(crate) enum AppCommandView<'a> {
         effort: &'a Option<Option<ReasoningEffortConfig>>,
         summary: &'a Option<ReasoningSummaryConfig>,
         service_tier: &'a Option<Option<ServiceTier>>,
+        developer_instructions: &'a Option<Option<String>>,
         collaboration_mode: &'a Option<CollaborationMode>,
         personality: &'a Option<Personality>,
     },
@@ -180,6 +181,7 @@ impl AppCommand {
         effort: Option<Option<ReasoningEffortConfig>>,
         summary: Option<ReasoningSummaryConfig>,
         service_tier: Option<Option<ServiceTier>>,
+        developer_instructions: Option<Option<String>>,
         collaboration_mode: Option<CollaborationMode>,
         personality: Option<Personality>,
     ) -> Self {
@@ -193,6 +195,7 @@ impl AppCommand {
             effort,
             summary,
             service_tier,
+            developer_instructions,
             collaboration_mode,
             personality,
         })
@@ -335,6 +338,7 @@ impl AppCommand {
                 effort,
                 summary,
                 service_tier,
+                developer_instructions,
                 collaboration_mode,
                 personality,
             } => AppCommandView::OverrideTurnContext {
@@ -347,6 +351,7 @@ impl AppCommand {
                 effort,
                 summary,
                 service_tier,
+                developer_instructions,
                 collaboration_mode,
                 personality,
             },

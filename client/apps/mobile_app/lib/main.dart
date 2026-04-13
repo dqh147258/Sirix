@@ -151,14 +151,7 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
         connectedSession: _activeSession,
         layout: RemoteViewLayout.monitor,
       ),
-      TerminalPage(
-        accessToken: session.accessToken,
-        deviceId: _activeSession?.targetDeviceId ?? remoteViewState.deviceId,
-        sessionId: _activeSession?.sessionId ?? remoteViewState.sessionId,
-        allowCreate:
-            (_activeSession?.targetDeviceId ?? remoteViewState.deviceId) != null &&
-            (_activeSession?.sessionId ?? remoteViewState.sessionId) != null,
-      ),
+      const StatusPage(showHeader: false),
       _MobileAccountPage(
         username: session.username,
         onLogout: () {
@@ -223,9 +216,9 @@ class _MobileHomePageState extends ConsumerState<MobileHomePage> {
             selectedIcon: Icons.live_tv_rounded,
           ),
           _MobileNavDestination(
-            label: l10n.terminal,
-            icon: Icons.terminal_rounded,
-            selectedIcon: Icons.terminal,
+            label: l10n.status,
+            icon: Icons.monitor_heart_outlined,
+            selectedIcon: Icons.monitor_heart,
           ),
           _MobileNavDestination(
             label: l10n.account,

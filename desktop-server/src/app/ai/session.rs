@@ -1,11 +1,19 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Context;
+use chrono::{DateTime, Duration, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::app::{
-    ai::config::{ProviderConfig, SirixConfigStore},
+    ai::config::{
+        AiLaunchConfig, ApprovalMode, ProviderConfig, SessionAgentRuntimeConfig, ShellRulesConfig,
+        SirixConfigStore,
+    },
     state::AppState,
 };
 
@@ -55,6 +63,39 @@ struct AiSessionRegistryState {
 struct SessionProviderRouting {
     active_provider_id: String,
     providers: Vec<ProviderConfig>,
+    codex_home: PathBuf,
+    workspace_root: PathBuf,
+    current_agent_id: String,
+    current_model_id: String,
+    current_shell_mode: ApprovalMode,
+    builtin_tool_ids: Vec<String>,
+    session_shell_rules: ShellRulesConfig,
+    fallback: SessionFallbackState,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionRuntimeSnapshot {
+    pub ai_session_id: Uuid,
+    pub terminal_id: Uuid,
+    pub cwd: String,
+    pub agent_id: String,
+    pub model_id: String,
+    pub codex_home: PathBuf,
+    pub workspace_root: PathBuf,
+    pub shell_mode: ApprovalMode,
+    pub builtin_tool_ids: Vec<String>,
+    pub session_shell_rules: ShellRulesConfig,
+    pub fallback: SessionFallbackState,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionFallbackState {
+    pub primary_provider_id: String,
+    pub primary_model_id: String,
+    pub fallback_provider_id: String,
+    pub fallback_model_id: String,
+    pub primary_failure_count: u32,
+    pub primary_disabled_until: Option<DateTime<Utc>>,
 }
 
 impl AiSessionRegistry {
@@ -65,8 +106,8 @@ impl AiSessionRegistry {
     pub async fn insert(
         &self,
         record: AiSessionRecord,
-        active_provider: ProviderConfig,
-        session_providers: Vec<ProviderConfig>,
+        launch: &AiLaunchConfig,
+        runtime: SessionAgentRuntimeConfig,
     ) {
         let ai_session_id = record.ai_session_id;
         let terminal_id = record.terminal_id;
@@ -80,8 +121,28 @@ impl AiSessionRegistry {
         state.provider_index.insert(
             ai_session_id,
             SessionProviderRouting {
-                active_provider_id: active_provider.id,
-                providers: session_providers,
+                active_provider_id: launch.provider.id.clone(),
+                providers: launch.session_providers.clone(),
+                codex_home: launch.codex_home.clone(),
+                workspace_root: launch.workspace_root.clone(),
+                current_agent_id: runtime.agent_id,
+                current_model_id: launch.model.id.clone(),
+                current_shell_mode: runtime.shell_mode,
+                builtin_tool_ids: runtime.builtin_tool_ids,
+                session_shell_rules: ShellRulesConfig {
+                    version: 1,
+                    mode: ApprovalMode::Ask,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+                fallback: SessionFallbackState {
+                    primary_provider_id: launch.agent.provider_id.clone(),
+                    primary_model_id: launch.agent.model_id.clone(),
+                    fallback_provider_id: launch.agent.fallback_provider_id.clone(),
+                    fallback_model_id: launch.agent.fallback_model_id.clone(),
+                    primary_failure_count: 0,
+                    primary_disabled_until: None,
+                },
             },
         );
         state.sessions.insert(ai_session_id, record);
@@ -113,6 +174,120 @@ impl AiSessionRegistry {
         resolve_provider_for_model(routing, model_id)
     }
 
+    pub async fn resolve_runtime(&self, ai_session_id: Uuid) -> Option<SessionRuntimeSnapshot> {
+        let state = self.state.read().await;
+        let record = state.sessions.get(&ai_session_id)?.clone();
+        let routing = state.provider_index.get(&ai_session_id)?.clone();
+        Some(SessionRuntimeSnapshot {
+            ai_session_id: record.ai_session_id,
+            terminal_id: record.terminal_id,
+            cwd: record.cwd,
+            agent_id: record.agent_id,
+            model_id: record.model_id,
+            codex_home: routing.codex_home,
+            workspace_root: routing.workspace_root,
+            shell_mode: routing.current_shell_mode,
+            builtin_tool_ids: routing.builtin_tool_ids,
+            session_shell_rules: routing.session_shell_rules,
+            fallback: routing.fallback,
+        })
+    }
+
+    pub async fn update_runtime(
+        &self,
+        ai_session_id: Uuid,
+        launch: &AiLaunchConfig,
+        runtime: SessionAgentRuntimeConfig,
+    ) -> Option<()> {
+        let mut state = self.state.write().await;
+        let record = state.sessions.get_mut(&ai_session_id)?;
+        record.agent_id = launch.agent.id.clone();
+        record.model_id = launch.model.id.clone();
+        let routing = state.provider_index.get_mut(&ai_session_id)?;
+        routing.active_provider_id = launch.provider.id.clone();
+        routing.providers = launch.session_providers.clone();
+        routing.codex_home = launch.codex_home.clone();
+        routing.workspace_root = launch.workspace_root.clone();
+        routing.current_agent_id = runtime.agent_id;
+        routing.current_model_id = launch.model.id.clone();
+        routing.current_shell_mode = runtime.shell_mode;
+        routing.builtin_tool_ids = runtime.builtin_tool_ids;
+        routing.fallback = SessionFallbackState {
+            primary_provider_id: launch.agent.provider_id.clone(),
+            primary_model_id: launch.agent.model_id.clone(),
+            fallback_provider_id: launch.agent.fallback_provider_id.clone(),
+            fallback_model_id: launch.agent.fallback_model_id.clone(),
+            primary_failure_count: 0,
+            primary_disabled_until: None,
+        };
+        Some(())
+    }
+
+    pub async fn push_session_shell_rule(
+        &self,
+        ai_session_id: Uuid,
+        decision: ApprovalMode,
+        prefix: String,
+    ) -> Option<()> {
+        let mut state = self.state.write().await;
+        let routing = state.provider_index.get_mut(&ai_session_id)?;
+        match decision {
+            ApprovalMode::Allow => {
+                routing
+                    .session_shell_rules
+                    .deny
+                    .retain(|item| item != &prefix);
+                if !routing.session_shell_rules.allow.contains(&prefix) {
+                    routing.session_shell_rules.allow.push(prefix);
+                }
+            }
+            ApprovalMode::Deny => {
+                routing
+                    .session_shell_rules
+                    .allow
+                    .retain(|item| item != &prefix);
+                if !routing.session_shell_rules.deny.contains(&prefix) {
+                    routing.session_shell_rules.deny.push(prefix);
+                }
+            }
+            ApprovalMode::Ask => {}
+        }
+        Some(())
+    }
+
+    pub async fn record_primary_model_failure(
+        &self,
+        ai_session_id: Uuid,
+        requested_model_id: &str,
+    ) -> Option<SessionFallbackState> {
+        let mut state = self.state.write().await;
+        let routing = state.provider_index.get_mut(&ai_session_id)?;
+        if routing.fallback.primary_model_id != requested_model_id
+            || routing.fallback.fallback_model_id.trim().is_empty()
+        {
+            return Some(routing.fallback.clone());
+        }
+        routing.fallback.primary_failure_count += 1;
+        if routing.fallback.primary_failure_count >= 3 {
+            routing.fallback.primary_disabled_until = Some(Utc::now() + Duration::hours(1));
+        }
+        Some(routing.fallback.clone())
+    }
+
+    pub async fn record_primary_model_success(
+        &self,
+        ai_session_id: Uuid,
+        requested_model_id: &str,
+    ) -> Option<()> {
+        let mut state = self.state.write().await;
+        let routing = state.provider_index.get_mut(&ai_session_id)?;
+        if routing.fallback.primary_model_id == requested_model_id {
+            routing.fallback.primary_failure_count = 0;
+            routing.fallback.primary_disabled_until = None;
+        }
+        Some(())
+    }
+
     pub async fn resolve_session_providers(
         &self,
         ai_session_id: Uuid,
@@ -127,11 +302,60 @@ impl AiSessionRegistry {
     }
 }
 
+pub async fn reconfigure_ai_session_agent(
+    state: &AppState,
+    config_store: &SirixConfigStore,
+    ai_session_id: Uuid,
+    agent_id: &str,
+) -> anyhow::Result<(AiLaunchConfig, SessionAgentRuntimeConfig)> {
+    let runtime = state
+        .ai_session_registry
+        .resolve_runtime(ai_session_id)
+        .await
+        .with_context(|| format!("ai session not found for id={ai_session_id}"))?;
+    let launch = config_store.build_launch_config(
+        runtime.workspace_root.as_path(),
+        Some(agent_id),
+        ai_session_id,
+    )?;
+    let session_runtime = config_store.build_session_agent_runtime(
+        runtime.workspace_root.as_path(),
+        &launch.agent,
+        &runtime.session_shell_rules,
+    )?;
+    let runtime_state = state.runtime.read().await;
+    let local_ws_port = runtime_state.local_ws_port;
+    drop(runtime_state);
+    config_store.write_codex_bridge_config(
+        &launch,
+        runtime.workspace_root.as_path(),
+        local_ws_port,
+        ai_session_id,
+    )?;
+    config_store.write_session_agent_runtime_file(&launch.codex_home, &session_runtime)?;
+    config_store.write_session_exec_policy_file(
+        &launch.codex_home,
+        runtime.workspace_root.as_path(),
+        &runtime.session_shell_rules,
+    )?;
+    state
+        .ai_session_registry
+        .update_runtime(ai_session_id, &launch, session_runtime.clone())
+        .await
+        .with_context(|| format!("failed to update ai session runtime for {ai_session_id}"))?;
+    Ok((launch, session_runtime))
+}
+
 fn resolve_provider_for_model(
     routing: &SessionProviderRouting,
     model_id: &str,
 ) -> Option<ProviderConfig> {
-    let trimmed_model_id = model_id.trim();
+    let resolved_model_id = if should_use_fallback_model(&routing.fallback, model_id.trim()) {
+        routing.fallback.fallback_model_id.as_str()
+    } else {
+        model_id.trim()
+    };
+    let trimmed_model_id = resolved_model_id.trim();
     if trimmed_model_id.is_empty() {
         return routing
             .providers
@@ -159,6 +383,14 @@ fn resolve_provider_for_model(
             )
         })
         .cloned()
+}
+
+fn should_use_fallback_model(state: &SessionFallbackState, model_id: &str) -> bool {
+    !state.fallback_model_id.trim().is_empty()
+        && state.primary_model_id == model_id
+        && state
+            .primary_disabled_until
+            .is_some_and(|until| until > Utc::now())
 }
 
 pub async fn launch_ai_session(
@@ -202,15 +434,43 @@ pub async fn launch_ai_session(
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
-    let resolved_provider = launch.provider.clone();
-    let session_providers = launch.session_providers.clone();
+    let launch_runtime = config_store.build_session_agent_runtime(
+        cwd,
+        &launch.agent,
+        &ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        },
+    )?;
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
     config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
+    config_store.write_session_agent_runtime_file(&launch.codex_home, &launch_runtime)?;
+    config_store.write_session_exec_policy_file(
+        &launch.codex_home,
+        cwd,
+        &ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        },
+    )?;
+    let launch_for_registry = launch.clone();
     state
         .terminal_manager
-        .create_codex_terminal(terminal_id, launch, cols, rows, mirrored_to_backend)
+        .create_codex_terminal(
+            terminal_id,
+            launch,
+            ai_session_id,
+            local_ws_port,
+            cols,
+            rows,
+            mirrored_to_backend,
+        )
         .await
         .context("failed to create codex-backed terminal")?;
 
@@ -225,8 +485,8 @@ pub async fn launch_ai_session(
                 model_id: resolved_model_id,
                 mirrored_to_backend,
             },
-            resolved_provider,
-            session_providers,
+            &launch_for_registry,
+            launch_runtime,
         )
         .await;
 
@@ -259,11 +519,31 @@ pub async fn launch_ai_session_in_current_terminal(
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
     let resolved_agent_id = launch.agent.id.clone();
     let resolved_model_id = launch.model.id.clone();
-    let session_providers = launch.session_providers.clone();
+    let launch_runtime = config_store.build_session_agent_runtime(
+        cwd,
+        &launch.agent,
+        &ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        },
+    )?;
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
     config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
+    config_store.write_session_agent_runtime_file(&launch.codex_home, &launch_runtime)?;
+    config_store.write_session_exec_policy_file(
+        &launch.codex_home,
+        cwd,
+        &ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        },
+    )?;
 
     state
         .ai_session_registry
@@ -276,8 +556,8 @@ pub async fn launch_ai_session_in_current_terminal(
                 model_id: resolved_model_id,
                 mirrored_to_backend: false,
             },
-            launch.provider.clone(),
-            session_providers,
+            &launch,
+            launch_runtime,
         )
         .await;
 
@@ -318,7 +598,9 @@ async fn remote_sync_available(state: &AppState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ai::config::{ModelConfig, ModelKind, ProviderKind};
+    use crate::app::ai::config::{
+        ApprovalMode, ModelConfig, ModelKind, ProviderKind, SessionAgentRuntimeConfig, SirixConfig,
+    };
 
     fn test_provider(id: &str) -> ProviderConfig {
         ProviderConfig {
@@ -339,6 +621,36 @@ mod tests {
                 supports_images: false,
                 enabled: true,
             }],
+        }
+    }
+
+    fn test_launch(provider_id: &str) -> AiLaunchConfig {
+        let provider = test_provider(provider_id);
+        let mut agent = SirixConfig::default()
+            .agents
+            .into_iter()
+            .next()
+            .expect("default agent should exist");
+        agent.id = format!("agent-{provider_id}");
+        agent.provider_id = provider.id.clone();
+        agent.model_id = "model".to_string();
+        AiLaunchConfig {
+            effective_config: SirixConfig::default(),
+            agent,
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider],
+            codex_home: PathBuf::from("/tmp/.sirix"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        }
+    }
+
+    fn test_runtime(agent_id: &str) -> SessionAgentRuntimeConfig {
+        SessionAgentRuntimeConfig {
+            agent_id: agent_id.to_string(),
+            shell_mode: ApprovalMode::Ask,
+            builtin_tool_ids: vec!["shell".to_string()],
         }
     }
 
@@ -366,15 +678,15 @@ mod tests {
         registry
             .insert(
                 first.clone(),
-                test_provider("provider-a"),
-                vec![test_provider("provider-a")],
+                &test_launch("provider-a"),
+                test_runtime("agent-a"),
             )
             .await;
         registry
             .insert(
                 second.clone(),
-                test_provider("provider-b"),
-                vec![test_provider("provider-b")],
+                &test_launch("provider-b"),
+                test_runtime("agent-b"),
             )
             .await;
 
@@ -413,8 +725,14 @@ mod tests {
         registry
             .insert(
                 record.clone(),
-                test_provider("provider-b"),
-                vec![test_provider("provider-a"), test_provider("provider-b")],
+                &AiLaunchConfig {
+                    session_providers: vec![
+                        test_provider("provider-a"),
+                        test_provider("provider-b"),
+                    ],
+                    ..test_launch("provider-b")
+                },
+                test_runtime("agent"),
             )
             .await;
 

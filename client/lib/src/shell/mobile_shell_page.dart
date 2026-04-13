@@ -66,11 +66,7 @@ class _MobileShellPageState extends ConsumerState<MobileShellPage> {
         accessToken: session.accessToken,
         connectedSession: shellState.activeRemoteSession,
       ),
-      TerminalPage(
-        accessToken: session.accessToken,
-        deviceId: shellState.activeRemoteSession?.targetDeviceId ?? remoteViewState.deviceId,
-        allowCreate: false,
-      ),
+      const StatusPage(showHeader: false),
       _ShellAccountPage(
         username: session.username,
         onLogout: () {
@@ -130,9 +126,9 @@ class _MobileShellPageState extends ConsumerState<MobileShellPage> {
               label: context.l10n.monitors,
             ),
             NavigationDestination(
-              icon: const Icon(Icons.terminal_rounded),
-              selectedIcon: const Icon(Icons.terminal),
-              label: context.l10n.terminal,
+              icon: const Icon(Icons.monitor_heart_outlined),
+              selectedIcon: const Icon(Icons.monitor_heart),
+              label: context.l10n.status,
             ),
             NavigationDestination(
               icon: const Icon(Icons.person_outline_rounded),

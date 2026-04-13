@@ -47,6 +47,7 @@ use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
+use crate::sirix_local_api;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 use crate::tui;
@@ -1419,6 +1420,7 @@ impl App {
                 /*effort*/ None,
                 /*summary*/ None,
                 /*service_tier*/ None,
+                /*developer_instructions*/ None,
                 /*collaboration_mode*/ None,
                 /*personality*/ None,
             );
@@ -1447,6 +1449,7 @@ impl App {
                         /*effort*/ None,
                         /*summary*/ None,
                         /*service_tier*/ None,
+                        /*developer_instructions*/ None,
                         /*collaboration_mode*/ None,
                         /*personality*/ None,
                     )
@@ -2894,6 +2897,62 @@ impl App {
         snapshot
             .events
             .retain(ThreadEventStore::event_survives_session_refresh);
+    }
+
+    async fn open_sirix_agent_picker(&mut self) {
+        let response = match sirix_local_api::list_session_agents().await {
+            Ok(response) => response,
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to load Sirix agents: {err}"));
+                return;
+            }
+        };
+        if response.agents.is_empty() {
+            self.chat_widget
+                .add_info_message("No Sirix agents are available.".to_string(), None);
+            return;
+        }
+
+        let mut initial_selected_idx = None;
+        let items = response
+            .agents
+            .iter()
+            .enumerate()
+            .map(|(idx, agent)| {
+                if agent.id == response.current_agent_id {
+                    initial_selected_idx = Some(idx);
+                }
+                let search_value = format!(
+                    "{} {} {} {}",
+                    agent.name, agent.id, agent.provider_id, agent.model_id
+                );
+                let agent_id = agent.id.clone();
+                SelectionItem {
+                    name: agent.name.clone(),
+                    description: Some(format!("{} · {}", agent.provider_id, agent.model_id)),
+                    selected_description: (!agent.description.trim().is_empty())
+                        .then_some(agent.description.clone()),
+                    is_current: agent.id == response.current_agent_id,
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SwitchSirixAgent(agent_id.clone()));
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some(search_value),
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Switch Sirix Agent".to_string()),
+            items,
+            initial_selected_idx,
+            is_searchable: true,
+            search_placeholder: Some("Search agents".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            ..Default::default()
+        });
     }
 
     /// Opens the `/agent` picker after refreshing cached labels for known threads.
@@ -4371,6 +4430,34 @@ impl App {
                 self.submit_thread_op(app_server, thread_id, op.into())
                     .await?;
             }
+            AppEvent::SubmitSirixExecApproval {
+                thread_id,
+                id,
+                command: _command,
+                decision,
+                persistence_scope,
+                persistence_decision,
+                prefix,
+            } => {
+                if let (Some(scope), Some(persist_decision), Some(prefix)) =
+                    (persistence_scope.as_deref(), persistence_decision.as_deref(), prefix.as_deref())
+                {
+                    sirix_local_api::resolve_session_shell_rule(
+                        persist_decision,
+                        scope,
+                        prefix,
+                    )
+                    .await
+                    .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+                    app_server.reload_user_config().await?;
+                }
+                self.submit_thread_op(
+                    app_server,
+                    thread_id,
+                    AppCommand::exec_approval(id, /*turn_id*/ None, decision),
+                )
+                .await?;
+            }
             AppEvent::ThreadHistoryEntryResponse { thread_id, event } => {
                 self.enqueue_thread_history_entry_response(thread_id, event)
                     .await?;
@@ -4896,11 +4983,12 @@ impl App {
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
                                         /*effort*/ None,
-                                        /*summary*/ None,
-                                        /*service_tier*/ None,
-                                        /*collaboration_mode*/ None,
-                                        /*personality*/ None,
-                                    )
+                                    /*summary*/ None,
+                                    /*service_tier*/ None,
+                                    /*developer_instructions*/ None,
+                                    /*collaboration_mode*/ None,
+                                    /*personality*/ None,
+                                )
                                     .into(),
                                 ));
                                 self.app_event_tx.send(
@@ -4922,11 +5010,12 @@ impl App {
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
                                         /*effort*/ None,
-                                        /*summary*/ None,
-                                        /*service_tier*/ None,
-                                        /*collaboration_mode*/ None,
-                                        /*personality*/ None,
-                                    )
+                                    /*summary*/ None,
+                                    /*service_tier*/ None,
+                                    /*developer_instructions*/ None,
+                                    /*collaboration_mode*/ None,
+                                    /*personality*/ None,
+                                )
                                     .into(),
                                 ));
                                 self.app_event_tx
@@ -5375,6 +5464,43 @@ impl App {
             }
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
+            }
+            AppEvent::OpenSirixAgentPicker => {
+                self.open_sirix_agent_picker().await;
+            }
+            AppEvent::SwitchSirixAgent(agent_id) => {
+                match sirix_local_api::switch_session_agent(&agent_id).await {
+                    Ok(response) => {
+                        if let Err(err) = app_server.reload_user_config().await {
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to reload Sirix config after switching agent: {err}"
+                            ));
+                        }
+                        self.chat_widget.submit_op(AppCommand::override_turn_context(
+                            /*cwd*/ None,
+                            /*approval_policy*/ None,
+                            /*approvals_reviewer*/ None,
+                            /*sandbox_policy*/ None,
+                            /*windows_sandbox_level*/ None,
+                            Some(response.model_id.clone()),
+                            /*effort*/ None,
+                            /*summary*/ None,
+                            /*service_tier*/ None,
+                            Some(Some(response.developer_instructions.clone())),
+                            /*collaboration_mode*/ None,
+                            /*personality*/ None,
+                        ));
+                        self.chat_widget.set_model(response.model_id.as_str());
+                        self.chat_widget.add_info_message(
+                            format!("Switched Sirix agent to {} ({})", response.name, response.agent_id),
+                            None,
+                        );
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to switch Sirix agent: {err}"));
+                    }
+                }
             }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
@@ -7940,6 +8066,7 @@ mod tests {
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );
@@ -8031,6 +8158,7 @@ mod tests {
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );
@@ -8110,6 +8238,7 @@ mod tests {
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );
@@ -8167,6 +8296,7 @@ mod tests {
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );
@@ -8226,6 +8356,7 @@ mod tests {
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );
@@ -8313,6 +8444,7 @@ guardian_approval = true
                 summary: None,
                 service_tier: None,
                 collaboration_mode: None,
+                developer_instructions: None,
                 personality: None,
             })
         );

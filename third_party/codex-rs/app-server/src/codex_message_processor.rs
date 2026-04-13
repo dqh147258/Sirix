@@ -6638,6 +6638,7 @@ impl CodexMessageProcessor {
                         summary: params.summary,
                         service_tier: params.service_tier,
                         collaboration_mode,
+                        developer_instructions: None,
                         personality: params.personality,
                     },
                 )

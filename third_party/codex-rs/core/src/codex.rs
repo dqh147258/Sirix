@@ -1193,6 +1193,9 @@ impl SessionConfiguration {
         if let Some(personality) = updates.personality {
             next_configuration.personality = Some(personality);
         }
+        if let Some(developer_instructions) = updates.developer_instructions.clone() {
+            next_configuration.developer_instructions = developer_instructions;
+        }
         if let Some(approval_policy) = updates.approval_policy {
             next_configuration.approval_policy.set(approval_policy)?;
         }
@@ -1257,6 +1260,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) service_tier: Option<Option<ServiceTier>>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
     pub(crate) personality: Option<Personality>,
+    pub(crate) developer_instructions: Option<Option<String>>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,
 }
@@ -2732,6 +2736,17 @@ impl Session {
         state.session_configuration.original_config_do_not_use = Arc::new(config);
         self.services.skills_manager.clear_cache();
         self.services.plugins_manager.clear_cache();
+        let config_stack = state
+            .session_configuration
+            .original_config_do_not_use
+            .config_layer_stack
+            .clone();
+        drop(state);
+
+        match crate::exec_policy::load_exec_policy(&config_stack).await {
+            Ok(policy) => self.services.exec_policy.replace(Arc::new(policy)),
+            Err(err) => warn!("failed to reload exec policy while refreshing user config: {err}"),
+        }
     }
 
     pub(crate) async fn new_default_turn_with_sub_id(&self, sub_id: String) -> Arc<TurnContext> {
@@ -4640,6 +4655,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     effort,
                     summary,
                     service_tier,
+                    developer_instructions,
                     collaboration_mode,
                     personality,
                 } => {
@@ -4666,6 +4682,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                             reasoning_summary: summary,
                             service_tier,
                             personality,
+                            developer_instructions,
                             ..Default::default()
                         },
                     )
@@ -4968,6 +4985,7 @@ mod handlers {
                         service_tier,
                         final_output_json_schema: Some(final_output_json_schema),
                         personality,
+                        developer_instructions: None,
                         app_server_client_name: None,
                         app_server_client_version: None,
                     },

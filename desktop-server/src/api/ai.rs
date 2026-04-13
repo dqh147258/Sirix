@@ -24,20 +24,21 @@ use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION},
     Url,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::app::{
     ai::{
         approval::{ApprovalDecision, ApprovalRecord, ApprovalScope},
         config::{
+            build_agent_system_prompt, build_agent_system_prompt_preview,
             effective_model_context_window, infer_provider_default_context_window,
             validate_sirix_config, ApprovalMode, ModelConfig, ModelKind, ProviderConfig,
-            ProviderKind, SirixConfig,
+            ProviderKind, ShellRulesConfig, SirixConfig,
         },
         session::{
-            launch_ai_session, launch_ai_session_in_current_terminal, AiSessionLaunchResponse,
-            AiSessionRecord,
+            launch_ai_session, launch_ai_session_in_current_terminal, reconfigure_ai_session_agent,
+            AiSessionLaunchResponse, AiSessionRecord,
         },
     },
     state::AppState,
@@ -88,6 +89,55 @@ pub struct ProviderModelsResponse {
     pub models: Vec<ModelConfig>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SwitchSessionAgentRequest {
+    pub agent_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionAgentSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionAgentsResponse {
+    pub current_agent_id: String,
+    pub agents: Vec<SessionAgentSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SwitchSessionAgentResponse {
+    pub agent_id: String,
+    pub name: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub developer_instructions: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveSessionShellRuleRequest {
+    pub decision: ApprovalDecision,
+    pub scope: String,
+    pub prefix: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentSystemPromptPreviewRequest {
+    pub config: SirixConfig,
+    pub agent_id: String,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentSystemPromptPreviewResponse {
+    pub prompt: String,
+}
+
 pub async fn get_ai_config(State(state): State<AppState>) -> Result<Json<SirixConfig>, ApiError> {
     let config = state
         .sirix_config_store
@@ -108,6 +158,27 @@ pub async fn set_ai_config(
     Ok(Json(payload))
 }
 
+pub async fn get_shell_rules(
+    State(state): State<AppState>,
+) -> Result<Json<ShellRulesConfig>, ApiError> {
+    let rules = state
+        .sirix_config_store
+        .load_global_shell_rules()
+        .map_err(ApiError::internal)?;
+    Ok(Json(rules))
+}
+
+pub async fn set_shell_rules(
+    State(state): State<AppState>,
+    Json(payload): Json<ShellRulesConfig>,
+) -> Result<Json<ShellRulesConfig>, ApiError> {
+    state
+        .sirix_config_store
+        .save_global_shell_rules(&payload)
+        .map_err(ApiError::internal)?;
+    Ok(Json(payload))
+}
+
 pub async fn get_effective_ai_config(
     State(state): State<AppState>,
     Query(query): Query<EffectiveConfigQuery>,
@@ -119,6 +190,37 @@ pub async fn get_effective_ai_config(
     Ok(Json(
         serde_json::to_value(effective).map_err(|error| ApiError::internal(error.into()))?,
     ))
+}
+
+pub async fn preview_agent_system_prompt(
+    State(state): State<AppState>,
+    Json(payload): Json<AgentSystemPromptPreviewRequest>,
+) -> Result<Json<AgentSystemPromptPreviewResponse>, ApiError> {
+    validate_sirix_config(&payload.config).map_err(ApiError::bad_request_anyhow)?;
+    let agent = payload
+        .config
+        .agents
+        .iter()
+        .find(|candidate| candidate.id == payload.agent_id.trim())
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::bad_request(format!("agent not found: {}", payload.agent_id.trim()))
+        })?;
+    let workspace_root = payload
+        .cwd
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let prompt = build_agent_system_prompt_preview(
+        &payload.config,
+        &agent,
+        state.sirix_config_store.sirix_home(),
+        workspace_root.as_deref(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(AgentSystemPromptPreviewResponse { prompt }))
 }
 
 pub async fn discover_provider_models(
@@ -177,6 +279,156 @@ pub async fn list_sessions(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AiSessionRecord>>, ApiError> {
     Ok(Json(state.ai_session_registry.list().await))
+}
+
+pub async fn list_session_agents(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<SessionAgentsResponse>, ApiError> {
+    let runtime = state
+        .ai_session_registry
+        .resolve_runtime(ai_session_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::not_found(format!("ai session not found for id={ai_session_id}"))
+        })?;
+    let effective = state
+        .sirix_config_store
+        .effective_for_workspace(Some(runtime.workspace_root.to_string_lossy().as_ref()))
+        .map_err(ApiError::internal)?;
+    let agents = effective
+        .config
+        .agents
+        .iter()
+        .filter(|agent| agent.enabled)
+        .map(|agent| SessionAgentSummary {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+            provider_id: agent.provider_id.clone(),
+            model_id: agent.model_id.clone(),
+            enabled: agent.enabled,
+        })
+        .collect::<Vec<_>>();
+    Ok(Json(SessionAgentsResponse {
+        current_agent_id: runtime.agent_id,
+        agents,
+    }))
+}
+
+pub async fn switch_session_agent(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+    Json(payload): Json<SwitchSessionAgentRequest>,
+) -> Result<Json<SwitchSessionAgentResponse>, ApiError> {
+    let (launch, _) = reconfigure_ai_session_agent(
+        &state,
+        state.sirix_config_store.as_ref(),
+        ai_session_id,
+        payload.agent_id.trim(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(Json(SwitchSessionAgentResponse {
+        agent_id: launch.agent.id.clone(),
+        name: launch.agent.name.clone(),
+        provider_id: launch.provider.id.clone(),
+        model_id: launch.model.id.clone(),
+        developer_instructions: build_agent_system_prompt(&launch.effective_config, &launch.agent),
+    }))
+}
+
+pub async fn resolve_session_shell_rule(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+    Json(payload): Json<ResolveSessionShellRuleRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let runtime = state
+        .ai_session_registry
+        .resolve_runtime(ai_session_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::not_found(format!("ai session not found for id={ai_session_id}"))
+        })?;
+    let prefix = payload.prefix.trim();
+    if prefix.is_empty() {
+        return Err(ApiError::bad_request("prefix cannot be empty".to_string()));
+    }
+
+    let target_mode = match payload.decision {
+        ApprovalDecision::Allow => ApprovalMode::Allow,
+        ApprovalDecision::Deny => ApprovalMode::Deny,
+    };
+    match payload.scope.trim() {
+        "session" => {
+            state
+                .ai_session_registry
+                .push_session_shell_rule(ai_session_id, target_mode.clone(), prefix.to_string())
+                .await
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("ai session not found for id={ai_session_id}"))
+                })?;
+        }
+        "workspace" => {
+            let mut rules = state
+                .sirix_config_store
+                .load_workspace_shell_rules(runtime.workspace_root.as_path())
+                .map_err(ApiError::internal)?
+                .unwrap_or_default();
+            match target_mode {
+                ApprovalMode::Allow => {
+                    rules.deny.retain(|item| item != prefix);
+                    rules.allow.push(prefix.to_string());
+                }
+                ApprovalMode::Deny => {
+                    rules.allow.retain(|item| item != prefix);
+                    rules.deny.push(prefix.to_string());
+                }
+                ApprovalMode::Ask => {}
+            }
+            state
+                .sirix_config_store
+                .save_workspace_shell_rules(runtime.workspace_root.as_path(), &rules)
+                .map_err(ApiError::internal)?;
+        }
+        "global" => {
+            let mut rules = state
+                .sirix_config_store
+                .load_global_shell_rules()
+                .map_err(ApiError::internal)?;
+            match target_mode {
+                ApprovalMode::Allow => {
+                    rules.deny.retain(|item| item != prefix);
+                    rules.allow.push(prefix.to_string());
+                }
+                ApprovalMode::Deny => {
+                    rules.allow.retain(|item| item != prefix);
+                    rules.deny.push(prefix.to_string());
+                }
+                ApprovalMode::Ask => {}
+            }
+            state
+                .sirix_config_store
+                .save_global_shell_rules(&rules)
+                .map_err(ApiError::internal)?;
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "unsupported shell rule scope {other}"
+            )));
+        }
+    }
+
+    reconfigure_ai_session_agent(
+        &state,
+        state.sirix_config_store.as_ref(),
+        ai_session_id,
+        runtime.agent_id.as_str(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 pub async fn resolve_session(
@@ -240,7 +492,7 @@ pub async fn check_approval(
     let outcome = match configured_mode {
         ApprovalMode::Allow => "allow",
         ApprovalMode::Deny => "deny",
-        ApprovalMode::AskOnce | ApprovalMode::AskEachTime => {
+        ApprovalMode::Ask => {
             emit_approval_request_event(&state, &record, capability_key, configured_mode.clone())
                 .await;
             "ask"
@@ -353,21 +605,53 @@ pub async fn proxy_compatible_responses(
         .get("model")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    let runtime = state
+        .ai_session_registry
+        .resolve_runtime(ai_session_id)
+        .await;
+    let effective_model = runtime
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot
+                .fallback
+                .primary_disabled_until
+                .filter(|until| *until > chrono::Utc::now())
+                .filter(|_| snapshot.fallback.primary_model_id == requested_model)
+                .map(|_| snapshot.fallback.fallback_model_id.clone())
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| requested_model.to_string());
+    let mut effective_payload = payload.clone();
+    if effective_model != requested_model {
+        effective_payload["model"] = JsonValue::String(effective_model.clone());
+    }
     let provider = state
         .ai_session_registry
-        .resolve_provider_for_model(ai_session_id, requested_model)
+        .resolve_provider_for_model(ai_session_id, effective_model.as_str())
         .await
         .ok_or_else(|| {
             ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
         })?;
-    match provider.kind {
+    let result = match provider.kind {
         ProviderKind::OpenAiCompatible => {
-            proxy_openai_compatible_responses(&provider, &payload).await
+            proxy_openai_compatible_responses(&provider, &effective_payload).await
         }
         ProviderKind::OpenAiResponses | ProviderKind::Gemini | ProviderKind::Anthropic => {
-            proxy_native_responses(&provider, &payload).await
+            proxy_native_responses(&provider, &effective_payload).await
         }
+    };
+    if result.is_ok() {
+        let _ = state
+            .ai_session_registry
+            .record_primary_model_success(ai_session_id, requested_model)
+            .await;
+    } else {
+        let _ = state
+            .ai_session_registry
+            .record_primary_model_failure(ai_session_id, requested_model)
+            .await;
     }
+    result
 }
 
 fn session_models_payload(providers: &[ProviderConfig], active_provider_id: &str) -> JsonValue {
@@ -1331,10 +1615,8 @@ fn resolve_capability_mode(
         return Ok(ApprovalMode::Allow);
     };
 
-    for rule in &agent.capability_rules {
-        if rule.key == capability_key {
-            return Ok(rule.approval_mode.clone());
-        }
+    if capability_key == "builtin.shell" {
+        return Ok(agent.approval_mode);
     }
     Ok(ApprovalMode::Allow)
 }

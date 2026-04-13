@@ -22,10 +22,12 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     state = state.copyWith(loading: true, clearError: true, clearNotice: true);
     try {
       final config = await _localClient.getAiConfig();
+      final shellRules = await _localClient.getShellRules();
       final effective = await _localClient.getEffectiveAiConfig();
       state = state.copyWith(
         loading: false,
         config: config,
+        shellRules: shellRules,
         effective: effective,
         clearError: true,
       );
@@ -44,11 +46,16 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
 
     state = state.copyWith(saving: true, clearError: true, clearNotice: true);
     try {
+      // Keep config.toml and shell-rules.json saves in one explicit transaction-like
+      // flow so the desktop settings page reflects the exact pair of artifacts the
+      // runtime will read on the next session launch.
       final saved = await _localClient.saveAiConfig(state.config);
+      final shellRules = await _localClient.saveShellRules(state.shellRules);
       final effective = await _localClient.getEffectiveAiConfig();
       state = state.copyWith(
         saving: false,
         config: saved,
+        shellRules: shellRules,
         effective: effective,
         noticeMessage: 'AI settings saved.',
         clearError: true,
@@ -59,6 +66,18 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         errorMessage: 'Failed to save AI settings: $error',
       );
     }
+  }
+
+  Future<String> previewSystemPrompt({
+    required SirixAiConfig config,
+    required String agentId,
+    String? cwd,
+  }) {
+    return _localClient.previewAgentSystemPrompt(
+      config: config,
+      agentId: agentId,
+      cwd: cwd,
+    );
   }
 
   void selectSection(AiSettingsSection section) {
@@ -260,10 +279,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     final agents = [
       for (final agent in state.config.agents)
         agent.copyWith(
-          enabledSkillIds:
-              agent.enabledSkillIds.where((item) => item != skillId).toList(growable: false),
-          disabledSkillIds:
-              agent.disabledSkillIds.where((item) => item != skillId).toList(growable: false),
+          skillIds: agent.skillIds.where((item) => item != skillId).toList(growable: false),
         ),
     ];
     state = state.copyWith(
@@ -296,12 +312,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     final agents = [
       for (final agent in state.config.agents)
         agent.copyWith(
-          enabledMcpServerIds: agent.enabledMcpServerIds
-              .where((item) => item != serverId)
-              .toList(growable: false),
-          disabledMcpServerIds: agent.disabledMcpServerIds
-              .where((item) => item != serverId)
-              .toList(growable: false),
+          mcpServerIds: agent.mcpServerIds.where((item) => item != serverId).toList(growable: false),
         ),
     ];
     state = state.copyWith(
@@ -323,8 +334,22 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   void removeAgent(String agentId) {
     final agents =
         state.config.agents.where((item) => item.id != agentId).toList(growable: false);
+    final cleanedAgents = [
+      for (final agent in agents)
+        agent.copyWith(
+          subAgentIds: agent.subAgentIds.where((item) => item != agentId).toList(growable: false),
+        ),
+    ];
     state = state.copyWith(
-      config: _reconcileDefaultAgent(state.config.copyWith(agents: agents)),
+      config: _reconcileDefaultAgent(state.config.copyWith(agents: cleanedAgents)),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateShellRules(ShellRulesConfigModel shellRules) {
+    state = state.copyWith(
+      shellRules: shellRules,
       clearError: true,
       clearNotice: true,
     );
@@ -398,14 +423,11 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     return const AgentConfigModel(
       id: _defaultAgentId,
       name: 'Default Agent',
+      description: 'Default Sirix coding agent.',
       providerId: '',
       modelId: '',
-      builtinToolsEnabled: true,
-      capabilityRules: [
-        AgentCapabilityRuleModel(key: 'builtin.shell', approvalMode: ApprovalMode.allow),
-        AgentCapabilityRuleModel(key: 'builtin.edit', approvalMode: ApprovalMode.allow),
-        AgentCapabilityRuleModel(key: 'builtin.plan', approvalMode: ApprovalMode.allow),
-      ],
+      approvalMode: ApprovalMode.ask,
+      builtinToolIds: kBuiltinToolCatalog,
       enabled: true,
     );
   }

@@ -70,7 +70,7 @@ pub fn build_tool_registry_plan(
     let mut plan = ToolRegistryPlan::new();
     let exec_permission_approvals_enabled = config.exec_permission_approvals_enabled;
 
-    if config.code_mode_enabled {
+    if config.code_mode_enabled && config.allows_builtin_tool("code_mode") {
         let namespace_descriptions = params
             .tool_namespaces
             .into_iter()
@@ -132,115 +132,144 @@ pub fn build_tool_registry_plan(
     if config.has_environment {
         match &config.shell_type {
             ConfigShellToolType::Default => {
-                plan.push_spec(
-                    create_shell_tool(ShellToolOptions {
-                        exec_permission_approvals_enabled,
-                    }),
-                    /*supports_parallel_tool_calls*/ true,
-                    config.code_mode_enabled,
-                );
+                if config.allows_builtin_tool("shell") {
+                    plan.push_spec(
+                        create_shell_tool(ShellToolOptions {
+                            exec_permission_approvals_enabled,
+                        }),
+                        /*supports_parallel_tool_calls*/ true,
+                        config.code_mode_enabled,
+                    );
+                }
             }
             ConfigShellToolType::Local => {
-                plan.push_spec(
-                    create_local_shell_tool(),
-                    /*supports_parallel_tool_calls*/ true,
-                    config.code_mode_enabled,
-                );
+                if config.allows_builtin_tool("shell") {
+                    plan.push_spec(
+                        create_local_shell_tool(),
+                        /*supports_parallel_tool_calls*/ true,
+                        config.code_mode_enabled,
+                    );
+                }
             }
             ConfigShellToolType::UnifiedExec => {
-                plan.push_spec(
-                    create_exec_command_tool(CommandToolOptions {
-                        allow_login_shell: config.allow_login_shell,
-                        exec_permission_approvals_enabled,
-                    }),
-                    /*supports_parallel_tool_calls*/ true,
-                    config.code_mode_enabled,
-                );
-                plan.push_spec(
-                    create_write_stdin_tool(),
-                    /*supports_parallel_tool_calls*/ false,
-                    config.code_mode_enabled,
-                );
-                plan.register_handler("exec_command", ToolHandlerKind::UnifiedExec);
-                plan.register_handler("write_stdin", ToolHandlerKind::UnifiedExec);
+                if config.allows_builtin_tool("exec_command") {
+                    plan.push_spec(
+                        create_exec_command_tool(CommandToolOptions {
+                            allow_login_shell: config.allow_login_shell,
+                            exec_permission_approvals_enabled,
+                        }),
+                        /*supports_parallel_tool_calls*/ true,
+                        config.code_mode_enabled,
+                    );
+                    plan.register_handler("exec_command", ToolHandlerKind::UnifiedExec);
+                }
+                if config.allows_builtin_tool("write_stdin") {
+                    plan.push_spec(
+                        create_write_stdin_tool(),
+                        /*supports_parallel_tool_calls*/ false,
+                        config.code_mode_enabled,
+                    );
+                    plan.register_handler("write_stdin", ToolHandlerKind::UnifiedExec);
+                }
             }
             ConfigShellToolType::Disabled => {}
             ConfigShellToolType::ShellCommand => {
-                plan.push_spec(
-                    create_shell_command_tool(CommandToolOptions {
-                        allow_login_shell: config.allow_login_shell,
-                        exec_permission_approvals_enabled,
-                    }),
-                    /*supports_parallel_tool_calls*/ true,
-                    config.code_mode_enabled,
-                );
+                if config.allows_builtin_tool("shell_command") {
+                    plan.push_spec(
+                        create_shell_command_tool(CommandToolOptions {
+                            allow_login_shell: config.allow_login_shell,
+                            exec_permission_approvals_enabled,
+                        }),
+                        /*supports_parallel_tool_calls*/ true,
+                        config.code_mode_enabled,
+                    );
+                }
             }
         }
     }
 
     if config.has_environment && config.shell_type != ConfigShellToolType::Disabled {
-        plan.register_handler("shell", ToolHandlerKind::Shell);
-        plan.register_handler("container.exec", ToolHandlerKind::Shell);
-        plan.register_handler("local_shell", ToolHandlerKind::Shell);
-        plan.register_handler("shell_command", ToolHandlerKind::ShellCommand);
+        if config.allows_builtin_tool("shell") {
+            plan.register_handler("shell", ToolHandlerKind::Shell);
+            plan.register_handler("container.exec", ToolHandlerKind::Shell);
+            plan.register_handler("local_shell", ToolHandlerKind::Shell);
+        }
+        if config.allows_builtin_tool("shell_command") {
+            plan.register_handler("shell_command", ToolHandlerKind::ShellCommand);
+        }
     }
 
     if params.mcp_tools.is_some() {
-        plan.push_spec(
-            create_list_mcp_resources_tool(),
-            /*supports_parallel_tool_calls*/ true,
-            config.code_mode_enabled,
-        );
-        plan.push_spec(
-            create_list_mcp_resource_templates_tool(),
-            /*supports_parallel_tool_calls*/ true,
-            config.code_mode_enabled,
-        );
-        plan.push_spec(
-            create_read_mcp_resource_tool(),
-            /*supports_parallel_tool_calls*/ true,
-            config.code_mode_enabled,
-        );
-        plan.register_handler("list_mcp_resources", ToolHandlerKind::McpResource);
-        plan.register_handler("list_mcp_resource_templates", ToolHandlerKind::McpResource);
-        plan.register_handler("read_mcp_resource", ToolHandlerKind::McpResource);
+        if config.allows_builtin_tool("list_mcp_resources") {
+            plan.push_spec(
+                create_list_mcp_resources_tool(),
+                /*supports_parallel_tool_calls*/ true,
+                config.code_mode_enabled,
+            );
+            plan.register_handler("list_mcp_resources", ToolHandlerKind::McpResource);
+        }
+        if config.allows_builtin_tool("list_mcp_resource_templates") {
+            plan.push_spec(
+                create_list_mcp_resource_templates_tool(),
+                /*supports_parallel_tool_calls*/ true,
+                config.code_mode_enabled,
+            );
+            plan.register_handler("list_mcp_resource_templates", ToolHandlerKind::McpResource);
+        }
+        if config.allows_builtin_tool("read_mcp_resource") {
+            plan.push_spec(
+                create_read_mcp_resource_tool(),
+                /*supports_parallel_tool_calls*/ true,
+                config.code_mode_enabled,
+            );
+            plan.register_handler("read_mcp_resource", ToolHandlerKind::McpResource);
+        }
     }
 
-    plan.push_spec(
-        create_update_plan_tool(),
-        /*supports_parallel_tool_calls*/ false,
-        config.code_mode_enabled,
-    );
-    plan.register_handler("update_plan", ToolHandlerKind::Plan);
+    if config.allows_builtin_tool("update_plan") {
+        plan.push_spec(
+            create_update_plan_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        plan.register_handler("update_plan", ToolHandlerKind::Plan);
+    }
 
     if config.has_environment && config.js_repl_enabled {
-        plan.push_spec(
-            create_js_repl_tool(),
-            /*supports_parallel_tool_calls*/ false,
-            config.code_mode_enabled,
-        );
-        plan.push_spec(
-            create_js_repl_reset_tool(),
-            /*supports_parallel_tool_calls*/ false,
-            config.code_mode_enabled,
-        );
-        plan.register_handler("js_repl", ToolHandlerKind::JsRepl);
-        plan.register_handler("js_repl_reset", ToolHandlerKind::JsReplReset);
+        if config.allows_builtin_tool("js_repl") {
+            plan.push_spec(
+                create_js_repl_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                config.code_mode_enabled,
+            );
+            plan.register_handler("js_repl", ToolHandlerKind::JsRepl);
+        }
+        if config.allows_builtin_tool("js_repl_reset") {
+            plan.push_spec(
+                create_js_repl_reset_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                config.code_mode_enabled,
+            );
+            plan.register_handler("js_repl_reset", ToolHandlerKind::JsReplReset);
+        }
     }
 
-    plan.push_spec(
-        create_request_user_input_tool(request_user_input_tool_description(
-            config.default_mode_request_user_input,
-        )),
-        /*supports_parallel_tool_calls*/ false,
-        config.code_mode_enabled,
-    );
-    plan.register_handler(
-        REQUEST_USER_INPUT_TOOL_NAME,
-        ToolHandlerKind::RequestUserInput,
-    );
+    if config.allows_builtin_tool("request_user_input") {
+        plan.push_spec(
+            create_request_user_input_tool(request_user_input_tool_description(
+                config.default_mode_request_user_input,
+            )),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        plan.register_handler(
+            REQUEST_USER_INPUT_TOOL_NAME,
+            ToolHandlerKind::RequestUserInput,
+        );
+    }
 
-    if config.request_permissions_tool_enabled {
+    if config.request_permissions_tool_enabled && config.allows_builtin_tool("request_permissions")
+    {
         plan.push_spec(
             create_request_permissions_tool(request_permissions_tool_description()),
             /*supports_parallel_tool_calls*/ false,
@@ -288,6 +317,7 @@ pub fn build_tool_registry_plan(
     }
 
     if config.has_environment
+        && config.allows_builtin_tool("apply_patch")
         && let Some(apply_patch_tool_type) = &config.apply_patch_tool_type
     {
         match apply_patch_tool_type {
@@ -310,6 +340,7 @@ pub fn build_tool_registry_plan(
     }
 
     if config.has_environment
+        && config.allows_builtin_tool("list_dir")
         && config
             .experimental_supported_tools
             .iter()
@@ -336,7 +367,8 @@ pub fn build_tool_registry_plan(
         plan.register_handler("test_sync_tool", ToolHandlerKind::TestSync);
     }
 
-    if let Some(web_search_tool) = create_web_search_tool(WebSearchToolOptions {
+    if config.allows_builtin_tool("web_search")
+        && let Some(web_search_tool) = create_web_search_tool(WebSearchToolOptions {
         web_search_mode: config.web_search_mode,
         web_search_config: config.web_search_config.as_ref(),
         web_search_tool_type: config.web_search_tool_type,
@@ -348,7 +380,7 @@ pub fn build_tool_registry_plan(
         );
     }
 
-    if config.image_gen_tool {
+    if config.image_gen_tool && config.allows_builtin_tool("image_generation") {
         plan.push_spec(
             create_image_generation_tool("png"),
             /*supports_parallel_tool_calls*/ false,
@@ -356,7 +388,7 @@ pub fn build_tool_registry_plan(
         );
     }
 
-    if config.has_environment {
+    if config.has_environment && config.allows_builtin_tool("view_image") {
         plan.push_spec(
             create_view_image_tool(ViewImageToolOptions {
                 can_request_original_image_detail: config.can_request_original_image_detail,
@@ -371,87 +403,107 @@ pub fn build_tool_registry_plan(
         if config.multi_agent_v2 {
             let agent_type_description =
                 agent_type_description(config, params.default_agent_type_description);
-            plan.push_spec(
-                create_spawn_agent_tool_v2(SpawnAgentToolOptions {
-                    available_models: &config.available_models,
-                    agent_type_description,
-                    hide_agent_type_model_reasoning: config.hide_spawn_agent_metadata,
-                    include_usage_hint: config.spawn_agent_usage_hint,
-                    usage_hint_text: config.spawn_agent_usage_hint_text.clone(),
-                }),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_send_message_tool(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_followup_task_tool(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_wait_agent_tool_v2(params.wait_agent_timeouts),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_close_agent_tool_v2(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_list_agents_tool(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.register_handler("spawn_agent", ToolHandlerKind::SpawnAgentV2);
-            plan.register_handler("send_message", ToolHandlerKind::SendMessageV2);
-            plan.register_handler("followup_task", ToolHandlerKind::FollowupTaskV2);
-            plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV2);
-            plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV2);
-            plan.register_handler("list_agents", ToolHandlerKind::ListAgentsV2);
+            if config.allows_builtin_tool("spawn_agent") {
+                plan.push_spec(
+                    create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+                        available_models: &config.available_models,
+                        agent_type_description,
+                        hide_agent_type_model_reasoning: config.hide_spawn_agent_metadata,
+                        include_usage_hint: config.spawn_agent_usage_hint,
+                        usage_hint_text: config.spawn_agent_usage_hint_text.clone(),
+                    }),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("spawn_agent", ToolHandlerKind::SpawnAgentV2);
+            }
+            if config.allows_builtin_tool("send_message") {
+                plan.push_spec(
+                    create_send_message_tool(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("send_message", ToolHandlerKind::SendMessageV2);
+            }
+            if config.allows_builtin_tool("followup_task") {
+                plan.push_spec(
+                    create_followup_task_tool(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("followup_task", ToolHandlerKind::FollowupTaskV2);
+            }
+            if config.allows_builtin_tool("wait_agent") {
+                plan.push_spec(
+                    create_wait_agent_tool_v2(params.wait_agent_timeouts),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV2);
+            }
+            if config.allows_builtin_tool("close_agent") {
+                plan.push_spec(
+                    create_close_agent_tool_v2(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV2);
+            }
+            if config.allows_builtin_tool("list_agents") {
+                plan.push_spec(
+                    create_list_agents_tool(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("list_agents", ToolHandlerKind::ListAgentsV2);
+            }
         } else {
             let agent_type_description =
                 agent_type_description(config, params.default_agent_type_description);
-            plan.push_spec(
-                create_spawn_agent_tool_v1(SpawnAgentToolOptions {
-                    available_models: &config.available_models,
-                    agent_type_description,
-                    hide_agent_type_model_reasoning: config.hide_spawn_agent_metadata,
-                    include_usage_hint: config.spawn_agent_usage_hint,
-                    usage_hint_text: config.spawn_agent_usage_hint_text.clone(),
-                }),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_send_input_tool_v1(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
+            if config.allows_builtin_tool("spawn_agent") {
+                plan.push_spec(
+                    create_spawn_agent_tool_v1(SpawnAgentToolOptions {
+                        available_models: &config.available_models,
+                        agent_type_description,
+                        hide_agent_type_model_reasoning: config.hide_spawn_agent_metadata,
+                        include_usage_hint: config.spawn_agent_usage_hint,
+                        usage_hint_text: config.spawn_agent_usage_hint_text.clone(),
+                    }),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("spawn_agent", ToolHandlerKind::SpawnAgentV1);
+            }
+            if config.allows_builtin_tool("send_message") {
+                plan.push_spec(
+                    create_send_input_tool_v1(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("send_input", ToolHandlerKind::SendInputV1);
+            }
             plan.push_spec(
                 create_resume_agent_tool(),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );
             plan.register_handler("resume_agent", ToolHandlerKind::ResumeAgentV1);
-            plan.push_spec(
-                create_wait_agent_tool_v1(params.wait_agent_timeouts),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.push_spec(
-                create_close_agent_tool_v1(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
-            plan.register_handler("spawn_agent", ToolHandlerKind::SpawnAgentV1);
-            plan.register_handler("send_input", ToolHandlerKind::SendInputV1);
-            plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV1);
-            plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV1);
+            if config.allows_builtin_tool("wait_agent") {
+                plan.push_spec(
+                    create_wait_agent_tool_v1(params.wait_agent_timeouts),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV1);
+            }
+            if config.allows_builtin_tool("close_agent") {
+                plan.push_spec(
+                    create_close_agent_tool_v1(),
+                    /*supports_parallel_tool_calls*/ false,
+                    config.code_mode_enabled,
+                );
+                plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV1);
+            }
         }
     }
 

@@ -6,11 +6,13 @@ pub mod ai;
 pub mod auth;
 pub mod health;
 pub mod settings;
+pub mod status;
 pub mod ws;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        .route("/status/overview", get(status::get_status_overview))
         .route(
             "/auth/session",
             get(auth::get_session)
@@ -26,6 +28,14 @@ pub fn router(state: AppState) -> Router {
             "/ai/config",
             get(ai::get_ai_config).patch(ai::set_ai_config),
         )
+        .route(
+            "/ai/config/system-prompt-preview",
+            axum::routing::post(ai::preview_agent_system_prompt),
+        )
+        .route(
+            "/ai/shell-rules",
+            get(ai::get_shell_rules).patch(ai::set_shell_rules),
+        )
         .route("/ai/config/effective", get(ai::get_effective_ai_config))
         .route(
             "/ai/providers/models",
@@ -36,6 +46,18 @@ pub fn router(state: AppState) -> Router {
             get(ai::list_sessions).post(ai::launch_session),
         )
         .route("/ai/sessions/resolve", get(ai::resolve_session))
+        .route(
+            "/ai/sessions/:ai_session_id/agents",
+            get(ai::list_session_agents),
+        )
+        .route(
+            "/ai/sessions/:ai_session_id/agent",
+            axum::routing::post(ai::switch_session_agent),
+        )
+        .route(
+            "/ai/sessions/:ai_session_id/shell-rules/resolve",
+            axum::routing::post(ai::resolve_session_shell_rule),
+        )
         .route(
             "/ai/sessions/approvals/check",
             axum::routing::post(ai::check_approval),

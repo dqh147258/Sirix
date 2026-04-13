@@ -5114,7 +5114,10 @@ impl ChatWidget {
                 }
                 self.open_collaboration_modes_popup();
             }
-            SlashCommand::Agent | SlashCommand::MultiAgents => {
+            SlashCommand::Agent => {
+                self.app_event_tx.send(AppEvent::OpenSirixAgentPicker);
+            }
+            SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
             SlashCommand::Approvals => {
@@ -7658,6 +7661,7 @@ impl ChatWidget {
                     Some(Some(default_effort)),
                     /*summary*/ None,
                     /*service_tier*/ None,
+                    /*developer_instructions*/ None,
                     /*collaboration_mode*/ None,
                     /*personality*/ None,
                 )
@@ -7783,6 +7787,7 @@ impl ChatWidget {
                             /*effort*/ None,
                             /*summary*/ None,
                             /*service_tier*/ None,
+                            /*developer_instructions*/ None,
                             /*collaboration_mode*/ None,
                             Some(personality),
                         )
@@ -8774,6 +8779,7 @@ impl ChatWidget {
                     /*effort*/ None,
                     /*summary*/ None,
                     /*service_tier*/ None,
+                    /*developer_instructions*/ None,
                     /*collaboration_mode*/ None,
                     /*personality*/ None,
                 )
@@ -9583,6 +9589,7 @@ impl ChatWidget {
                 /*effort*/ None,
                 /*summary*/ None,
                 Some(service_tier),
+                /*developer_instructions*/ None,
                 /*collaboration_mode*/ None,
                 /*personality*/ None,
             )

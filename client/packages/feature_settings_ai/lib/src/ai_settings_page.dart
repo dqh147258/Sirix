@@ -10,6 +10,7 @@ import 'sections/agent_settings_section.dart';
 import 'sections/cli_settings_section.dart';
 import 'sections/mcp_settings_section.dart';
 import 'sections/provider_settings_section.dart';
+import 'sections/shell_rules_settings_section.dart';
 import 'sections/skills_settings_section.dart';
 
 class AiSettingsPage extends ConsumerStatefulWidget {
@@ -196,6 +197,7 @@ class _NavPane extends StatelessWidget {
       (AiSettingsSection.skills, 'Skills', 'Imported folders and sandbox reach', Icons.auto_awesome_rounded),
       (AiSettingsSection.mcp, 'MCP', 'External tools, transports, and gating', Icons.extension_rounded),
       (AiSettingsSection.agents, 'Agents', 'Profiles, approvals, and tool routing', Icons.smart_toy_rounded),
+      (AiSettingsSection.shellRules, 'Shell Rules', 'Global command authorization policy', Icons.rule_folder_rounded),
     ];
 
     return Container(
@@ -267,6 +269,7 @@ class _SectionBody extends ConsumerWidget {
       AiSettingsSection.skills => SkillsSettingsSection(state: state, vm: vm),
       AiSettingsSection.mcp => McpSettingsSection(state: state, vm: vm),
       AiSettingsSection.agents => AgentSettingsSection(state: state, vm: vm),
+      AiSettingsSection.shellRules => ShellRulesSettingsSection(state: state, vm: vm),
     };
   }
 }

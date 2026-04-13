@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::app::state::AppState;
+use crate::app::status::refresh_mcp_statuses;
 
 #[cfg(target_os = "linux")]
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
@@ -25,7 +26,17 @@ pub fn spawn_background_tasks(state: AppState) {
     spawn_runtime_settings_sync(state.clone());
     spawn_backend_heartbeat(state.clone());
     spawn_backend_event_subscription(state.clone());
+    spawn_mcp_status_probe(state.clone());
     spawn_snapshot_loop(state);
+}
+
+fn spawn_mcp_status_probe(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            refresh_mcp_statuses(&state).await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        }
+    });
 }
 
 fn spawn_screen_capture_permission_probe(state: AppState) {

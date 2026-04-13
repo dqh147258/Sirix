@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:xterm/xterm.dart' show Terminal, TerminalTheme, TerminalThemes, TerminalView;
+import 'package:xterm/xterm.dart' show TerminalTheme, TerminalThemes, TerminalView;
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';

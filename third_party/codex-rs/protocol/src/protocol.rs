@@ -496,6 +496,13 @@ pub enum Op {
         #[serde(skip_serializing_if = "Option::is_none")]
         service_tier: Option<Option<ServiceTier>>,
 
+        /// Updated developer instructions for future turns.
+        ///
+        /// Use `Some(Some(_))` to set text, `Some(None)` to clear the current
+        /// value, or `None` to keep the existing developer instructions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        developer_instructions: Option<Option<String>>,
+
         /// EXPERIMENTAL - set a pre-set collaboration mode.
         /// Takes precedence over model, effort, and developer instructions if set.
         #[serde(skip_serializing_if = "Option::is_none")]

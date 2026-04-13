@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::app::ai::config::AiLaunchConfig;
+use crate::app::ai::config::{AiLaunchConfig, SIRIX_AGENT_RUNTIME_FILE_NAME};
 
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -167,6 +167,8 @@ impl TerminalManager {
         &self,
         terminal_id: Uuid,
         launch: AiLaunchConfig,
+        ai_session_id: Uuid,
+        local_ws_port: u16,
         cols: u16,
         rows: u16,
         remote_sync: bool,
@@ -180,6 +182,19 @@ impl TerminalManager {
         }
         self.apply_sirix_env(&mut builder, None)?;
         builder.env("CODEX_HOME", &launch.codex_home);
+        builder.env("SIRIX_AI_SESSION_ID", ai_session_id.to_string());
+        builder.env(
+            "SIRIX_LOCAL_API_BASE",
+            format!("http://127.0.0.1:{local_ws_port}"),
+        );
+        builder.env(
+            "SIRIX_AGENT_RUNTIME_PATH",
+            launch
+                .codex_home
+                .join(SIRIX_AGENT_RUNTIME_FILE_NAME)
+                .display()
+                .to_string(),
+        );
         builder.cwd(&launch.workspace_root);
 
         self.create_process_terminal(

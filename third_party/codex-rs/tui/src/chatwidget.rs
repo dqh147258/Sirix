@@ -5392,6 +5392,16 @@ impl ChatWidget {
                     }
                 }
             }
+            SlashCommand::Model if !trimmed.is_empty() => {
+                let Some((prepared_args, _prepared_elements)) = self
+                    .bottom_pane
+                    .prepare_inline_args_submission(/*record_history*/ false)
+                else {
+                    return;
+                };
+                self.open_model_popup_with_initial_query(Some(prepared_args));
+                self.bottom_pane.drain_pending_submission_state();
+            }
             SlashCommand::Rename if !trimmed.is_empty() => {
                 self.session_telemetry
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
@@ -7726,6 +7736,10 @@ impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
     /// opens the full picker with every available preset.
     pub(crate) fn open_model_popup(&mut self) {
+        self.open_model_popup_with_initial_query(None);
+    }
+
+    pub(crate) fn open_model_popup_with_initial_query(&mut self, initial_query: Option<String>) {
         if !self.is_session_configured() {
             self.add_info_message(
                 "Model selection is disabled until startup completes.".to_string(),
@@ -7744,7 +7758,7 @@ impl ChatWidget {
                 return;
             }
         };
-        self.open_model_popup_with_presets(presets);
+        self.open_model_popup_with_presets_and_query(presets, initial_query);
     }
 
     pub(crate) fn open_personality_popup(&mut self) {
@@ -8014,7 +8028,16 @@ impl ChatWidget {
         Some(trimmed.to_string())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
+        self.open_model_popup_with_presets_and_query(presets, None);
+    }
+
+    pub(crate) fn open_model_popup_with_presets_and_query(
+        &mut self,
+        presets: Vec<ModelPreset>,
+        initial_query: Option<String>,
+    ) {
         let presets: Vec<ModelPreset> = presets
             .into_iter()
             .filter(|preset| preset.show_in_picker)
@@ -8031,8 +8054,22 @@ impl ChatWidget {
             .into_iter()
             .partition(|preset| Self::is_auto_model(&preset.model));
 
+        // `/model <query>` should surface the concrete searchable model list
+        // immediately. Staying on the auto-mode picker would hide the actual
+        // provider/model rows behind generic entries like `codex-auto-fast`,
+        // which defeats the purpose of pre-filtering.
+        let trimmed_query = initial_query
+            .as_deref()
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .map(str::to_string);
+        if let Some(query) = trimmed_query {
+            self.open_all_models_popup_with_query(other_presets, Some(query));
+            return;
+        }
+
         if auto_presets.is_empty() {
-            self.open_all_models_popup(other_presets);
+            self.open_all_models_popup_with_query(other_presets, None);
             return;
         }
 
@@ -8112,7 +8149,32 @@ impl ChatWidget {
         }
     }
 
+    fn model_picker_search_value(preset: &ModelPreset) -> String {
+        // Sirix injects provider context into `description` for session-scoped
+        // inline models, so the model picker search must index both the model
+        // identifiers and the descriptive text. This lets `/model` filter by
+        // either model keywords (for example `gpt`) or provider names
+        // (for example `openai`, `anthropic`) without adding a separate
+        // provider-only field to the shared upstream `ModelPreset` schema.
+        let mut search_parts = vec![preset.model.clone()];
+        if preset.display_name != preset.model {
+            search_parts.push(preset.display_name.clone());
+        }
+        if !preset.description.is_empty() {
+            search_parts.push(preset.description.clone());
+        }
+        search_parts.join(" ")
+    }
+
     pub(crate) fn open_all_models_popup(&mut self, presets: Vec<ModelPreset>) {
+        self.open_all_models_popup_with_query(presets, None);
+    }
+
+    pub(crate) fn open_all_models_popup_with_query(
+        &mut self,
+        presets: Vec<ModelPreset>,
+        initial_query: Option<String>,
+    ) {
         if presets.is_empty() {
             self.add_info_message(
                 "No additional models are available right now.".to_string(),
@@ -8147,9 +8209,15 @@ impl ChatWidget {
                 is_default: preset.is_default,
                 actions,
                 dismiss_on_select: single_supported_effort,
+                // Keep the `/model` filter effective for both the model itself
+                // and the Sirix provider descriptor embedded in the preset
+                // description, so queries like `gpt` or `openai` both narrow
+                // the same popup.
+                search_value: Some(Self::model_picker_search_value(&preset)),
                 ..Default::default()
             });
         }
+        let initial_selected_idx = items.iter().position(|item| item.is_current);
 
         let header = self.model_menu_header(
             "Select Model and Effort",
@@ -8158,6 +8226,13 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),
             items,
+            is_searchable: true,
+            initial_search_query: initial_query,
+            search_placeholder: Some("Type to filter models or providers...".to_string()),
+            // Searchable selection views do not automatically reuse
+            // `is_current`, so pass the current-model index explicitly to keep
+            // `/model` focused on the active entry before the user types.
+            initial_selected_idx,
             header,
             ..Default::default()
         });

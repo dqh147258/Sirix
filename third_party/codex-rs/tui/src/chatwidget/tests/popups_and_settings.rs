@@ -1619,6 +1619,129 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 #[tokio::test]
+async fn all_models_picker_filters_by_model_keyword() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let preset = |slug: &str, description: &str| ModelPreset {
+        id: slug.to_string(),
+        model: slug.to_string(),
+        display_name: slug.to_string(),
+        description: description.to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: vec![ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Medium,
+            description: "medium".to_string(),
+        }],
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_all_models_popup(vec![
+        preset("gpt-5", "Configured in Sirix provider OpenAI"),
+        preset(
+            "claude-3-7-sonnet",
+            "Configured in Sirix provider Anthropic",
+        ),
+    ]);
+    type_plugins_search_query(&mut chat, "gpt");
+
+    let popup = render_bottom_popup(&chat, /*width*/ 90);
+    assert!(
+        popup.contains("gpt-5"),
+        "expected gpt model to remain after filtering:\n{popup}"
+    );
+    assert!(
+        !popup.contains("claude-3-7-sonnet"),
+        "expected non-matching model to be filtered out:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn all_models_picker_filters_by_provider_keyword() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let preset = |slug: &str, description: &str| ModelPreset {
+        id: slug.to_string(),
+        model: slug.to_string(),
+        display_name: slug.to_string(),
+        description: description.to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: vec![ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Medium,
+            description: "medium".to_string(),
+        }],
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_all_models_popup(vec![
+        preset("gpt-5", "Configured in Sirix provider OpenAI"),
+        preset("gemini-2.5-pro", "Configured in Sirix provider Gemini"),
+    ]);
+    type_plugins_search_query(&mut chat, "gemini");
+
+    let popup = render_bottom_popup(&chat, /*width*/ 90);
+    assert!(
+        popup.contains("gemini-2.5-pro"),
+        "expected provider-matching model to remain after filtering:\n{popup}"
+    );
+    assert!(
+        !popup.contains("gpt-5"),
+        "expected model from a different provider to be filtered out:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn all_models_picker_fuzzy_matches_ordered_query_with_gaps() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("qwen3.5-27B")).await;
+    let preset = |slug: &str, description: &str| ModelPreset {
+        id: slug.to_string(),
+        model: slug.to_string(),
+        display_name: slug.to_string(),
+        description: description.to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: vec![ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Medium,
+            description: "medium".to_string(),
+        }],
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_all_models_popup(vec![
+        preset("qwen3.5-27B", "Configured in Sirix provider Qwen"),
+        preset("qwen3.5-14B", "Configured in Sirix provider Qwen"),
+    ]);
+    type_plugins_search_query(&mut chat, "qwen27b");
+
+    let popup = render_bottom_popup(&chat, /*width*/ 90);
+    assert!(
+        popup.contains("qwen3.5-27B"),
+        "expected fuzzy ordered query to match the 27B model:\n{popup}"
+    );
+    assert!(
+        !popup.contains("qwen3.5-14B"),
+        "expected non-matching ordered fuzzy result to be filtered out:\n{popup}"
+    );
+}
+
+#[tokio::test]
 async fn model_picker_uses_inline_configured_models_when_catalog_is_overridden() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("sirix-gpt")).await;
     let mut model = codex_models_manager::model_info::model_info_from_slug("sirix-gpt");

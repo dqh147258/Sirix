@@ -143,6 +143,12 @@ pub(crate) struct SelectionViewParams {
     pub footer_hint: Option<Line<'static>>,
     pub items: Vec<SelectionItem>,
     pub is_searchable: bool,
+    /// Seed the search box before the popup is shown.
+    ///
+    /// This is used by slash commands such as `/model gpt` where the command
+    /// argument should immediately narrow the popup without forcing the user to
+    /// retype the same filter after the selection view opens.
+    pub initial_search_query: Option<String>,
     pub search_placeholder: Option<String>,
     pub col_width_mode: ColumnWidthMode,
     pub header: Box<dyn Renderable>,
@@ -185,6 +191,7 @@ impl Default for SelectionViewParams {
             footer_hint: None,
             items: Vec::new(),
             is_searchable: false,
+            initial_search_query: None,
             search_placeholder: None,
             col_width_mode: ColumnWidthMode::AutoVisible,
             header: Box::new(()),
@@ -262,7 +269,14 @@ impl ListSelectionView {
             complete: false,
             app_event_tx,
             is_searchable: params.is_searchable,
-            search_query: String::new(),
+            // Preserve a command-provided initial query when search is enabled;
+            // otherwise keep the internal state empty so non-searchable popups
+            // retain their previous behavior.
+            search_query: if params.is_searchable {
+                params.initial_search_query.unwrap_or_default()
+            } else {
+                String::new()
+            },
             search_placeholder: if params.is_searchable {
                 params.search_placeholder
             } else {
@@ -299,6 +313,54 @@ impl ListSelectionView {
             .and_then(|visible_idx| self.filtered_indices.get(visible_idx).copied())
     }
 
+    fn normalized_search_text(value: &str) -> String {
+        value
+            .chars()
+            .filter(|ch| ch.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+
+    fn search_query_matches_candidate(query: &str, candidate: &str) -> bool {
+        let normalized_query_terms: Vec<String> = query
+            .split_whitespace()
+            .map(Self::normalized_search_text)
+            .filter(|term| !term.is_empty())
+            .collect();
+        if normalized_query_terms.is_empty() {
+            return true;
+        }
+
+        let normalized_candidate_terms: Vec<String> = candidate
+            .split_whitespace()
+            .map(Self::normalized_search_text)
+            .filter(|term| !term.is_empty())
+            .collect();
+        if normalized_candidate_terms.is_empty() {
+            return false;
+        }
+
+        normalized_query_terms.into_iter().all(|query_term| {
+            normalized_candidate_terms.iter().any(|candidate_term| {
+                Self::fuzzy_term_matches_candidate(&query_term, candidate_term)
+            })
+        })
+    }
+
+    fn fuzzy_term_matches_candidate(query_term: &str, candidate_term: &str) -> bool {
+        let mut query_chars = query_term.chars();
+        let mut next_query_char = query_chars.next();
+        for candidate_char in candidate_term.chars() {
+            if Some(candidate_char) == next_query_char {
+                next_query_char = query_chars.next();
+                if next_query_char.is_none() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn apply_filter(&mut self) {
         let previously_selected = self
             .selected_actual_idx()
@@ -310,14 +372,13 @@ impl ListSelectionView {
             .or_else(|| self.initial_selected_idx.take());
 
         if self.is_searchable && !self.search_query.is_empty() {
-            let query_lower = self.search_query.to_lowercase();
             self.filtered_indices = self
                 .items
                 .iter()
                 .positions(|item| {
-                    item.search_value
-                        .as_ref()
-                        .is_some_and(|v| v.to_lowercase().contains(&query_lower))
+                    item.search_value.as_ref().is_some_and(|value| {
+                        Self::search_query_matches_candidate(&self.search_query, value)
+                    })
                 })
                 .collect();
         } else {
@@ -374,8 +435,9 @@ impl ListSelectionView {
                     let is_disabled = item.is_disabled || item.disabled_reason.is_some();
                     let n = visible_idx + 1;
                     let wrap_prefix = if self.is_searchable {
-                        // The number keys don't work when search is enabled (since we let the
-                        // numbers be used for the search query).
+                        // Searchable pickers currently consume digit keys as
+                        // part of the query, so showing numeric shortcuts here
+                        // would falsely imply that number-key selection works.
                         format!("{prefix} ")
                     } else if is_disabled {
                         format!("{prefix} {}", " ".repeat(n.to_string().len() + 2))
@@ -732,7 +794,9 @@ impl Renderable for ListSelectionView {
         let mut height = self.header.desired_height(inner_width);
         height = height.saturating_add(rows_height + 3);
         if self.is_searchable {
-            height = height.saturating_add(1);
+            // Reserve one row for the search input itself and one empty spacer
+            // row before the filtered results list.
+            height = height.saturating_add(2);
         }
 
         // Side content: when the terminal is wide enough the panel sits beside
@@ -820,9 +884,18 @@ impl Renderable for ListSelectionView {
         };
         let stacked_gap = if stacked_side_h > 0 { 1 } else { 0 };
 
-        let [header_area, _, search_area, list_area, _, stacked_side_area] = Layout::vertical([
+        let [
+            header_area,
+            _,
+            search_area,
+            search_gap_area,
+            list_area,
+            _,
+            stacked_side_area,
+        ] = Layout::vertical([
             Constraint::Max(header_height),
             Constraint::Max(1),
+            Constraint::Length(if self.is_searchable { 1 } else { 0 }),
             Constraint::Length(if self.is_searchable { 1 } else { 0 }),
             Constraint::Length(rows_height),
             Constraint::Length(stacked_gap),
@@ -855,6 +928,9 @@ impl Renderable for ListSelectionView {
                 self.search_query.clone().into()
             };
             Line::from(query_span).render(search_area, buf);
+            // Keep a visual separation between the search box and the result
+            // list so the typed filter reads like its own control.
+            Self::clear_to_terminal_bg(buf, search_gap_area);
         }
 
         // -- List rows --
@@ -1299,6 +1375,64 @@ mod tests {
         assert!(
             lines.contains("filters"),
             "expected search query line to include rendered query, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn initial_search_query_is_applied_on_construction() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = ListSelectionView::new(
+            SelectionViewParams {
+                items: vec![SelectionItem {
+                    name: "OpenAI GPT".to_string(),
+                    search_value: Some("gpt openai".to_string()),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }],
+                is_searchable: true,
+                initial_search_query: Some("openai".to_string()),
+                search_placeholder: Some("Type to filter".to_string()),
+                ..Default::default()
+            },
+            tx,
+        );
+
+        let lines = render_lines(&view);
+        assert!(
+            lines.contains("openai"),
+            "expected initial search query to render immediately, got {lines:?}"
+        );
+        assert!(
+            lines.contains("OpenAI GPT"),
+            "expected matching row to remain visible with initial query, got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn fuzzy_search_matches_in_order_with_gaps() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let view = ListSelectionView::new(
+            SelectionViewParams {
+                items: vec![SelectionItem {
+                    name: "qwen3.5-27B".to_string(),
+                    search_value: Some("qwen3.5-27B provider qwen".to_string()),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }],
+                is_searchable: true,
+                initial_search_query: Some("qwen27b".to_string()),
+                search_placeholder: Some("Type to filter".to_string()),
+                ..Default::default()
+            },
+            tx,
+        );
+
+        let lines = render_lines(&view);
+        assert!(
+            lines.contains("qwen3.5-27B"),
+            "expected in-order fuzzy search to match across punctuation and gaps, got {lines:?}"
         );
     }
 

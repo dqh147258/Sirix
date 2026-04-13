@@ -677,6 +677,55 @@ async fn user_turn_clears_service_tier_after_fast_is_turned_off() {
 }
 
 #[tokio::test]
+async fn model_inline_args_open_prefiltered_picker() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let preset = |slug: &str, description: &str| ModelPreset {
+        id: slug.to_string(),
+        model: slug.to_string(),
+        display_name: slug.to_string(),
+        description: description.to_string(),
+        default_reasoning_effort: ReasoningEffortConfig::Medium,
+        supported_reasoning_efforts: vec![ReasoningEffortPreset {
+            effort: ReasoningEffortConfig::Medium,
+            description: "medium".to_string(),
+        }],
+        supports_personality: false,
+        additional_speed_tiers: Vec::new(),
+        is_default: false,
+        upgrade: None,
+        show_in_picker: true,
+        availability_nux: None,
+        supported_in_api: true,
+        input_modalities: default_input_modalities(),
+    };
+
+    chat.open_model_popup_with_presets_and_query(
+        vec![
+            preset("gpt-5", "Configured in Sirix provider OpenAI"),
+            preset(
+                "claude-3-7-sonnet",
+                "Configured in Sirix provider Anthropic",
+            ),
+        ],
+        Some("gpt".to_string()),
+    );
+
+    let popup = render_bottom_popup(&chat, /*width*/ 90);
+    assert!(
+        popup.contains("gpt"),
+        "expected inline /model args to prefill the filter query:\n{popup}"
+    );
+    assert!(
+        popup.contains("gpt-5"),
+        "expected matching model to stay visible:\n{popup}"
+    );
+    assert!(
+        !popup.contains("claude-3-7-sonnet"),
+        "expected non-matching models to be prefiltered out:\n{popup}"
+    );
+}
+
+#[tokio::test]
 async fn compact_queues_user_messages_snapshot() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

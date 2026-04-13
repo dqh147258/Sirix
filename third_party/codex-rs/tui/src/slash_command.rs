@@ -130,6 +130,7 @@ impl SlashCommand {
         matches!(
             self,
             SlashCommand::Review
+                | SlashCommand::Model
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
@@ -220,5 +221,10 @@ mod tests {
     #[test]
     fn clean_alias_parses_to_stop_command() {
         assert_eq!(SlashCommand::from_str("clean"), Ok(SlashCommand::Stop));
+    }
+
+    #[test]
+    fn model_command_supports_inline_args() {
+        assert!(SlashCommand::Model.supports_inline_args());
     }
 }

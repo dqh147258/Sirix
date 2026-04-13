@@ -34,9 +34,10 @@ use crate::app::{
         approval::{ApprovalDecision, ApprovalRecord, ApprovalScope},
         config::{
             build_agent_system_prompt, build_agent_system_prompt_preview,
-            effective_model_context_window, infer_provider_default_context_window,
-            validate_sirix_config, ApprovalMode, ModelConfig, ModelKind, ProviderConfig,
-            ProviderKind, ShellRulesConfig, SirixConfig,
+            duplicate_session_text_model_ids, effective_model_context_window,
+            infer_provider_default_context_window, resolve_session_picker_model,
+            session_picker_model_id, validate_sirix_config, ApprovalMode, ModelConfig, ModelKind,
+            ProviderConfig, ProviderKind, ShellRulesConfig, SirixConfig,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -689,6 +690,21 @@ pub async fn proxy_compatible_responses(
         .get("model")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
+    let session_providers = state
+        .ai_session_registry
+        .resolve_session_providers(ai_session_id)
+        .await
+        .map(|(_, providers)| providers)
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "providers not found for ai session {ai_session_id}"
+            ))
+        })?;
+    let requested_model_slug = resolve_session_picker_model(&session_providers, requested_model)
+        .map(|(_, model)| model.id.clone())
+        .unwrap_or_else(|| requested_model.to_string());
+    let requested_alias_provider = resolve_session_picker_model(&session_providers, requested_model)
+        .map(|(provider, _)| provider.clone());
     let runtime = state
         .ai_session_registry
         .resolve_runtime(ai_session_id)
@@ -700,22 +716,63 @@ pub async fn proxy_compatible_responses(
                 .fallback
                 .primary_disabled_until
                 .filter(|until| *until > chrono::Utc::now())
-                .filter(|_| snapshot.fallback.primary_model_id == requested_model)
+                .filter(|_| snapshot.fallback.primary_model_id == requested_model_slug)
                 .map(|_| snapshot.fallback.fallback_model_id.clone())
         })
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| requested_model.to_string());
+        .unwrap_or_else(|| requested_model_slug.clone());
     let mut effective_payload = payload.clone();
     if effective_model != requested_model {
         effective_payload["model"] = JsonValue::String(effective_model.clone());
     }
-    let provider = state
-        .ai_session_registry
-        .resolve_provider_for_model(ai_session_id, effective_model.as_str())
-        .await
-        .ok_or_else(|| {
-            ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
-        })?;
+    let provider = if effective_model == requested_model_slug {
+        if let Some(provider) = requested_alias_provider.clone() {
+            tracing::info!(
+                "[SIRIX_MODEL_ROUTING] using alias-selected provider ai_session_id={} requested_model={} resolved_model={} provider_id={} provider_kind={:?}",
+                ai_session_id,
+                requested_model,
+                requested_model_slug,
+                provider.id,
+                provider.kind,
+            );
+            provider
+        } else {
+            let provider = state
+                .ai_session_registry
+                .resolve_provider_for_model(ai_session_id, effective_model.as_str())
+                .await
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
+                })?;
+            tracing::info!(
+                "[SIRIX_MODEL_ROUTING] using slug-selected provider ai_session_id={} requested_model={} resolved_model={} provider_id={} provider_kind={:?}",
+                ai_session_id,
+                requested_model,
+                effective_model,
+                provider.id,
+                provider.kind,
+            );
+            provider
+        }
+    } else {
+        let provider = state
+            .ai_session_registry
+            .resolve_provider_for_model(ai_session_id, effective_model.as_str())
+            .await
+            .ok_or_else(|| {
+                ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
+            })?;
+        tracing::info!(
+            "[SIRIX_MODEL_ROUTING] using fallback-selected provider ai_session_id={} requested_model={} requested_slug={} fallback_model={} provider_id={} provider_kind={:?}",
+            ai_session_id,
+            requested_model,
+            requested_model_slug,
+            effective_model,
+            provider.id,
+            provider.kind,
+        );
+        provider
+    };
     let result = match provider.kind {
         ProviderKind::OpenAiCompatible => {
             proxy_openai_compatible_responses(&provider, &effective_payload).await
@@ -731,12 +788,12 @@ pub async fn proxy_compatible_responses(
     if result.is_ok() {
         let _ = state
             .ai_session_registry
-            .record_primary_model_success(ai_session_id, requested_model)
+            .record_primary_model_success(ai_session_id, requested_model_slug.as_str())
             .await;
     } else {
         let _ = state
             .ai_session_registry
-            .record_primary_model_failure(ai_session_id, requested_model)
+            .record_primary_model_failure(ai_session_id, requested_model_slug.as_str())
             .await;
     }
     result
@@ -755,20 +812,23 @@ fn session_models_payload(providers: &[ProviderConfig], active_provider_id: &str
         )
     });
 
-    let mut seen_model_ids = HashSet::<String>::new();
+    let duplicate_model_ids = duplicate_session_text_model_ids(providers);
+    let mut seen_picker_model_ids = HashSet::<String>::new();
     let mut models = Vec::new();
     for provider in ordered_providers {
         for model in provider.models.iter() {
             if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
                 continue;
             }
-            if !seen_model_ids.insert(model.id.clone()) {
+            let picker_model_id = session_picker_model_id(provider, model, &duplicate_model_ids);
+            if !seen_picker_model_ids.insert(picker_model_id.clone()) {
                 continue;
             }
             models.push(serde_json::json!({
-                "id": model.id,
+                "id": picker_model_id,
                 "display_name": model.display_name,
                 "owned_by": provider.name,
+                "model_id": model.id,
                 "context_window": effective_model_context_window(provider, model),
                 "supports_images": model.supports_images,
             }));
@@ -2144,7 +2204,7 @@ mod tests {
     }
 
     #[test]
-    fn session_models_payload_prefers_active_provider_duplicate_ids() {
+    fn session_models_payload_keeps_provider_scoped_duplicate_ids() {
         let mut active = provider(ProviderKind::OpenAiCompatible, "https://example.com/v1");
         active.id = "glm".to_string();
         active.name = "GLM".to_string();
@@ -2185,15 +2245,19 @@ mod tests {
             .and_then(JsonValue::as_array)
             .expect("session model payload should contain data");
 
-        assert_eq!(data.len(), 2);
+        assert_eq!(data.len(), 3);
         assert_eq!(
             data[0].get("id").and_then(JsonValue::as_str),
-            Some("shared-model")
+            Some("shared-model @ glm")
         );
         assert_eq!(
             data[0].get("owned_by").and_then(JsonValue::as_str),
             Some("GLM")
         );
         assert_eq!(data[1].get("id").and_then(JsonValue::as_str), Some("gpt-5"));
+        assert_eq!(
+            data[2].get("id").and_then(JsonValue::as_str),
+            Some("shared-model @ openai")
+        );
     }
 }

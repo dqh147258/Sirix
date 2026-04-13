@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::app::{
     ai::config::{
-        AiLaunchConfig, ApprovalMode, ProviderConfig, SessionAgentRuntimeConfig, ShellRulesConfig,
-        SirixConfigStore,
+        resolve_session_picker_model, AiLaunchConfig, ApprovalMode, ProviderConfig,
+        SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore,
     },
     state::AppState,
 };
@@ -350,6 +350,12 @@ fn resolve_provider_for_model(
     routing: &SessionProviderRouting,
     model_id: &str,
 ) -> Option<ProviderConfig> {
+    if let Some((provider, model)) = resolve_session_picker_model(&routing.providers, model_id) {
+        if !should_use_fallback_model(&routing.fallback, model.id.as_str()) {
+            return Some(provider.clone());
+        }
+    }
+
     let resolved_model_id = if should_use_fallback_model(&routing.fallback, model_id.trim()) {
         routing.fallback.fallback_model_id.as_str()
     } else {
@@ -739,6 +745,67 @@ mod tests {
         assert_eq!(
             registry
                 .resolve_provider_for_model(record.ai_session_id, "model")
+                .await
+                .map(|provider| provider.id),
+            Some("provider-b".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolves_provider_scoped_alias_to_matching_provider() {
+        let registry = AiSessionRegistry::new();
+        let record = AiSessionRecord {
+            ai_session_id: Uuid::new_v4(),
+            terminal_id: Uuid::new_v4(),
+            cwd: "/tmp/workspace".to_string(),
+            agent_id: "agent".to_string(),
+            model_id: "shared-model".to_string(),
+            mirrored_to_backend: false,
+        };
+
+        let mut primary = test_provider("provider-a");
+        primary.models = vec![ModelConfig {
+            id: "shared-model".to_string(),
+            display_name: "Shared Model".to_string(),
+            model_kind: ModelKind::Text,
+            context_window: Some(128_000),
+            supports_images: false,
+            enabled: true,
+        }];
+
+        let mut secondary = test_provider("provider-b");
+        secondary.kind = super::super::config::ProviderKind::OpenAiCodexOauth;
+        secondary.base_url = "https://chatgpt.com/backend-api/codex".to_string();
+        secondary.models = vec![ModelConfig {
+            id: "shared-model".to_string(),
+            display_name: "Shared Model".to_string(),
+            model_kind: ModelKind::Text,
+            context_window: Some(400_000),
+            supports_images: false,
+            enabled: true,
+        }];
+
+        registry
+            .insert(
+                record.clone(),
+                &AiLaunchConfig {
+                    session_providers: vec![primary, secondary],
+                    ..test_launch("provider-b")
+                },
+                test_runtime("agent"),
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .resolve_provider_for_model(record.ai_session_id, "shared-model @ provider-a")
+                .await
+                .map(|provider| provider.id),
+            Some("provider-a".to_string())
+        );
+        assert_eq!(
+            registry
+                .resolve_provider_for_model(record.ai_session_id, "shared-model @ provider-b")
                 .await
                 .map(|provider| provider.id),
             Some("provider-b".to_string())

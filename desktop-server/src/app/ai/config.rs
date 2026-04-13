@@ -1022,19 +1022,21 @@ fn build_bridge_models_for_session(
         )
     });
 
-    let mut seen_model_ids = HashSet::<String>::new();
+    let duplicate_model_ids = duplicate_session_text_model_ids(providers);
+    let mut seen_picker_model_ids = HashSet::<String>::new();
     let mut models = Vec::new();
     for provider in ordered_providers {
         for model in provider.models.iter() {
             if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
                 continue;
             }
-            if !seen_model_ids.insert(model.id.clone()) {
+            let picker_model_id = session_picker_model_id(provider, model, &duplicate_model_ids);
+            if !seen_picker_model_ids.insert(picker_model_id.clone()) {
                 continue;
             }
             let mut entry = toml::map::Map::<String, TomlValue>::new();
-            entry.insert("id".to_string(), TomlValue::String(model.id.clone()));
-            entry.insert("model".to_string(), TomlValue::String(model.id.clone()));
+            entry.insert("id".to_string(), TomlValue::String(picker_model_id.clone()));
+            entry.insert("model".to_string(), TomlValue::String(picker_model_id.clone()));
             entry.insert(
                 "display_name".to_string(),
                 TomlValue::String(model.display_name.clone()),
@@ -1063,7 +1065,9 @@ fn build_bridge_models_for_session(
             // Sirix CLI and the runtime model catalog stay aligned.
             entry.insert(
                 "is_default".to_string(),
-                TomlValue::Boolean(model.id == default_model_id),
+                TomlValue::Boolean(
+                    provider.id == active_provider_id && model.id == default_model_id,
+                ),
             );
             entry.insert("show_in_picker".to_string(), TomlValue::Boolean(true));
             entry.insert("supported_in_api".to_string(), TomlValue::Boolean(true));
@@ -1082,6 +1086,63 @@ fn build_bridge_models_for_session(
         }
     }
     models
+}
+
+pub(crate) fn duplicate_session_text_model_ids(providers: &[ProviderConfig]) -> HashSet<String> {
+    let mut counts = HashMap::<String, usize>::new();
+    for provider in providers.iter().filter(|provider| provider.enabled) {
+        for model in provider.models.iter() {
+            if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
+                continue;
+            }
+            *counts.entry(model.id.clone()).or_default() += 1;
+        }
+    }
+
+    counts
+        .into_iter()
+        .filter_map(|(model_id, count)| (count > 1).then_some(model_id))
+        .collect()
+}
+
+pub(crate) fn session_picker_model_id(
+    provider: &ProviderConfig,
+    model: &ModelConfig,
+    duplicate_model_ids: &HashSet<String>,
+) -> String {
+    if duplicate_model_ids.contains(model.id.as_str()) {
+        // Sirix session model selection only sends one `model` string back from the embedded
+        // Codex picker, without a separate provider id. When multiple providers expose the same
+        // upstream slug, we must surface a stable provider-scoped alias so the selection can be
+        // routed back to the intended provider instead of collapsing to "active provider wins".
+        format!("{} @ {}", model.id, provider.id)
+    } else {
+        model.id.clone()
+    }
+}
+
+pub(crate) fn resolve_session_picker_model<'a>(
+    providers: &'a [ProviderConfig],
+    picker_model_id: &str,
+) -> Option<(&'a ProviderConfig, &'a ModelConfig)> {
+    let trimmed_picker_model_id = picker_model_id.trim();
+    if trimmed_picker_model_id.is_empty() {
+        return None;
+    }
+
+    let duplicate_model_ids = duplicate_session_text_model_ids(providers);
+    for provider in providers.iter().filter(|provider| provider.enabled) {
+        for model in provider.models.iter() {
+            if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
+                continue;
+            }
+            let candidate = session_picker_model_id(provider, model, &duplicate_model_ids);
+            if candidate == trimmed_picker_model_id {
+                return Some((provider, model));
+            }
+        }
+    }
+    None
 }
 
 fn bridge_session_proxy_base_url(local_ws_port: u16, ai_session_id: Uuid) -> String {
@@ -3225,6 +3286,83 @@ mod tests {
             provider.get("wire_api").and_then(TomlValue::as_str),
             Some("responses")
         );
+    }
+
+    #[test]
+    fn bridge_models_use_provider_scoped_alias_for_duplicate_slugs() {
+        let active = ProviderConfig {
+            id: "openai-codex-oauth".to_string(),
+            name: "OpenAI Codex OAuth".to_string(),
+            kind: ProviderKind::OpenAiCodexOauth,
+            default_context_window: Some(400_000),
+            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "gpt-5.2".to_string(),
+                display_name: "gpt-5.2".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: Some(272_000),
+                supports_images: false,
+                enabled: true,
+            }],
+        };
+        let secondary = ProviderConfig {
+            id: "openai-codex-oauth-gemini".to_string(),
+            name: "OpenAI Codex OAuth Gemini".to_string(),
+            kind: ProviderKind::OpenAiCodexOauth,
+            default_context_window: Some(400_000),
+            base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "gpt-5.2".to_string(),
+                display_name: "gpt-5.2".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: Some(272_000),
+                supports_images: false,
+                enabled: true,
+            }],
+        };
+
+        let bridge_models = build_bridge_models_for_session(
+            &[secondary.clone(), active.clone()],
+            active.id.as_str(),
+            "gpt-5.2",
+        );
+
+        assert_eq!(bridge_models.len(), 2);
+        assert_eq!(
+            bridge_models[0]
+                .get("model")
+                .and_then(TomlValue::as_str),
+            Some("gpt-5.2 @ openai-codex-oauth")
+        );
+        assert_eq!(
+            bridge_models[0]
+                .get("is_default")
+                .and_then(TomlValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            bridge_models[1]
+                .get("model")
+                .and_then(TomlValue::as_str),
+            Some("gpt-5.2 @ openai-codex-oauth-gemini")
+        );
+
+        let providers = [secondary, active];
+        let resolved = resolve_session_picker_model(
+            &providers,
+            "gpt-5.2 @ openai-codex-oauth-gemini",
+        )
+        .expect("duplicate alias should resolve back to provider-scoped model");
+        assert_eq!(resolved.0.id, "openai-codex-oauth-gemini");
+        assert_eq!(resolved.1.id, "gpt-5.2");
     }
 
     #[test]

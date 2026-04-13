@@ -42,6 +42,22 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(ai::discover_provider_models),
         )
         .route(
+            "/ai/providers/:provider_id/openai-auth/status",
+            get(ai::get_openai_auth_status),
+        )
+        .route(
+            "/ai/providers/:provider_id/openai-auth/login",
+            axum::routing::post(ai::start_openai_auth_login),
+        )
+        .route(
+            "/ai/providers/:provider_id/openai-auth/logout",
+            axum::routing::post(ai::logout_openai_auth),
+        )
+        .route(
+            "/ai/providers/:provider_id/openai-auth/import",
+            axum::routing::post(ai::import_openai_auth_json),
+        )
+        .route(
             "/ai/sessions",
             get(ai::list_sessions).post(ai::launch_session),
         )

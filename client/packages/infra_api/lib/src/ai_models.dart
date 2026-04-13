@@ -5,6 +5,8 @@ const Object _unset = Object();
 enum ProviderKind {
   openAiCompatible,
   openAiResponses,
+  openAiCodexOauth,
+  openAiCodexApi,
   gemini,
   anthropic,
 }
@@ -27,6 +29,8 @@ String _providerKindJson(ProviderKind value) {
   return switch (value) {
     ProviderKind.openAiCompatible => 'open_ai_compatible',
     ProviderKind.openAiResponses => 'open_ai_responses',
+    ProviderKind.openAiCodexOauth => 'open_ai_codex_oauth',
+    ProviderKind.openAiCodexApi => 'open_ai_codex_api',
     ProviderKind.gemini => 'gemini',
     ProviderKind.anthropic => 'anthropic',
   };
@@ -54,6 +58,8 @@ ProviderKind providerKindFromJson(String? raw) {
   return switch (raw) {
     'open_ai_compatible' || 'openAiCompatible' => ProviderKind.openAiCompatible,
     'open_ai_responses' || 'openAiResponses' => ProviderKind.openAiResponses,
+    'open_ai_codex_oauth' || 'openAiCodexOauth' => ProviderKind.openAiCodexOauth,
+    'open_ai_codex_api' || 'openAiCodexApi' => ProviderKind.openAiCodexApi,
     'gemini' => ProviderKind.gemini,
     'anthropic' => ProviderKind.anthropic,
     _ => ProviderKind.openAiResponses,
@@ -291,6 +297,39 @@ class AiProviderConfig {
       headersJson: headersJson ?? this.headersJson,
       enabled: enabled ?? this.enabled,
       models: models ?? this.models,
+    );
+  }
+}
+
+@immutable
+class OpenAiAuthStatus {
+  const OpenAiAuthStatus({
+    required this.providerId,
+    this.authenticated = false,
+    this.authMode,
+    this.email,
+    this.planType,
+    this.accountId,
+    this.loginInProgress = false,
+  });
+
+  final String providerId;
+  final bool authenticated;
+  final String? authMode;
+  final String? email;
+  final String? planType;
+  final String? accountId;
+  final bool loginInProgress;
+
+  factory OpenAiAuthStatus.fromJson(Map<String, dynamic> json) {
+    return OpenAiAuthStatus(
+      providerId: json['provider_id'] as String? ?? '',
+      authenticated: json['authenticated'] as bool? ?? false,
+      authMode: json['auth_mode'] as String?,
+      email: json['email'] as String?,
+      planType: json['plan_type'] as String?,
+      accountId: json['account_id'] as String?,
+      loginInProgress: json['login_in_progress'] as bool? ?? false,
     );
   }
 }

@@ -37,6 +37,8 @@ pub const SIRIX_EXEC_POLICY_RULES_FILE: &str = "default.rules";
 pub enum ProviderKind {
     OpenAiCompatible,
     OpenAiResponses,
+    OpenAiCodexOauth,
+    OpenAiCodexApi,
     Gemini,
     Anthropic,
 }
@@ -364,6 +366,13 @@ impl SirixConfigStore {
 
     pub fn config_path(&self) -> &Path {
         self.config_path.as_path()
+    }
+
+    pub fn provider_openai_auth_home(&self, provider_id: &str) -> PathBuf {
+        self.sirix_home
+            .join("runtime")
+            .join("openai-auth")
+            .join(provider_id)
     }
 
     pub fn load_global(&self) -> anyhow::Result<SirixConfig> {
@@ -1331,8 +1340,16 @@ pub fn infer_provider_default_context_window(kind: &ProviderKind, model_id: &str
     match kind {
         ProviderKind::Anthropic => 200_000,
         ProviderKind::Gemini => 1_048_576,
-        ProviderKind::OpenAiResponses if model_id.starts_with("gpt-5") => 400_000,
-        ProviderKind::OpenAiResponses => 200_000,
+        ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCodexOauth
+        | ProviderKind::OpenAiCodexApi
+            if model_id.starts_with("gpt-5") =>
+        {
+            400_000
+        }
+        ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCodexOauth
+        | ProviderKind::OpenAiCodexApi => 200_000,
         ProviderKind::OpenAiCompatible => 128_000,
     }
 }

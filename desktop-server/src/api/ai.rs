@@ -18,6 +18,8 @@ use axum::{
     },
     Json,
 };
+use codex_login::CodexAuth;
+use codex_protocol::openai_models::{InputModality, ModelInfo, ModelVisibility, ModelsResponse};
 use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use reqwest::{
@@ -36,6 +38,7 @@ use crate::app::{
             validate_sirix_config, ApprovalMode, ModelConfig, ModelKind, ProviderConfig,
             ProviderKind, ShellRulesConfig, SirixConfig,
         },
+        openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
             launch_ai_session, launch_ai_session_in_current_terminal, reconfigure_ai_session_agent,
             AiSessionLaunchResponse, AiSessionRecord,
@@ -138,6 +141,64 @@ pub struct AgentSystemPromptPreviewResponse {
     pub prompt: String,
 }
 
+pub async fn get_openai_auth_status(
+    Path(provider_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<OpenAiAuthStatus>, ApiError> {
+    let status = state
+        .openai_auth_registry
+        .status(state.sirix_config_store.as_ref(), provider_id.as_str())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(status))
+}
+
+pub async fn start_openai_auth_login(
+    Path(provider_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<StartOpenAiAuthResponse>, ApiError> {
+    let response = state
+        .openai_auth_registry
+        .clone()
+        .start_browser_login(
+            state.sirix_config_store.as_ref(),
+            provider_id.as_str(),
+            state.logger.clone(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(response))
+}
+
+pub async fn logout_openai_auth(
+    Path(provider_id): Path<String>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .openai_auth_registry
+        .logout(state.sirix_config_store.as_ref(), provider_id.as_str())
+        .await
+        .map_err(ApiError::internal)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn import_openai_auth_json(
+    Path(provider_id): Path<String>,
+    State(state): State<AppState>,
+    Json(payload): Json<JsonValue>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    state
+        .openai_auth_registry
+        .import_auth_json(
+            state.sirix_config_store.as_ref(),
+            provider_id.as_str(),
+            payload,
+        )
+        .await
+        .map_err(ApiError::bad_request_anyhow)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn get_ai_config(State(state): State<AppState>) -> Result<Json<SirixConfig>, ApiError> {
     let config = state
         .sirix_config_store
@@ -224,11 +285,34 @@ pub async fn preview_agent_system_prompt(
 }
 
 pub async fn discover_provider_models(
+    State(state): State<AppState>,
     Json(provider): Json<ProviderConfig>,
 ) -> Result<Json<ProviderModelsResponse>, ApiError> {
-    let models = fetch_provider_models(&provider)
-        .await
-        .map_err(ApiError::internal)?;
+    let models = match provider.kind {
+        ProviderKind::OpenAiCodexOauth => discover_openai_codex_oauth_models(&state, &provider)
+            .await
+            .unwrap_or_else(|error| {
+                state.logger.warn(format!(
+                    "[OPENAI_OAUTH_MODELS] provider_id={} discovery_failed error={error}",
+                    provider.id
+                ));
+                Vec::new()
+            }),
+        ProviderKind::OpenAiCodexApi => {
+            fetch_provider_models(&provider)
+                .await
+                .unwrap_or_else(|error| {
+                    state.logger.warn(format!(
+                        "[OPENAI_CODEX_API_MODELS] provider_id={} discovery_failed error={error}",
+                        provider.id
+                    ));
+                    Vec::new()
+                })
+        }
+        _ => fetch_provider_models(&provider)
+            .await
+            .map_err(ApiError::internal)?,
+    };
     Ok(Json(ProviderModelsResponse { models }))
 }
 
@@ -636,8 +720,12 @@ pub async fn proxy_compatible_responses(
         ProviderKind::OpenAiCompatible => {
             proxy_openai_compatible_responses(&provider, &effective_payload).await
         }
-        ProviderKind::OpenAiResponses | ProviderKind::Gemini | ProviderKind::Anthropic => {
-            proxy_native_responses(&provider, &effective_payload).await
+        ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCodexApi
+        | ProviderKind::Gemini
+        | ProviderKind::Anthropic => proxy_native_responses(&provider, &effective_payload).await,
+        ProviderKind::OpenAiCodexOauth => {
+            proxy_openai_codex_oauth_responses(&state, &provider, &effective_payload).await
         }
     };
     if result.is_ok() {
@@ -841,6 +929,92 @@ async fn proxy_native_responses(
         .map_err(|error| ApiError::internal(error.into()))
 }
 
+async fn proxy_openai_codex_oauth_responses(
+    state: &AppState,
+    provider: &ProviderConfig,
+    payload: &JsonValue,
+) -> Result<Response, ApiError> {
+    let base_url = normalized_provider_base_url(provider).map_err(ApiError::internal)?;
+    let upstream_url = responses_endpoint_url(&base_url).map_err(ApiError::internal)?;
+    let auth_manager = provider_auth_manager(state.sirix_config_store.as_ref(), &provider.id)
+        .map_err(ApiError::internal)?;
+    let auth = auth_manager.auth().await.ok_or_else(|| {
+        ApiError::bad_gateway(format!(
+            "OpenAI Codex OAuth provider {} is not authenticated",
+            provider.id
+        ))
+    })?;
+    let headers =
+        openai_codex_oauth_request_headers(provider, &auth).map_err(ApiError::internal)?;
+
+    let (upstream_response, retried) =
+        send_openai_codex_oauth_responses_request(upstream_url, headers, payload).await?;
+    let upstream_response = if upstream_response.status() == reqwest::StatusCode::UNAUTHORIZED
+        && auth_manager.refresh_token_from_authority().await.is_ok()
+    {
+        state.logger.warn(format!(
+            "[OPENAI_AUTH] retrying responses after refresh provider_id={}",
+            provider.id
+        ));
+        let refreshed_auth = auth_manager.auth().await.ok_or_else(|| {
+            ApiError::bad_gateway(format!(
+                "OpenAI Codex OAuth provider {} lost auth after refresh",
+                provider.id
+            ))
+        })?;
+        let headers = openai_codex_oauth_request_headers(provider, &refreshed_auth)
+            .map_err(ApiError::internal)?;
+        let (retry_response, _) = send_openai_codex_oauth_responses_request(
+            responses_endpoint_url(
+                &normalized_provider_base_url(provider).map_err(ApiError::internal)?,
+            )
+            .map_err(ApiError::internal)?,
+            headers,
+            payload,
+        )
+        .await?;
+        retry_response
+    } else {
+        if retried {
+            state.logger.warn(format!(
+                "[OPENAI_AUTH] upstream returned unauthorized provider_id={}",
+                provider.id
+            ));
+        }
+        upstream_response
+    };
+
+    let status = upstream_response.status();
+    if !status.is_success() {
+        let body = upstream_response.text().await.unwrap_or_default();
+        return Err(ApiError::bad_gateway(format!(
+            "OpenAI Codex OAuth provider request failed with status {status}: {body}"
+        )));
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(upstream_response.bytes_stream()))
+        .map_err(|error| ApiError::internal(error.into()))
+}
+
+async fn send_openai_codex_oauth_responses_request(
+    upstream_url: Url,
+    headers: HeaderMap,
+    payload: &JsonValue,
+) -> Result<(reqwest::Response, bool), ApiError> {
+    let upstream_response = reqwest::Client::new()
+        .post(upstream_url)
+        .headers(headers)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| ApiError::internal(error.into()))?;
+    let is_unauthorized = upstream_response.status() == reqwest::StatusCode::UNAUTHORIZED;
+    Ok((upstream_response, is_unauthorized))
+}
+
 async fn fetch_provider_models(provider: &ProviderConfig) -> anyhow::Result<Vec<ModelConfig>> {
     let base_url = normalized_provider_base_url(provider)?;
     let models_url = provider_models_url(provider, &base_url)?;
@@ -856,12 +1030,129 @@ async fn fetch_provider_models(provider: &ProviderConfig) -> anyhow::Result<Vec<
     parse_provider_models(provider, &payload)
 }
 
+async fn discover_openai_codex_oauth_models(
+    state: &AppState,
+    provider: &ProviderConfig,
+) -> anyhow::Result<Vec<ModelConfig>> {
+    let auth_manager = provider_auth_manager(state.sirix_config_store.as_ref(), &provider.id)?;
+    let auth = auth_manager.auth().await;
+    let Some(auth) = auth else {
+        return Ok(Vec::new());
+    };
+
+    let base_url = normalized_provider_base_url(provider)?;
+    let mut models_url = base_url.clone();
+    if !models_url.path().ends_with('/') {
+        let next_path = format!("{}/", models_url.path());
+        models_url.set_path(&next_path);
+    }
+    models_url = models_url.join("models")?;
+    models_url
+        .query_pairs_mut()
+        .append_pair("client_version", env!("CARGO_PKG_VERSION"));
+
+    let headers = openai_codex_oauth_model_headers(provider, &auth)?;
+    let response = reqwest::Client::new()
+        .get(models_url)
+        .headers(headers)
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload = response.json::<ModelsResponse>().await?;
+    Ok(convert_openai_codex_model_infos(payload.models))
+}
+
+fn responses_endpoint_url(base_url: &Url) -> anyhow::Result<Url> {
+    let mut upstream_url = base_url.clone();
+    if !upstream_url.path().ends_with('/') {
+        let next_path = format!("{}/", upstream_url.path());
+        upstream_url.set_path(&next_path);
+    }
+    upstream_url.join("responses").map_err(Into::into)
+}
+
+fn openai_codex_oauth_request_headers(
+    provider: &ProviderConfig,
+    auth: &CodexAuth,
+) -> anyhow::Result<HeaderMap> {
+    let mut headers = parse_provider_headers_json(&provider.headers_json)?;
+    headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    attach_openai_codex_oauth_auth_headers(&mut headers, auth)?;
+
+    Ok(headers)
+}
+
+fn openai_codex_oauth_model_headers(
+    provider: &ProviderConfig,
+    auth: &CodexAuth,
+) -> anyhow::Result<HeaderMap> {
+    let mut headers = parse_provider_headers_json(&provider.headers_json)?;
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    attach_openai_codex_oauth_auth_headers(&mut headers, auth)?;
+    Ok(headers)
+}
+
+fn attach_openai_codex_oauth_auth_headers(
+    headers: &mut HeaderMap,
+    auth: &CodexAuth,
+) -> anyhow::Result<()> {
+    headers
+        .entry(HeaderName::from_static("version"))
+        .or_insert(HeaderValue::from_static(env!("CARGO_PKG_VERSION")));
+
+    let token = auth
+        .get_token()
+        .context("OpenAI Codex OAuth auth is missing access token")?;
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {token}"))
+            .context("invalid authorization header value")?,
+    );
+
+    if let Some(account_id) = auth.get_account_id() {
+        headers.insert(
+            HeaderName::from_static("chatgpt-account-id"),
+            HeaderValue::from_str(&account_id)
+                .context("invalid chatgpt account id header value")?,
+        );
+    }
+    Ok(())
+}
+
+fn convert_openai_codex_model_infos(models: Vec<ModelInfo>) -> Vec<ModelConfig> {
+    let mut converted = models
+        .into_iter()
+        .filter(|model| model.visibility == ModelVisibility::List)
+        .filter(|model| !model.slug.trim().is_empty())
+        .map(|model| ModelConfig {
+            id: model.slug.clone(),
+            display_name: model.display_name.clone(),
+            model_kind: ModelKind::Text,
+            context_window: model
+                .context_window
+                .and_then(|value| u32::try_from(value).ok()),
+            supports_images: model.input_modalities.contains(&InputModality::Image),
+            enabled: true,
+        })
+        .collect::<Vec<_>>();
+
+    converted.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+    converted.dedup_by(|left, right| left.id == right.id);
+    converted
+}
+
 fn normalized_provider_base_url(provider: &ProviderConfig) -> anyhow::Result<Url> {
     let raw = provider.base_url.trim();
     let default_base = match provider.kind {
-        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses => {
-            "https://api.openai.com/v1"
-        }
+        ProviderKind::OpenAiCompatible
+        | ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCodexApi => "https://api.openai.com/v1",
+        ProviderKind::OpenAiCodexOauth => "https://chatgpt.com/backend-api/codex",
         ProviderKind::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
         ProviderKind::Anthropic => "https://api.anthropic.com/v1",
     };
@@ -870,6 +1161,7 @@ fn normalized_provider_base_url(provider: &ProviderConfig) -> anyhow::Result<Url
     if path.is_empty() {
         let default_path = match provider.kind {
             ProviderKind::Gemini => "/v1beta/openai",
+            ProviderKind::OpenAiCodexOauth => "/backend-api/codex",
             _ => "/v1",
         };
         url.set_path(default_path);
@@ -913,7 +1205,10 @@ fn provider_request_headers(provider: &ProviderConfig) -> anyhow::Result<HeaderM
                 .entry(HeaderName::from_static("anthropic-version"))
                 .or_insert(HeaderValue::from_static("2023-06-01"));
         }
-        ProviderKind::OpenAiCompatible | ProviderKind::OpenAiResponses | ProviderKind::Gemini => {
+        ProviderKind::OpenAiCompatible
+        | ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCodexApi
+        | ProviderKind::Gemini => {
             if let Some(api_key) = resolved_provider_api_key(provider) {
                 headers.entry(AUTHORIZATION).or_insert(
                     HeaderValue::from_str(&format!("Bearer {api_key}"))
@@ -921,6 +1216,7 @@ fn provider_request_headers(provider: &ProviderConfig) -> anyhow::Result<HeaderM
                 );
             }
         }
+        ProviderKind::OpenAiCodexOauth => {}
     }
 
     Ok(headers)
@@ -1096,7 +1392,10 @@ fn infer_supports_images(
     match provider.kind {
         ProviderKind::Anthropic => model_id.starts_with("claude"),
         ProviderKind::Gemini => model_id.starts_with("gemini"),
-        ProviderKind::OpenAiResponses | ProviderKind::OpenAiCompatible => [
+        ProviderKind::OpenAiResponses
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::OpenAiCodexOauth
+        | ProviderKind::OpenAiCodexApi => [
             "gpt-4o",
             "gpt-4.1",
             "gpt-5",

@@ -11,6 +11,8 @@ dependencies:
   flutter:
     sdk: flutter
   flutter_riverpod: ^2.5.1
+  desktop_drop: ^0.7.0
+  file_picker: ^8.1.2
   file_selector: ^1.0.3
   app_core:
     path: ../app_core

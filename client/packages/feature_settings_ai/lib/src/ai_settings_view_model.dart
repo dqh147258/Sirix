@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:app_core/app_core.dart';
@@ -29,6 +31,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         config: config,
         shellRules: shellRules,
         effective: effective,
+        openAiAuthStatuses: await _loadOpenAiAuthStatuses(config.providers),
         clearError: true,
       );
     } catch (error) {
@@ -106,8 +109,13 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
 
   void upsertProvider(AiProviderConfig provider) {
     final next = _upsertById(state.config.providers, provider, (item) => item.id);
+    final nextStatuses = Map<String, OpenAiAuthStatus>.from(state.openAiAuthStatuses);
+    if (!_supportsOpenAiAuth(provider)) {
+      nextStatuses.remove(provider.id);
+    }
     state = state.copyWith(
       config: _reconcileDefaultAgent(state.config.copyWith(providers: next)),
+      openAiAuthStatuses: nextStatuses,
       clearError: true,
       clearNotice: true,
     );
@@ -120,11 +128,14 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     final agents = state.config.agents
         .where((item) => item.providerId != providerId)
         .toList(growable: false);
+    final nextStatuses = Map<String, OpenAiAuthStatus>.from(state.openAiAuthStatuses)
+      ..remove(providerId);
     state = state.copyWith(
       config: _reconcileDefaultAgent(state.config.copyWith(
         providers: providers,
         agents: agents,
       )),
+      openAiAuthStatuses: nextStatuses,
       clearError: true,
       clearNotice: true,
     );
@@ -199,6 +210,91 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
             .where((item) => item != providerId)
             .toList(growable: false),
       );
+    }
+  }
+
+  Future<void> refreshOpenAiAuthStatus(String providerId) async {
+    final trimmedProviderId = providerId.trim();
+    if (trimmedProviderId.isEmpty) {
+      return;
+    }
+
+    try {
+      final status = await _localClient.getOpenAiAuthStatus(trimmedProviderId);
+      final nextStatuses = Map<String, OpenAiAuthStatus>.from(state.openAiAuthStatuses)
+        ..[trimmedProviderId] = status;
+      state = state.copyWith(
+        openAiAuthStatuses: nextStatuses,
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        errorMessage: 'Failed to load OpenAI auth status: $error',
+      );
+    }
+  }
+
+  Future<Uri> startOpenAiAuthLogin(String providerId) async {
+    final trimmedProviderId = providerId.trim();
+    await _setProviderAuthBusy(trimmedProviderId, true);
+    try {
+      final authUrl = await _localClient.startOpenAiAuthLogin(trimmedProviderId);
+      await refreshOpenAiAuthStatus(trimmedProviderId);
+      unawaited(_pollOpenAiAuthStatus(trimmedProviderId));
+      return authUrl;
+    } catch (error) {
+      state = state.copyWith(
+        errorMessage: 'Failed to start OpenAI browser login: $error',
+      );
+      rethrow;
+    } finally {
+      await _setProviderAuthBusy(trimmedProviderId, false);
+    }
+  }
+
+  Future<void> importOpenAiAuthJson({
+    required String providerId,
+    required Map<String, dynamic> authJson,
+  }) async {
+    final trimmedProviderId = providerId.trim();
+    await _setProviderAuthBusy(trimmedProviderId, true);
+    try {
+      await _localClient.importOpenAiAuthJson(
+        providerId: trimmedProviderId,
+        authJson: authJson,
+      );
+      await refreshOpenAiAuthStatus(trimmedProviderId);
+      state = state.copyWith(
+        noticeMessage: 'OpenAI auth JSON imported for $trimmedProviderId.',
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        errorMessage: 'Failed to import OpenAI auth JSON: $error',
+      );
+      rethrow;
+    } finally {
+      await _setProviderAuthBusy(trimmedProviderId, false);
+    }
+  }
+
+  Future<void> logoutOpenAiAuth(String providerId) async {
+    final trimmedProviderId = providerId.trim();
+    await _setProviderAuthBusy(trimmedProviderId, true);
+    try {
+      await _localClient.logoutOpenAiAuth(trimmedProviderId);
+      await refreshOpenAiAuthStatus(trimmedProviderId);
+      state = state.copyWith(
+        noticeMessage: 'OpenAI auth removed for $trimmedProviderId.',
+        clearError: true,
+      );
+    } catch (error) {
+      state = state.copyWith(
+        errorMessage: 'Failed to sign out OpenAI auth: $error',
+      );
+      rethrow;
+    } finally {
+      await _setProviderAuthBusy(trimmedProviderId, false);
     }
   }
 
@@ -429,6 +525,53 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
       approvalMode: ApprovalMode.ask,
       builtinToolIds: kBuiltinToolCatalog,
       enabled: true,
+    );
+  }
+
+  Future<Map<String, OpenAiAuthStatus>> _loadOpenAiAuthStatuses(
+    List<AiProviderConfig> providers,
+  ) async {
+    final entries = <String, OpenAiAuthStatus>{};
+    for (final provider in providers) {
+      if (!_supportsOpenAiAuth(provider)) {
+        continue;
+      }
+      try {
+        entries[provider.id] = await _localClient.getOpenAiAuthStatus(provider.id);
+      } catch (error) {
+        AppLogger.warn(
+          '[OPENAI_AUTH] failed to preload status provider_id=${provider.id} error=$error',
+        );
+      }
+    }
+    return entries;
+  }
+
+  bool _supportsOpenAiAuth(AiProviderConfig provider) {
+    return provider.kind == ProviderKind.openAiCodexOauth;
+  }
+
+  Future<void> _pollOpenAiAuthStatus(String providerId) async {
+    for (var attempt = 0; attempt < 120; attempt += 1) {
+      await Future<void>.delayed(const Duration(seconds: 1));
+      await refreshOpenAiAuthStatus(providerId);
+      final status = state.openAiAuthStatuses[providerId];
+      if (status == null || !status.loginInProgress || status.authenticated) {
+        return;
+      }
+    }
+  }
+
+  Future<void> _setProviderAuthBusy(String providerId, bool busy) async {
+    final nextBusy = [...state.authBusyProviderIds];
+    nextBusy.remove(providerId);
+    if (busy) {
+      nextBusy.add(providerId);
+    }
+    state = state.copyWith(
+      authBusyProviderIds: nextBusy,
+      clearError: true,
+      clearNotice: true,
     );
   }
 }

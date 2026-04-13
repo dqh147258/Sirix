@@ -1,5 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'package:app_core/app_core.dart';
@@ -54,6 +58,8 @@ class ProviderSettingsSection extends StatelessWidget {
         for (final provider in state.config.providers) ...[
           _ProviderCard(
             provider: provider,
+            authStatus: state.openAiAuthStatuses[provider.id],
+            authBusy: state.authBusyProviderIds.contains(provider.id),
             defaultProviderId: defaultAgent?.providerId,
             defaultModelId: defaultAgent?.modelId,
             discoveringModels: state.discoveringProviderIds.contains(provider.id),
@@ -77,6 +83,59 @@ class ProviderSettingsSection extends StatelessWidget {
             },
             onDelete: () => vm.removeProvider(provider.id),
             onDiscoverModels: () => unawaited(vm.discoverProviderModels(provider)),
+            onRefreshAuthStatus: provider.kind == ProviderKind.openAiCodexOauth
+                ? () => unawaited(vm.refreshOpenAiAuthStatus(provider.id))
+                : null,
+            onStartOpenAiLogin: provider.kind == ProviderKind.openAiCodexOauth
+                ? () async {
+                    try {
+                      final authUrl = await vm.startOpenAiAuthLogin(provider.id);
+                      await _openExternalUrl(authUrl);
+                    } catch (error, stackTrace) {
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] failed to open browser provider_id=${provider.id} error=$error',
+                      );
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] browser launch stack provider_id=${provider.id} stack=$stackTrace',
+                      );
+                    }
+                  }
+                : null,
+            onImportOpenAiAuthJson: provider.kind == ProviderKind.openAiCodexOauth
+                ? () async {
+                    try {
+                      final authJson = await _showOpenAiAuthImportDialog(context);
+                      if (authJson == null) {
+                        return;
+                      }
+                      await vm.importOpenAiAuthJson(
+                        providerId: provider.id,
+                        authJson: authJson,
+                      );
+                    } catch (error, stackTrace) {
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] failed to import auth json provider_id=${provider.id} error=$error',
+                      );
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] import json stack provider_id=${provider.id} stack=$stackTrace',
+                      );
+                    }
+                  }
+                : null,
+            onLogoutOpenAiAuth: provider.kind == ProviderKind.openAiCodexOauth
+                ? () async {
+                    try {
+                      await vm.logoutOpenAiAuth(provider.id);
+                    } catch (error, stackTrace) {
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] failed to logout provider_id=${provider.id} error=$error',
+                      );
+                      AppLogger.warn(
+                        '[OPENAI_AUTH] logout stack provider_id=${provider.id} stack=$stackTrace',
+                      );
+                    }
+                  }
+                : null,
             onAddModel: () async {
               final created = await _showModelDialog(
                 context,
@@ -115,6 +174,8 @@ class ProviderSettingsSection extends StatelessWidget {
 class _ProviderCard extends StatefulWidget {
   const _ProviderCard({
     required this.provider,
+    required this.authStatus,
+    required this.authBusy,
     required this.defaultProviderId,
     required this.defaultModelId,
     required this.discoveringModels,
@@ -123,6 +184,10 @@ class _ProviderCard extends StatefulWidget {
     required this.onEdit,
     required this.onDelete,
     required this.onDiscoverModels,
+    required this.onRefreshAuthStatus,
+    required this.onStartOpenAiLogin,
+    required this.onImportOpenAiAuthJson,
+    required this.onLogoutOpenAiAuth,
     required this.onAddModel,
     required this.onEditModel,
     required this.onSetDefaultModel,
@@ -130,6 +195,8 @@ class _ProviderCard extends StatefulWidget {
   });
 
   final AiProviderConfig provider;
+  final OpenAiAuthStatus? authStatus;
+  final bool authBusy;
   final String? defaultProviderId;
   final String? defaultModelId;
   final bool discoveringModels;
@@ -138,6 +205,10 @@ class _ProviderCard extends StatefulWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
   final VoidCallback onDiscoverModels;
+  final VoidCallback? onRefreshAuthStatus;
+  final Future<void> Function()? onStartOpenAiLogin;
+  final Future<void> Function()? onImportOpenAiAuthJson;
+  final Future<void> Function()? onLogoutOpenAiAuth;
   final VoidCallback onAddModel;
   final ValueChanged<AiModelConfig> onEditModel;
   final ValueChanged<String> onSetDefaultModel;
@@ -150,8 +221,30 @@ class _ProviderCard extends StatefulWidget {
 class _ProviderCardState extends State<_ProviderCard> {
   bool _expanded = true;
 
+  @override
+  void initState() {
+    super.initState();
+    _expanded = _shouldExpandByDefault(widget.provider);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProviderCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.provider.id != widget.provider.id) {
+      _expanded = _shouldExpandByDefault(widget.provider);
+    }
+  }
+
   bool _isDefaultModel(AiProviderConfig provider, AiModelConfig model) {
     return provider.id == widget.defaultProviderId && model.id == widget.defaultModelId;
+  }
+
+  bool get _supportsOpenAiAuth => widget.provider.kind == ProviderKind.openAiCodexOauth;
+
+  // Provider 模型数量较少时直接展开，能减少一次点击；
+  // 当模型数量较多时默认收起，避免设置页初始进入时被长列表撑满。
+  bool _shouldExpandByDefault(AiProviderConfig provider) {
+    return provider.models.length <= 6;
   }
 
   @override
@@ -312,6 +405,17 @@ class _ProviderCardState extends State<_ProviderCard> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  if (_supportsOpenAiAuth) ...[
+                    _OpenAiAuthPanel(
+                      status: widget.authStatus,
+                      busy: widget.authBusy,
+                      onRefresh: widget.onRefreshAuthStatus,
+                      onStartLogin: widget.onStartOpenAiLogin,
+                      onImportJson: widget.onImportOpenAiAuthJson,
+                      onLogout: widget.onLogoutOpenAiAuth,
+                    ),
+                    const SizedBox(height: 16),
+                  ],
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -681,6 +785,138 @@ class _ProviderActionMenu extends StatelessWidget {
   }
 }
 
+class _OpenAiAuthPanel extends StatelessWidget {
+  const _OpenAiAuthPanel({
+    required this.status,
+    required this.busy,
+    required this.onRefresh,
+    required this.onStartLogin,
+    required this.onImportJson,
+    required this.onLogout,
+  });
+
+  final OpenAiAuthStatus? status;
+  final bool busy;
+  final VoidCallback? onRefresh;
+  final Future<void> Function()? onStartLogin;
+  final Future<void> Function()? onImportJson;
+  final Future<void> Function()? onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final authenticated = status?.authenticated ?? false;
+    final statusText = authenticated
+        ? 'Authenticated'
+        : (status?.loginInProgress ?? false)
+            ? 'Waiting For Browser'
+            : 'Not Authenticated';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceRaised,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.verified_user_outlined, color: palette.secondary),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'OpenAI Codex OAuth',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontFamily: 'Space Grotesk',
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+              ),
+              if (busy)
+                SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: palette.primaryBright,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 16,
+            runSpacing: 8,
+            children: [
+              _MetricBlock(
+                label: 'Auth Status',
+                value: statusText,
+                valueColor: authenticated ? palette.primaryBright : palette.textMuted,
+                alignStart: true,
+              ),
+              _MetricBlock(
+                label: 'Account',
+                value: status?.email ?? status?.accountId ?? 'Unavailable',
+                valueColor: palette.textPrimary,
+                alignStart: true,
+              ),
+              _MetricBlock(
+                label: 'Plan',
+                value: status?.planType ?? 'Unknown',
+                valueColor: palette.secondary,
+                alignStart: true,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              OutlinedButton.icon(
+                onPressed: busy ? null : onRefresh,
+                icon: const Icon(Icons.sync_rounded),
+                label: const Text('Refresh Status'),
+              ),
+              FilledButton.icon(
+                onPressed: busy || onStartLogin == null
+                    ? null
+                    : () async {
+                        await onStartLogin!.call();
+                      },
+                icon: const Icon(Icons.open_in_browser_rounded),
+                label: const Text('Browser Login'),
+              ),
+              OutlinedButton.icon(
+                onPressed: busy || onImportJson == null
+                    ? null
+                    : () async {
+                        await onImportJson!.call();
+                      },
+                icon: const Icon(Icons.upload_file_rounded),
+                label: const Text('Import JSON'),
+              ),
+              if (authenticated)
+                TextButton.icon(
+                  onPressed: busy || onLogout == null
+                      ? null
+                      : () async {
+                          await onLogout!.call();
+                        },
+                  icon: const Icon(Icons.logout_rounded),
+                  label: const Text('Sign Out'),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 Future<_ProviderDialogResult?> _showProviderDialog(
   BuildContext context, {
   required AiSettingsViewModel vm,
@@ -719,6 +955,8 @@ Future<_ProviderDialogResult?> _showProviderDialog(
     width: 620,
     child: StatefulBuilder(
       builder: (context, setState) {
+        final isOpenAiOauth = kind == ProviderKind.openAiCodexOauth;
+        final isOpenAiCodexApi = kind == ProviderKind.openAiCodexApi;
         return AiSettingsFieldGroup(
           children: [
             DropdownButtonFormField<String>(
@@ -792,7 +1030,13 @@ Future<_ProviderDialogResult?> _showProviderDialog(
             ),
             TextField(
               controller: baseUrlController,
-              decoration: const InputDecoration(labelText: 'Base URL'),
+              decoration: InputDecoration(
+                labelText: 'Base URL',
+                helperText: isOpenAiOauth
+                    ? 'Codex OAuth 默认使用 ChatGPT Codex backend。通常不需要改动。'
+                    : null,
+              ),
+              readOnly: isOpenAiOauth,
             ),
             TextField(
               controller: defaultContextWindowController,
@@ -802,14 +1046,20 @@ Future<_ProviderDialogResult?> _showProviderDialog(
               ),
               keyboardType: TextInputType.number,
             ),
-            TextField(
-              controller: apiKeyEnvController,
-              decoration: const InputDecoration(labelText: 'API Key Env Var'),
-            ),
-            TextField(
-              controller: apiKeyController,
-              decoration: const InputDecoration(labelText: 'API Key (optional inline)'),
-            ),
+            if (!isOpenAiOauth) ...[
+              TextField(
+                controller: apiKeyEnvController,
+                decoration: const InputDecoration(labelText: 'API Key Env Var'),
+              ),
+              TextField(
+                controller: apiKeyController,
+                decoration: InputDecoration(
+                  labelText: isOpenAiCodexApi
+                      ? 'API Key (optional inline)'
+                      : 'API Key (optional inline)',
+                ),
+              ),
+            ],
             TextField(
               controller: headersController,
               decoration: const InputDecoration(labelText: 'Headers JSON'),
@@ -1005,6 +1255,410 @@ class _ProviderDialogResult {
   final bool fetchModelsAfterSave;
 }
 
+// OpenAI auth JSON 导入不能再直接绑定系统文件选择器：
+// 这次用户反馈的实际问题就是按钮点击后没有任何可见反馈，而原实现失败时只会写日志。
+// 因此这里先弹一个可见对话框，让用户始终能看到导入入口；文件选择器只是辅助能力，
+// 即使文件选择器插件失效，用户仍然可以通过拖拽文件、手动路径或直接粘贴完整的
+// auth.json 内容完成导入，避免把功能绑死在单一平台实现上。
+Future<Map<String, dynamic>?> _showOpenAiAuthImportDialog(BuildContext context) async {
+  final controller = TextEditingController();
+  final pathController = TextEditingController(text: _defaultCodexAuthJsonPath());
+  final validationError = ValueNotifier<String?>(null);
+  final loadingFromFile = ValueNotifier<bool>(false);
+  final dragActive = ValueNotifier<bool>(false);
+  final jsonEncoder = const JsonEncoder.withIndent('  ');
+
+  try {
+    return await showAiSettingsDialog<Map<String, dynamic>>(
+      context: context,
+      title: 'Import OpenAI Auth JSON',
+      subtitle:
+          'Load a Codex auth.json file or paste the JSON payload directly. The picker will try to open from the path below, so hidden folders such as ~/.codex can still be reached without relying on the file dialog to reveal them first.',
+      width: 760,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              ValueListenableBuilder<bool>(
+                valueListenable: loadingFromFile,
+                builder: (context, busy, child) {
+                  return OutlinedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            loadingFromFile.value = true;
+                            try {
+                              final authJson = await _pickOpenAiAuthJsonWithFallback(
+                                fallbackPath: pathController.text,
+                              );
+                              if (authJson == null) {
+                                return;
+                              }
+                              controller.text = jsonEncoder.convert(authJson);
+                              validationError.value = null;
+                            } catch (error) {
+                              validationError.value = 'Failed to load JSON file: $error';
+                            } finally {
+                              loadingFromFile.value = false;
+                            }
+                          },
+                    icon: busy
+                        ? SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: context.sirix.primaryBright,
+                            ),
+                          )
+                        : const Icon(Icons.folder_open_rounded),
+                    label: Text(busy ? 'Loading...' : 'Load From File'),
+                  );
+                },
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Expected shape: auth_mode + tokens.access_token + tokens.refresh_token + tokens.account_id.',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: context.sirix.textMuted,
+                      ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ValueListenableBuilder<bool>(
+            valueListenable: dragActive,
+            builder: (context, isDragging, child) {
+              final palette = context.sirix;
+              return DropTarget(
+                onDragEntered: (details) {
+                  dragActive.value = true;
+                },
+                onDragExited: (details) {
+                  dragActive.value = false;
+                },
+                onDragDone: (details) async {
+                  dragActive.value = false;
+                  try {
+                    final authJson = await _readOpenAiAuthJsonFromDropItems(details.files);
+                    controller.text = jsonEncoder.convert(authJson);
+                    validationError.value = null;
+                  } catch (error) {
+                    validationError.value = 'Failed to import dropped file: $error';
+                  }
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(18),
+                  decoration: BoxDecoration(
+                    color: isDragging
+                        ? palette.primaryBright.withValues(alpha: 0.12)
+                        : palette.surfaceMuted.withValues(alpha: 0.22),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: isDragging ? palette.primaryBright : palette.glassStroke,
+                      width: isDragging ? 1.4 : 1,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.file_download_outlined,
+                            color: isDragging ? palette.primaryBright : palette.textSecondary,
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            isDragging ? 'Release To Import auth.json' : 'Drag auth.json Here',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontFamily: 'Space Grotesk',
+                                  fontWeight: FontWeight.w700,
+                                  color: isDragging ? palette.primaryBright : palette.textPrimary,
+                                ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Supports desktop drag-and-drop so import does not depend only on the file picker.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: palette.textMuted,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 16),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: pathController,
+                  decoration: const InputDecoration(
+                    labelText: 'Local JSON File Path',
+                    hintText: '~/.codex/auth.json',
+                    helperText:
+                        'Load From File will use this path to choose the initial folder, including hidden folders.',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                onPressed: () async {
+                  try {
+                    final authJson = await _readOpenAiAuthJsonFromPath(pathController.text);
+                    controller.text = jsonEncoder.convert(authJson);
+                    validationError.value = null;
+                  } catch (error) {
+                    validationError.value = 'Failed to read path: $error';
+                  }
+                },
+                icon: const Icon(Icons.description_outlined),
+                label: const Text('Load Path'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            controller: controller,
+            minLines: 14,
+            maxLines: 22,
+            decoration: const InputDecoration(
+              labelText: 'Auth JSON',
+              hintText: '{\n  "auth_mode": "chatgpt",\n  "tokens": {\n    ...\n  }\n}',
+              alignLabelWithHint: true,
+            ),
+          ),
+          const SizedBox(height: 12),
+          ValueListenableBuilder<String?>(
+            valueListenable: validationError,
+            builder: (context, errorText, child) {
+              if (errorText == null || errorText.trim().isEmpty) {
+                return const SizedBox.shrink();
+              }
+              return Text(
+                errorText,
+                style: TextStyle(
+                  color: context.sirix.error,
+                  fontFamily: 'Inter',
+                  fontWeight: FontWeight.w600,
+                ),
+              );
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () {
+            try {
+              final decoded = _decodeOpenAiAuthJsonText(controller.text);
+              validationError.value = null;
+              Navigator.of(context).pop(decoded);
+            } catch (error) {
+              validationError.value = '$error';
+            }
+          },
+          child: const Text('Import'),
+        ),
+      ],
+    );
+  } finally {
+    controller.dispose();
+    pathController.dispose();
+    validationError.dispose();
+    loadingFromFile.dispose();
+    dragActive.dispose();
+  }
+}
+
+Future<Map<String, dynamic>?> _pickOpenAiAuthJsonWithFallback({
+  required String fallbackPath,
+}) async {
+  try {
+    final picked = await _pickOpenAiAuthJson(
+      fallbackPath: fallbackPath,
+    );
+    if (picked != null) {
+      return picked;
+    }
+  } catch (_) {
+    // 先吞掉，让后续 fallback 继续尝试；最终错误会由 fallback 抛出。
+    AppLogger.warn('[OPENAI_AUTH] file picker failed, switching to drag/path/paste fallback');
+  }
+
+  final normalizedFallbackPath = _normalizeLocalPath(fallbackPath);
+  throw FileSystemException(
+    '无法打开系统文件选择器。请使用拖拽、“Load Path” 读取本地路径，或直接粘贴 auth JSON。',
+    normalizedFallbackPath.isEmpty ? null : normalizedFallbackPath,
+  );
+}
+
+Future<Map<String, dynamic>?> _pickOpenAiAuthJson({
+  required String fallbackPath,
+}) async {
+  AppLogger.info('[OPENAI_AUTH] opening file picker for auth json');
+  final initialDirectory = _deriveInitialDirectoryForPicker(fallbackPath);
+  final result = await FilePicker.platform.pickFiles(
+    dialogTitle: 'Choose OpenAI auth JSON',
+    initialDirectory: initialDirectory,
+    // 不再依赖原生文件对话框的扩展名过滤。
+    // 当前用户场景里 picker 已经能进入 ~/.codex，但 auth.json 仍然处于不可选状态，
+    // 更稳妥的做法是允许选择任意文件，再由 Sirix 自己读取并校验 JSON 结构。
+    type: FileType.any,
+    allowMultiple: false,
+    withData: false,
+  );
+  AppLogger.info(
+    '[OPENAI_AUTH] file picker completed has_result=${result != null} initial_directory=$initialDirectory',
+  );
+  if (result == null) {
+    return null;
+  }
+
+  if (result.files.isEmpty) {
+    return null;
+  }
+  final pickedFile = result.files.first;
+
+  final path = pickedFile.path;
+  if (path == null || path.trim().isEmpty) {
+    throw const FileSystemException('文件选择器没有返回有效路径');
+  }
+
+  return _readOpenAiAuthJsonFromPath(path);
+}
+
+Future<Map<String, dynamic>> _readOpenAiAuthJsonFromPath(String path) async {
+  final normalizedPath = _normalizeLocalPath(path);
+  if (normalizedPath.isEmpty) {
+    throw const FormatException('文件路径不能为空');
+  }
+
+  final file = File(normalizedPath);
+  if (!await file.exists()) {
+    throw FileSystemException('文件不存在', normalizedPath);
+  }
+
+  final raw = await file.readAsString();
+  return _decodeOpenAiAuthJsonText(raw);
+}
+
+Future<Map<String, dynamic>> _readOpenAiAuthJsonFromDropItems(List<DropItem> items) async {
+  if (items.isEmpty) {
+    throw const FormatException('未收到拖拽文件');
+  }
+
+  DropItemFile? firstFile;
+  for (final item in items) {
+    if (item is! DropItemFile) {
+      continue;
+    }
+    firstFile ??= item;
+    final candidateName = item.name.toLowerCase();
+    if (!candidateName.endsWith('.json') && candidateName != 'auth.json') {
+      continue;
+    }
+    final raw = await item.readAsString();
+    return _decodeOpenAiAuthJsonText(raw);
+  }
+
+  if (firstFile == null) {
+    throw const FormatException('拖拽内容里没有可读取的文件');
+  }
+
+  final raw = await firstFile.readAsString();
+  return _decodeOpenAiAuthJsonText(raw);
+}
+
+String _normalizeLocalPath(String rawPath) {
+  final trimmed = rawPath.trim();
+  if (trimmed == '~' || trimmed.startsWith('~/')) {
+    final home = Platform.environment['HOME'];
+    if (home == null || home.trim().isEmpty) {
+      return trimmed;
+    }
+    if (trimmed == '~') {
+      return home;
+    }
+    return '$home/${trimmed.substring(2)}';
+  }
+  return trimmed;
+}
+
+String? _deriveInitialDirectoryForPicker(String rawPath) {
+  final normalized = _normalizeLocalPath(rawPath);
+  if (normalized.isEmpty) {
+    return null;
+  }
+
+  final file = File(normalized);
+  final parent = file.parent.path.trim();
+  if (parent.isEmpty || parent == '.') {
+    return null;
+  }
+  return parent;
+}
+
+String _defaultCodexAuthJsonPath() {
+  final home = Platform.environment['HOME'];
+  if (home == null || home.trim().isEmpty) {
+    return '~/.codex/auth.json';
+  }
+  return '$home/.codex/auth.json';
+}
+
+Map<String, dynamic> _decodeOpenAiAuthJsonText(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) {
+    throw const FormatException('Auth JSON 不能为空');
+  }
+
+  final decoded = jsonDecode(trimmed);
+  if (decoded is! Map<String, dynamic>) {
+    throw const FormatException('Auth JSON 必须是对象结构');
+  }
+  return decoded;
+}
+
+Future<void> _openExternalUrl(Uri uri) async {
+  final url = uri.toString();
+  late final String executable;
+  late final List<String> arguments;
+
+  if (Platform.isMacOS) {
+    executable = 'open';
+    arguments = [url];
+  } else if (Platform.isWindows) {
+    executable = 'cmd';
+    arguments = ['/c', 'start', '', url];
+  } else {
+    executable = 'xdg-open';
+    arguments = [url];
+  }
+
+  final process = await Process.start(executable, arguments);
+  final exitCode = await process.exitCode;
+  if (exitCode != 0) {
+    final stderr = await utf8.decoder.bind(process.stderr).join();
+    throw StateError('无法打开浏览器: $url, exitCode=$exitCode, stderr=$stderr');
+  }
+}
+
 String _providerContextLabel(AiProviderConfig provider) {
   final value = provider.defaultContextWindow;
   return value == null ? 'auto' : value.toString();
@@ -1049,6 +1703,24 @@ class _ProviderTemplate {
 const String _customProviderTemplateId = '__custom__';
 
 const List<_ProviderTemplate> _providerTemplates = [
+  _ProviderTemplate(
+    id: 'openai-codex-oauth',
+    name: 'OpenAI Codex OAuth',
+    kind: ProviderKind.openAiCodexOauth,
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    apiKeyEnv: '',
+    description: 'ChatGPT/Codex OAuth provider. Supports browser login or imported auth JSON.',
+    defaultContextWindow: 400000,
+  ),
+  _ProviderTemplate(
+    id: 'openai-codex-api',
+    name: 'OpenAI Codex API',
+    kind: ProviderKind.openAiCodexApi,
+    baseUrl: 'https://api.openai.com/v1',
+    apiKeyEnv: 'OPENAI_API_KEY',
+    description: 'OpenAI Codex API provider with configurable Base URL and API key.',
+    defaultContextWindow: 400000,
+  ),
   _ProviderTemplate(
     id: 'openai',
     name: 'OpenAI',
@@ -1186,6 +1858,8 @@ String _providerKindLabel(ProviderKind kind) {
   return switch (kind) {
     ProviderKind.openAiCompatible => 'OpenAI-compatible',
     ProviderKind.openAiResponses => 'OpenAI Responses',
+    ProviderKind.openAiCodexOauth => 'OpenAI Codex OAuth',
+    ProviderKind.openAiCodexApi => 'OpenAI Codex API',
     ProviderKind.gemini => 'Gemini',
     ProviderKind.anthropic => 'Anthropic',
   };

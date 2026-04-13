@@ -197,6 +197,47 @@ class DesktopLocalClient {
         .toList(growable: false);
   }
 
+  Future<OpenAiAuthStatus> getOpenAiAuthStatus(String providerId) async {
+    final response = await _request(
+      'GET',
+      '/ai/providers/${Uri.encodeComponent(providerId)}/openai-auth/status',
+    );
+    return OpenAiAuthStatus.fromJson(_decodeMap(response));
+  }
+
+  Future<Uri> startOpenAiAuthLogin(String providerId) async {
+    final response = await _request(
+      'POST',
+      '/ai/providers/${Uri.encodeComponent(providerId)}/openai-auth/login',
+    );
+    final decoded = _decodeMap(response);
+    final authUrl = decoded['auth_url'] as String? ?? '';
+    if (authUrl.isEmpty) {
+      throw StateError('desktop-server 未返回有效的 auth_url');
+    }
+    return Uri.parse(authUrl);
+  }
+
+  Future<void> logoutOpenAiAuth(String providerId) async {
+    await _request(
+      'POST',
+      '/ai/providers/${Uri.encodeComponent(providerId)}/openai-auth/logout',
+    );
+  }
+
+  Future<void> importOpenAiAuthJson({
+    required String providerId,
+    required Map<String, dynamic> authJson,
+  }) async {
+    await _request(
+      'POST',
+      '/ai/providers/${Uri.encodeComponent(providerId)}/openai-auth/import',
+      body: {
+        'auth_json': authJson,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> checkAiApproval({
     required String sessionId,
     required String capabilityKey,

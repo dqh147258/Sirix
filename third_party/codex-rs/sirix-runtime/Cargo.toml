@@ -19,4 +19,4 @@ codex-core = { workspace = true }
 codex-protocol = { workspace = true }
 codex-tui = { workspace = true }
 codex-utils-cli = { workspace = true }
-
+serde_json = { workspace = true }

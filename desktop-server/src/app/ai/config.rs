@@ -29,8 +29,17 @@ const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_MODEL_ID: &str = "gpt-5";
 const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
 pub const SIRIX_AGENT_RUNTIME_FILE_NAME: &str = "sirix-agent-runtime.json";
+pub const SIRIX_CONFIG_OVERRIDES_FILE_NAME: &str = "sirix-config-overrides.json";
 pub const SIRIX_EXEC_POLICY_RULES_DIR: &str = "rules";
 pub const SIRIX_EXEC_POLICY_RULES_FILE: &str = "default.rules";
+pub const SIRIX_CONFIG_OVERRIDES_PATH_ENV: &str = "SIRIX_CONFIG_OVERRIDES_PATH";
+pub const SIRIX_EXEC_POLICY_PATH_ENV: &str = "SIRIX_EXEC_POLICY_PATH";
+const SIRIX_SHARED_CODEX_HOME_DIR_NAME: &str = "codex-home";
+const SIRIX_OLD_SHARED_CODEX_HOME_DIR_NAME: &str = "shared-codex-home";
+const SIRIX_SHARED_STORAGE_MIGRATION_SENTINEL: &str = ".legacy-session-storage-migrated-v2";
+const SIRIX_SESSIONS_SUBDIR: &str = "sessions";
+const SIRIX_ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
+const SIRIX_SESSION_INDEX_FILE_NAME: &str = "session_index.jsonl";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -339,6 +348,7 @@ pub struct AiLaunchConfig {
     pub model: ModelConfig,
     pub session_providers: Vec<ProviderConfig>,
     pub codex_home: PathBuf,
+    pub session_storage_dir: PathBuf,
     pub workspace_root: PathBuf,
     pub workspace_source: Option<PathBuf>,
 }
@@ -405,6 +415,20 @@ impl SirixConfigStore {
         cwd.join(".sirix").join("shell-rules.json")
     }
 
+    fn shared_codex_home(&self) -> PathBuf {
+        self.sirix_home.join(SIRIX_SHARED_CODEX_HOME_DIR_NAME)
+    }
+
+    fn shared_codex_config_path(&self) -> PathBuf {
+        self.shared_codex_home().join("config.toml")
+    }
+
+    fn old_shared_codex_home(&self) -> PathBuf {
+        self.sirix_home
+            .join("runtime")
+            .join(SIRIX_OLD_SHARED_CODEX_HOME_DIR_NAME)
+    }
+
     pub fn load_global_shell_rules(&self) -> anyhow::Result<ShellRulesConfig> {
         self.load_shell_rules_from_path(&self.global_shell_rules_path())
     }
@@ -464,26 +488,43 @@ impl SirixConfigStore {
 
     pub fn write_session_agent_runtime_file(
         &self,
-        codex_home: &Path,
+        session_storage_dir: &Path,
         runtime: &SessionAgentRuntimeConfig,
     ) -> anyhow::Result<()> {
-        let path = codex_home.join(SIRIX_AGENT_RUNTIME_FILE_NAME);
+        fs::create_dir_all(session_storage_dir)
+            .with_context(|| format!("failed to create {}", session_storage_dir.display()))?;
+        let path = session_storage_dir.join(SIRIX_AGENT_RUNTIME_FILE_NAME);
         let serialized = serde_json::to_string_pretty(runtime)
             .context("failed to serialize session agent runtime")?;
         fs::write(&path, serialized).with_context(|| format!("failed to write {}", path.display()))
     }
 
+    pub fn write_session_config_overrides_file(
+        &self,
+        session_storage_dir: &Path,
+        overrides: &[String],
+    ) -> anyhow::Result<PathBuf> {
+        fs::create_dir_all(session_storage_dir)
+            .with_context(|| format!("failed to create {}", session_storage_dir.display()))?;
+        let path = session_storage_dir.join(SIRIX_CONFIG_OVERRIDES_FILE_NAME);
+        let serialized = serde_json::to_string_pretty(overrides)
+            .context("failed to serialize session config overrides")?;
+        fs::write(&path, serialized)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
+    }
+
     pub fn write_session_exec_policy_file(
         &self,
-        codex_home: &Path,
+        session_storage_dir: &Path,
         cwd: &Path,
         session_shell_rules: &ShellRulesConfig,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PathBuf> {
         let effective_shell_rules = merge_shell_rules(
             self.effective_shell_rules(cwd)?,
             session_shell_rules.clone(),
         );
-        let rules_dir = codex_home.join(SIRIX_EXEC_POLICY_RULES_DIR);
+        let rules_dir = session_storage_dir.join(SIRIX_EXEC_POLICY_RULES_DIR);
         fs::create_dir_all(&rules_dir)
             .with_context(|| format!("failed to create {}", rules_dir.display()))?;
         let path = rules_dir.join(SIRIX_EXEC_POLICY_RULES_FILE);
@@ -507,7 +548,8 @@ impl SirixConfigStore {
         } else {
             format!("{}\n", lines.join("\n"))
         };
-        fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))
+        fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(path)
     }
 
     pub fn effective_for_workspace(
@@ -605,12 +647,12 @@ impl SirixConfigStore {
             .with_context(|| {
                 format!("model {} not found for agent {}", agent.model_id, agent.id)
             })?;
-        let codex_home = self
+        let session_storage_dir = self
             .sirix_home
             .join("runtime")
             .join("sessions")
-            .join(session_id.to_string())
-            .join("codex-home");
+            .join(session_id.to_string());
+        let codex_home = self.shared_codex_home();
 
         Ok(AiLaunchConfig {
             effective_config: config,
@@ -619,20 +661,20 @@ impl SirixConfigStore {
             model,
             session_providers,
             codex_home,
+            session_storage_dir,
             workspace_root: cwd.to_path_buf(),
             workspace_source: effective.workspace_source.map(PathBuf::from),
         })
     }
 
-    pub fn write_codex_bridge_config(
+    pub fn build_codex_cli_overrides(
         &self,
         launch: &AiLaunchConfig,
         cwd: &Path,
         local_ws_port: u16,
         ai_session_id: Uuid,
-    ) -> anyhow::Result<()> {
-        fs::create_dir_all(&launch.codex_home)
-            .with_context(|| format!("failed to create {}", launch.codex_home.display()))?;
+    ) -> anyhow::Result<Vec<String>> {
+        self.ensure_shared_codex_home_layout()?;
         let config_value = build_codex_bridge_toml(
             launch.effective_config.clone(),
             launch,
@@ -640,12 +682,7 @@ impl SirixConfigStore {
             local_ws_port,
             ai_session_id,
         )?;
-        let serialized = toml::to_string_pretty(&config_value)
-            .context("failed to serialize codex bridge config")?;
-        let config_path = launch.codex_home.join("config.toml");
-        fs::write(&config_path, serialized)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-        Ok(())
+        render_cli_overrides(&config_value)
     }
 
     pub fn install_bin_shims(&self, current_exe: &Path) -> anyhow::Result<()> {
@@ -701,7 +738,100 @@ impl SirixConfigStore {
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
         fs::create_dir_all(self.sirix_home.join("secrets"))
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
+        self.ensure_shared_codex_home_layout()?;
+        self.migrate_legacy_session_storage()?;
         Ok(())
+    }
+
+    fn ensure_shared_codex_home_layout(&self) -> anyhow::Result<()> {
+        let shared_codex_home = self.shared_codex_home();
+        fs::create_dir_all(shared_codex_home.join(SIRIX_SESSIONS_SUBDIR))
+            .with_context(|| format!("failed to create {}", shared_codex_home.display()))?;
+        fs::create_dir_all(shared_codex_home.join(SIRIX_ARCHIVED_SESSIONS_SUBDIR))
+            .with_context(|| format!("failed to create {}", shared_codex_home.display()))?;
+        let session_index_path = shared_codex_home.join(SIRIX_SESSION_INDEX_FILE_NAME);
+        if !session_index_path.exists() {
+            fs::write(&session_index_path, "").with_context(|| {
+                format!("failed to initialize {}", session_index_path.display())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn migrate_legacy_session_storage(&self) -> anyhow::Result<()> {
+        let shared_codex_home = self.shared_codex_home();
+        let migration_sentinel = shared_codex_home.join(SIRIX_SHARED_STORAGE_MIGRATION_SENTINEL);
+        if migration_sentinel.exists() {
+            return Ok(());
+        }
+
+        self.merge_legacy_codex_home(self.old_shared_codex_home().as_path())?;
+
+        let sessions_root = self.sirix_home.join("runtime").join("sessions");
+        if sessions_root.is_dir() {
+            for entry in fs::read_dir(&sessions_root)
+                .with_context(|| format!("failed to read {}", sessions_root.display()))?
+            {
+                let entry = entry?;
+                let legacy_codex_home = entry.path().join("codex-home");
+                if !legacy_codex_home.is_dir() {
+                    continue;
+                }
+                self.merge_legacy_codex_home(&legacy_codex_home)?;
+            }
+        }
+
+        fs::write(&migration_sentinel, "ok\n")
+            .with_context(|| format!("failed to write {}", migration_sentinel.display()))?;
+        Ok(())
+    }
+
+    fn merge_legacy_codex_home(&self, legacy_codex_home: &Path) -> anyhow::Result<()> {
+        if !legacy_codex_home.is_dir() {
+            return Ok(());
+        }
+
+        let shared_codex_home = self.shared_codex_home();
+        for dir_name in [SIRIX_SESSIONS_SUBDIR, SIRIX_ARCHIVED_SESSIONS_SUBDIR] {
+            let source_dir = legacy_codex_home.join(dir_name);
+            if source_dir.is_dir() {
+                copy_dir_recursive(&source_dir, &shared_codex_home.join(dir_name)).with_context(
+                    || {
+                        format!(
+                            "failed to migrate {} into shared Sirix storage",
+                            source_dir.display()
+                        )
+                    },
+                )?;
+            }
+        }
+
+        let legacy_session_index = legacy_codex_home.join(SIRIX_SESSION_INDEX_FILE_NAME);
+        if legacy_session_index.is_file() {
+            append_file_contents(
+                &legacy_session_index,
+                &shared_codex_home.join(SIRIX_SESSION_INDEX_FILE_NAME),
+            )?;
+        }
+
+        let legacy_config_path = legacy_codex_home.join("config.toml");
+        if !legacy_config_path.is_file() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(&legacy_config_path)
+            .with_context(|| format!("failed to read {}", legacy_config_path.display()))?;
+        let parsed = toml::from_str::<TomlValue>(&raw)
+            .with_context(|| format!("failed to parse {}", legacy_config_path.display()))?;
+        let Some(projects) = parsed
+            .as_table()
+            .and_then(|table| table.get("projects"))
+            .and_then(TomlValue::as_table)
+        else {
+            return Ok(());
+        };
+
+        merge_projects_into_config_path(self.shared_codex_config_path().as_path(), projects)
     }
 
     fn load_shell_rules_from_path(&self, path: &Path) -> anyhow::Result<ShellRulesConfig> {
@@ -1036,7 +1166,10 @@ fn build_bridge_models_for_session(
             }
             let mut entry = toml::map::Map::<String, TomlValue>::new();
             entry.insert("id".to_string(), TomlValue::String(picker_model_id.clone()));
-            entry.insert("model".to_string(), TomlValue::String(picker_model_id.clone()));
+            entry.insert(
+                "model".to_string(),
+                TomlValue::String(picker_model_id.clone()),
+            );
             entry.insert(
                 "display_name".to_string(),
                 TomlValue::String(model.display_name.clone()),
@@ -3150,8 +3283,19 @@ fn sirix_home_dir() -> anyhow::Result<PathBuf> {
         }
     }
 
+    // Follow Codex's source behavior and ask the platform for the user's home
+    // directory first. That keeps `~/.sirix` stable across macOS/Linux/Windows
+    // instead of depending on whichever shell variables happen to be present.
+    if let Some(home) = dirs::home_dir() {
+        return Ok(home.join(".sirix"));
+    }
+
     let home = env::var("HOME")
         .or_else(|_| env::var("USERPROFILE"))
+        .or_else(|_| match (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
+            (Ok(drive), Ok(path)) => Ok(format!("{drive}{path}")),
+            _ => Err(env::VarError::NotPresent),
+        })
         .context("failed to resolve user home dir for ~/.sirix")?;
     Ok(PathBuf::from(home).join(".sirix"))
 }
@@ -3193,6 +3337,144 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn merge_projects_into_config_path(
+    path: &Path,
+    projects: &toml::map::Map<String, TomlValue>,
+) -> anyhow::Result<()> {
+    let mut root = if path.is_file() {
+        let raw = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        toml::from_str::<TomlValue>(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?
+    } else {
+        TomlValue::Table(toml::map::Map::new())
+    };
+
+    if !root.is_table() {
+        root = TomlValue::Table(toml::map::Map::new());
+    }
+
+    let root_table = root
+        .as_table_mut()
+        .context("shared Sirix config root must be a table")?;
+    let projects_value = root_table
+        .entry("projects".to_string())
+        .or_insert_with(|| TomlValue::Table(toml::map::Map::new()));
+    if !projects_value.is_table() {
+        *projects_value = TomlValue::Table(toml::map::Map::new());
+    }
+    let projects_table = projects_value
+        .as_table_mut()
+        .context("shared Sirix projects value must be a table")?;
+
+    let mut changed = false;
+    for (project_key, project_value) in projects {
+        let Some(project_table) = project_value.as_table() else {
+            continue;
+        };
+        let Some(trust_level) = project_table.get("trust_level").and_then(TomlValue::as_str) else {
+            continue;
+        };
+
+        let mut merged_project = projects_table
+            .get(project_key)
+            .and_then(TomlValue::as_table)
+            .cloned()
+            .unwrap_or_default();
+        let existing_trust = merged_project
+            .get("trust_level")
+            .and_then(TomlValue::as_str)
+            .unwrap_or_default();
+        if existing_trust == trust_level {
+            continue;
+        }
+        merged_project.insert(
+            "trust_level".to_string(),
+            TomlValue::String(trust_level.to_string()),
+        );
+        projects_table.insert(project_key.clone(), TomlValue::Table(merged_project));
+        changed = true;
+    }
+
+    if !changed && path.is_file() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let serialized =
+        toml::to_string_pretty(&root).context("failed to serialize shared Sirix config")?;
+    fs::write(path, serialized).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn append_file_contents(from: &Path, to: &Path) -> anyhow::Result<()> {
+    let body = fs::read(from).with_context(|| format!("failed to read {}", from.display()))?;
+    if body.is_empty() {
+        return Ok(());
+    }
+
+    let mut handle = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(to)
+        .with_context(|| format!("failed to open {}", to.display()))?;
+    use std::io::Write as _;
+    handle
+        .write_all(&body)
+        .with_context(|| format!("failed to append {}", to.display()))
+}
+
+fn render_cli_overrides(root: &toml::map::Map<String, TomlValue>) -> anyhow::Result<Vec<String>> {
+    let mut overrides = Vec::with_capacity(root.len());
+    for (key, value) in root {
+        overrides.push(format!("{key}={}", render_toml_value_inline(value)?));
+    }
+    Ok(overrides)
+}
+
+fn render_toml_value_inline(value: &TomlValue) -> anyhow::Result<String> {
+    match value {
+        TomlValue::String(_)
+        | TomlValue::Integer(_)
+        | TomlValue::Float(_)
+        | TomlValue::Boolean(_)
+        | TomlValue::Datetime(_) => Ok(value.to_string()),
+        TomlValue::Array(items) => {
+            let rendered = items
+                .iter()
+                .map(render_toml_value_inline)
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(format!("[{}]", rendered.join(", ")))
+        }
+        TomlValue::Table(table) => {
+            let rendered = table
+                .iter()
+                .map(|(key, value)| {
+                    Ok(format!(
+                        "{} = {}",
+                        render_toml_key(key),
+                        render_toml_value_inline(value)?
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", rendered.join(", ")))
+        }
+    }
+}
+
+fn render_toml_key(key: &str) -> String {
+    if key
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        key.to_string()
+    } else {
+        TomlValue::String(key.to_string()).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -3254,6 +3536,7 @@ mod tests {
             model: provider.models[0].clone(),
             session_providers: vec![provider],
             codex_home: PathBuf::from("/tmp/.sirix"),
+            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };
@@ -3337,9 +3620,7 @@ mod tests {
 
         assert_eq!(bridge_models.len(), 2);
         assert_eq!(
-            bridge_models[0]
-                .get("model")
-                .and_then(TomlValue::as_str),
+            bridge_models[0].get("model").and_then(TomlValue::as_str),
             Some("gpt-5.2 @ openai-codex-oauth")
         );
         assert_eq!(
@@ -3349,18 +3630,14 @@ mod tests {
             Some(true)
         );
         assert_eq!(
-            bridge_models[1]
-                .get("model")
-                .and_then(TomlValue::as_str),
+            bridge_models[1].get("model").and_then(TomlValue::as_str),
             Some("gpt-5.2 @ openai-codex-oauth-gemini")
         );
 
         let providers = [secondary, active];
-        let resolved = resolve_session_picker_model(
-            &providers,
-            "gpt-5.2 @ openai-codex-oauth-gemini",
-        )
-        .expect("duplicate alias should resolve back to provider-scoped model");
+        let resolved =
+            resolve_session_picker_model(&providers, "gpt-5.2 @ openai-codex-oauth-gemini")
+                .expect("duplicate alias should resolve back to provider-scoped model");
         assert_eq!(resolved.0.id, "openai-codex-oauth-gemini");
         assert_eq!(resolved.1.id, "gpt-5.2");
     }
@@ -3413,6 +3690,7 @@ mod tests {
             model: provider.models[0].clone(),
             session_providers: vec![provider.clone()],
             codex_home: PathBuf::from("/tmp/.sirix"),
+            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };
@@ -3521,6 +3799,7 @@ mod tests {
             model: active_provider.models[0].clone(),
             session_providers: vec![openai_provider, active_provider.clone()],
             codex_home: PathBuf::from("/tmp/.sirix"),
+            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };
@@ -3698,5 +3977,119 @@ model = "gpt-5.4"
             effective_model_context_window(&provider, &provider.models[0]),
             222_000
         );
+    }
+
+    #[test]
+    fn cli_overrides_render_inline_tables_for_bridge_config() {
+        let root = env::temp_dir().join(format!("sirix-cli-overrides-{}", Uuid::new_v4()));
+        let launch = AiLaunchConfig {
+            effective_config: SirixConfig::default(),
+            agent: SirixConfig::default()
+                .agents
+                .into_iter()
+                .next()
+                .expect("default agent should exist"),
+            provider: SirixConfig::default()
+                .providers
+                .into_iter()
+                .next()
+                .expect("default provider should exist"),
+            model: SirixConfig::default().providers[0].models[0].clone(),
+            session_providers: SirixConfig::default().providers,
+            codex_home: root.join("codex-home"),
+            session_storage_dir: root.join("runtime").join("sessions").join("test"),
+            workspace_root: root.join("workspace"),
+            workspace_source: None,
+        };
+
+        let overrides = render_cli_overrides(
+            &build_codex_bridge_toml(
+                SirixConfig::default(),
+                &launch,
+                launch.workspace_root.as_path(),
+                9700,
+                Uuid::new_v4(),
+            )
+            .expect("bridge config should build"),
+        )
+        .expect("cli overrides should render");
+
+        assert!(
+            overrides
+                .iter()
+                .any(|item| item.starts_with("model_providers=") && item.contains("wire_api")),
+            "session proxy provider should be rendered as a CLI override"
+        );
+        assert!(
+            overrides
+                .iter()
+                .any(|item| item.starts_with("sandbox_workspace_write=")
+                    && item.contains("network_access = true")),
+            "workspace-write sandbox override should survive inline rendering"
+        );
+
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("temp tree should be cleaned up");
+        }
+    }
+
+    #[test]
+    fn ensure_layout_migrates_legacy_session_storage_into_shared_home() {
+        let root = env::temp_dir().join(format!("sirix-storage-migration-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let legacy_codex_home = sirix_home
+            .join("runtime")
+            .join("sessions")
+            .join(Uuid::new_v4().to_string())
+            .join("codex-home");
+        let legacy_rollout_dir = legacy_codex_home.join(SIRIX_SESSIONS_SUBDIR);
+        fs::create_dir_all(&legacy_rollout_dir).expect("legacy rollout dir should exist");
+        fs::write(
+            legacy_rollout_dir.join("rollout-2026-04-13T00-00-00-thread.jsonl"),
+            "{\"item\":\"legacy\"}\n",
+        )
+        .expect("legacy rollout should be written");
+        fs::write(
+            legacy_codex_home.join(SIRIX_SESSION_INDEX_FILE_NAME),
+            "{\"id\":\"thread\",\"thread_name\":\"legacy\",\"updated_at\":\"2026-04-13T00:00:00Z\"}\n",
+        )
+        .expect("legacy session index should be written");
+        fs::write(
+            legacy_codex_home.join("config.toml"),
+            format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                root.join("workspace").display()
+            ),
+        )
+        .expect("legacy config should be written");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+        store.ensure_layout().expect("layout should be ensured");
+
+        let shared_codex_home = store.shared_codex_home();
+        assert!(
+            shared_codex_home
+                .join(SIRIX_SESSIONS_SUBDIR)
+                .join("rollout-2026-04-13T00-00-00-thread.jsonl")
+                .is_file(),
+            "legacy rollouts should be moved into the stable shared Codex home"
+        );
+        assert!(
+            fs::read_to_string(shared_codex_home.join(SIRIX_SESSION_INDEX_FILE_NAME))
+                .expect("shared session index should exist")
+                .contains("\"thread_name\":\"legacy\""),
+            "legacy session names should survive the migration"
+        );
+        assert!(
+            fs::read_to_string(shared_codex_home.join("config.toml"))
+                .expect("shared config should exist")
+                .contains("trust_level = \"trusted\""),
+            "legacy trust decisions should be preserved in the shared config"
+        );
+
+        fs::remove_dir_all(&root).expect("temp tree should be cleaned up");
     }
 }

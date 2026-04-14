@@ -13,6 +13,7 @@ use crate::app::{
     ai::config::{
         resolve_session_picker_model, AiLaunchConfig, ApprovalMode, ProviderConfig,
         SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore,
+        SIRIX_AGENT_RUNTIME_FILE_NAME,
     },
     state::AppState,
 };
@@ -43,6 +44,9 @@ pub struct CurrentTerminalLaunch {
     pub codex_executable: String,
     pub workspace_root: String,
     pub codex_home: String,
+    pub sirix_config_overrides_path: String,
+    pub sirix_agent_runtime_path: String,
+    pub sirix_exec_policy_path: String,
     pub provider_api_key_env: Option<String>,
     pub provider_api_key: Option<String>,
 }
@@ -326,16 +330,13 @@ pub async fn reconfigure_ai_session_agent(
     let runtime_state = state.runtime.read().await;
     let local_ws_port = runtime_state.local_ws_port;
     drop(runtime_state);
-    config_store.write_codex_bridge_config(
+    let _prepared = prepare_session_launch_files(
+        config_store,
         &launch,
         runtime.workspace_root.as_path(),
         local_ws_port,
         ai_session_id,
-    )?;
-    config_store.write_session_agent_runtime_file(&launch.codex_home, &session_runtime)?;
-    config_store.write_session_exec_policy_file(
-        &launch.codex_home,
-        runtime.workspace_root.as_path(),
+        &session_runtime,
         &runtime.session_shell_rules,
     )?;
     state
@@ -399,6 +400,41 @@ fn should_use_fallback_model(state: &SessionFallbackState, model_id: &str) -> bo
             .is_some_and(|until| until > Utc::now())
 }
 
+struct PreparedSessionLaunch {
+    config_overrides_path: PathBuf,
+    agent_runtime_path: PathBuf,
+    exec_policy_path: PathBuf,
+}
+
+fn prepare_session_launch_files(
+    config_store: &SirixConfigStore,
+    launch: &AiLaunchConfig,
+    cwd: &Path,
+    local_ws_port: u16,
+    ai_session_id: Uuid,
+    session_runtime: &SessionAgentRuntimeConfig,
+    session_shell_rules: &ShellRulesConfig,
+) -> anyhow::Result<PreparedSessionLaunch> {
+    let config_overrides =
+        config_store.build_codex_cli_overrides(launch, cwd, local_ws_port, ai_session_id)?;
+    let config_overrides_path = config_store
+        .write_session_config_overrides_file(&launch.session_storage_dir, &config_overrides)?;
+    config_store.write_session_agent_runtime_file(&launch.session_storage_dir, session_runtime)?;
+    let exec_policy_path = config_store.write_session_exec_policy_file(
+        &launch.session_storage_dir,
+        cwd,
+        session_shell_rules,
+    )?;
+
+    Ok(PreparedSessionLaunch {
+        config_overrides_path,
+        agent_runtime_path: launch
+            .session_storage_dir
+            .join(SIRIX_AGENT_RUNTIME_FILE_NAME),
+        exec_policy_path,
+    })
+}
+
 pub async fn launch_ai_session(
     state: &AppState,
     config_store: &SirixConfigStore,
@@ -453,11 +489,13 @@ pub async fn launch_ai_session(
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
-    config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
-    config_store.write_session_agent_runtime_file(&launch.codex_home, &launch_runtime)?;
-    config_store.write_session_exec_policy_file(
-        &launch.codex_home,
+    let prepared = prepare_session_launch_files(
+        config_store,
+        &launch,
         cwd,
+        local_ws_port,
+        ai_session_id,
+        &launch_runtime,
         &ShellRulesConfig {
             version: 1,
             mode: ApprovalMode::Ask,
@@ -476,6 +514,9 @@ pub async fn launch_ai_session(
             cols,
             rows,
             mirrored_to_backend,
+            prepared.config_overrides_path,
+            prepared.agent_runtime_path,
+            prepared.exec_policy_path,
         )
         .await
         .context("failed to create codex-backed terminal")?;
@@ -538,11 +579,13 @@ pub async fn launch_ai_session_in_current_terminal(
     let runtime = state.runtime.read().await;
     let local_ws_port = runtime.local_ws_port;
     drop(runtime);
-    config_store.write_codex_bridge_config(&launch, cwd, local_ws_port, ai_session_id)?;
-    config_store.write_session_agent_runtime_file(&launch.codex_home, &launch_runtime)?;
-    config_store.write_session_exec_policy_file(
-        &launch.codex_home,
+    let prepared = prepare_session_launch_files(
+        config_store,
+        &launch,
         cwd,
+        local_ws_port,
+        ai_session_id,
+        &launch_runtime,
         &ShellRulesConfig {
             version: 1,
             mode: ApprovalMode::Ask,
@@ -579,6 +622,9 @@ pub async fn launch_ai_session_in_current_terminal(
             codex_executable: super::super::terminal::manager::resolve_codex_executable()?,
             workspace_root: launch.workspace_root.display().to_string(),
             codex_home: launch.codex_home.display().to_string(),
+            sirix_config_overrides_path: prepared.config_overrides_path.display().to_string(),
+            sirix_agent_runtime_path: prepared.agent_runtime_path.display().to_string(),
+            sirix_exec_policy_path: prepared.exec_policy_path.display().to_string(),
             provider_api_key_env: (!launch.provider.api_key_env.trim().is_empty())
                 .then(|| launch.provider.api_key_env.clone()),
             provider_api_key: (!launch.provider.api_key.trim().is_empty())
@@ -646,7 +692,8 @@ mod tests {
             provider: provider.clone(),
             model: provider.models[0].clone(),
             session_providers: vec![provider],
-            codex_home: PathBuf::from("/tmp/.sirix"),
+            codex_home: PathBuf::from("/tmp/.sirix/codex-home"),
+            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         }

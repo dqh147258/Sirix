@@ -703,8 +703,9 @@ pub async fn proxy_compatible_responses(
     let requested_model_slug = resolve_session_picker_model(&session_providers, requested_model)
         .map(|(_, model)| model.id.clone())
         .unwrap_or_else(|| requested_model.to_string());
-    let requested_alias_provider = resolve_session_picker_model(&session_providers, requested_model)
-        .map(|(provider, _)| provider.clone());
+    let requested_alias_provider =
+        resolve_session_picker_model(&session_providers, requested_model)
+            .map(|(provider, _)| provider.clone());
     let runtime = state
         .ai_session_registry
         .resolve_runtime(ai_session_id)
@@ -742,7 +743,9 @@ pub async fn proxy_compatible_responses(
                 .resolve_provider_for_model(ai_session_id, effective_model.as_str())
                 .await
                 .ok_or_else(|| {
-                    ApiError::not_found(format!("provider not found for ai session {ai_session_id}"))
+                    ApiError::not_found(format!(
+                        "provider not found for ai session {ai_session_id}"
+                    ))
                 })?;
             tracing::info!(
                 "[SIRIX_MODEL_ROUTING] using slug-selected provider ai_session_id={} requested_model={} resolved_model={} provider_id={} provider_kind={:?}",

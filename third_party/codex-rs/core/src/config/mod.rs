@@ -1142,8 +1142,6 @@ pub fn set_project_trust_level(
     project_path: &Path,
     trust_level: TrustLevel,
 ) -> anyhow::Result<()> {
-    use crate::config::edit::ConfigEditsBuilder;
-
     ConfigEditsBuilder::new(codex_home)
         .set_project_trust_level(project_path, trust_level)
         .apply_blocking()

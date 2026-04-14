@@ -9308,6 +9308,7 @@ dependencies = [
  "codex-protocol",
  "codex-tui",
  "codex-utils-cli",
+ "serde_json",
 ]
 
 [[package]]

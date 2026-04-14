@@ -33,6 +33,7 @@ use codex_features::canonical_feature_for_key;
 use codex_features::feature_for_key;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::protocol::Op;
+use codex_utils_cli::CliConfigOverrides;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -49,6 +50,8 @@ const SUPPORTED_EXPERIMENTAL_FEATURE_ENABLEMENT: &[&str] = &[
     "tool_suggest",
     "tool_call_mcp_elicitation",
 ];
+pub(crate) const SIRIX_CONFIG_OVERRIDES_PATH_ENV: &str = "SIRIX_CONFIG_OVERRIDES_PATH";
+const LEGACY_SIRIX_CONFIG_OVERRIDES_JSON_ENV: &str = "SIRIX_CONFIG_OVERRIDES_JSON";
 
 #[async_trait]
 pub(crate) trait UserConfigReloader: Send + Sync {
@@ -112,10 +115,17 @@ impl ConfigApi {
     }
 
     fn current_cli_overrides(&self) -> Vec<(String, TomlValue)> {
-        self.cli_overrides
+        let mut overrides = self
+            .cli_overrides
             .read()
             .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Sirix reuses Codex's native `-c key=value` precedence model. The base
+        // app-server keeps the startup overrides cached, so on agent switches we
+        // re-read the current env-backed session overrides and append them here
+        // so the newest session config wins during `reload_user_config()`.
+        overrides.extend(sirix_cli_overrides_from_env());
+        overrides
     }
 
     fn current_runtime_feature_enablement(&self) -> BTreeMap<String, bool> {
@@ -311,6 +321,53 @@ impl ConfigApi {
             } else {
                 self.analytics_events_client.track_plugin_disabled(metadata);
             }
+        }
+    }
+}
+
+pub(crate) fn sirix_cli_overrides_from_env() -> Vec<(String, TomlValue)> {
+    let Some(raw_overrides) = load_sirix_raw_overrides() else {
+        return Vec::new();
+    };
+
+    match (CliConfigOverrides { raw_overrides }).parse_overrides() {
+        Ok(items) => items,
+        Err(err) => {
+            warn!("failed to parse Sirix session config overrides from env-backed storage: {err}");
+            Vec::new()
+        }
+    }
+}
+
+fn load_sirix_raw_overrides() -> Option<Vec<String>> {
+    if let Some(path) = std::env::var(SIRIX_CONFIG_OVERRIDES_PATH_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                warn!("failed to read {SIRIX_CONFIG_OVERRIDES_PATH_ENV}={path}: {err}");
+                return None;
+            }
+        };
+        return match serde_json::from_str::<Vec<String>>(&raw) {
+            Ok(items) => Some(items),
+            Err(err) => {
+                warn!("failed to parse overrides file at {path}: {err}");
+                None
+            }
+        };
+    }
+
+    let raw = std::env::var(LEGACY_SIRIX_CONFIG_OVERRIDES_JSON_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())?;
+    match serde_json::from_str::<Vec<String>>(&raw) {
+        Ok(items) => Some(items),
+        Err(err) => {
+            warn!("failed to parse {LEGACY_SIRIX_CONFIG_OVERRIDES_JSON_ENV}: {err}");
+            None
         }
     }
 }

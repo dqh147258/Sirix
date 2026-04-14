@@ -2,6 +2,7 @@ use crate::bespoke_event_handling::apply_bespoke_event_handling;
 use crate::command_exec::CommandExecManager;
 use crate::command_exec::StartCommandExecParams;
 use crate::config_api::apply_runtime_feature_enablement;
+use crate::config_api::sirix_cli_overrides_from_env;
 use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_PARAMS_ERROR_CODE;
@@ -591,10 +592,13 @@ impl CodexMessageProcessor {
     }
 
     fn current_cli_overrides(&self) -> Vec<(String, TomlValue)> {
-        self.cli_overrides
+        let mut overrides = self
+            .cli_overrides
             .read()
             .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        overrides.extend(sirix_cli_overrides_from_env());
+        overrides
     }
 
     fn current_runtime_feature_enablement(&self) -> BTreeMap<String, bool> {

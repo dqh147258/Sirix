@@ -50,6 +50,7 @@ const RULES_DIR_NAME: &str = "rules";
 const RULE_EXTENSION: &str = "rules";
 const DEFAULT_POLICY_FILE: &str = "default.rules";
 const SIRIX_AGENT_RUNTIME_PATH_ENV: &str = "SIRIX_AGENT_RUNTIME_PATH";
+const SIRIX_EXEC_POLICY_PATH_ENV: &str = "SIRIX_EXEC_POLICY_PATH";
 
 #[derive(Debug, Deserialize)]
 struct SirixAgentRuntimeFile {
@@ -512,6 +513,9 @@ pub async fn load_exec_policy(config_stack: &ConfigLayerStack) -> Result<Policy,
             policy_paths.extend(layer_policy_paths);
         }
     }
+    if let Some(session_policy_path) = sirix_exec_policy_path_override() {
+        policy_paths.push(session_policy_path);
+    }
     tracing::trace!(
         policy_paths = ?policy_paths,
         "loaded exec policies"
@@ -544,6 +548,15 @@ pub async fn load_exec_policy(config_stack: &ConfigLayerStack) -> Result<Policy,
     };
 
     Ok(policy.merge_overlay(requirements_policy.as_ref()))
+}
+
+fn sirix_exec_policy_path_override() -> Option<PathBuf> {
+    let raw = env::var(SIRIX_EXEC_POLICY_PATH_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// If a command is not matched by any execpolicy rule, derive a [`Decision`].

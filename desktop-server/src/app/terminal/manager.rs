@@ -17,7 +17,9 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::app::ai::config::{AiLaunchConfig, SIRIX_AGENT_RUNTIME_FILE_NAME};
+use crate::app::ai::config::{
+    AiLaunchConfig, SIRIX_CONFIG_OVERRIDES_PATH_ENV, SIRIX_EXEC_POLICY_PATH_ENV,
+};
 
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -172,6 +174,9 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
         remote_sync: bool,
+        config_overrides_path: PathBuf,
+        agent_runtime_path: PathBuf,
+        exec_policy_path: PathBuf,
     ) -> anyhow::Result<()> {
         let codex_executable = resolve_codex_executable()?;
         let mut builder = CommandBuilder::new(codex_executable.clone());
@@ -187,14 +192,9 @@ impl TerminalManager {
             "SIRIX_LOCAL_API_BASE",
             format!("http://127.0.0.1:{local_ws_port}"),
         );
-        builder.env(
-            "SIRIX_AGENT_RUNTIME_PATH",
-            launch
-                .codex_home
-                .join(SIRIX_AGENT_RUNTIME_FILE_NAME)
-                .display()
-                .to_string(),
-        );
+        builder.env(SIRIX_CONFIG_OVERRIDES_PATH_ENV, config_overrides_path);
+        builder.env("SIRIX_AGENT_RUNTIME_PATH", agent_runtime_path);
+        builder.env(SIRIX_EXEC_POLICY_PATH_ENV, exec_policy_path);
         builder.cwd(&launch.workspace_root);
 
         self.create_process_terminal(

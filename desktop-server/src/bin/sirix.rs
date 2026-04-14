@@ -204,6 +204,9 @@ struct CurrentTerminalLaunch {
     codex_executable: String,
     workspace_root: String,
     codex_home: String,
+    sirix_config_overrides_path: String,
+    sirix_agent_runtime_path: String,
+    sirix_exec_policy_path: String,
     provider_api_key_env: Option<String>,
     provider_api_key: Option<String>,
 }
@@ -264,6 +267,21 @@ async fn launch_session(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            sirix_config_overrides_path: item
+                .get("sirix_config_overrides_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            sirix_agent_runtime_path: item
+                .get("sirix_agent_runtime_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            sirix_exec_policy_path: item
+                .get("sirix_exec_policy_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             provider_api_key_env: item
                 .get("provider_api_key_env")
                 .and_then(serde_json::Value::as_str)
@@ -291,6 +309,21 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
     command.current_dir(&current.workspace_root);
     if !current.codex_home.trim().is_empty() {
         command.env("CODEX_HOME", &current.codex_home);
+    }
+    if !current.sirix_config_overrides_path.trim().is_empty() {
+        command.env(
+            "SIRIX_CONFIG_OVERRIDES_PATH",
+            &current.sirix_config_overrides_path,
+        );
+    }
+    if !current.sirix_agent_runtime_path.trim().is_empty() {
+        command.env(
+            "SIRIX_AGENT_RUNTIME_PATH",
+            &current.sirix_agent_runtime_path,
+        );
+    }
+    if !current.sirix_exec_policy_path.trim().is_empty() {
+        command.env("SIRIX_EXEC_POLICY_PATH", &current.sirix_exec_policy_path);
     }
     if let (Some(env_key), Some(api_key)) = (
         current.provider_api_key_env.as_deref(),

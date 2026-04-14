@@ -1670,7 +1670,10 @@ impl App {
             return Some(turn_id);
         }
 
-        let thread = match app_server.thread_read(thread_id, /*include_turns*/ true).await {
+        let thread = match app_server
+            .thread_read(thread_id, /*include_turns*/ true)
+            .await
+        {
             Ok(thread) => thread,
             Err(error) => {
                 tracing::warn!(
@@ -4439,16 +4442,14 @@ impl App {
                 persistence_decision,
                 prefix,
             } => {
-                if let (Some(scope), Some(persist_decision), Some(prefix)) =
-                    (persistence_scope.as_deref(), persistence_decision.as_deref(), prefix.as_deref())
-                {
-                    sirix_local_api::resolve_session_shell_rule(
-                        persist_decision,
-                        scope,
-                        prefix,
-                    )
-                    .await
-                    .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+                if let (Some(scope), Some(persist_decision), Some(prefix)) = (
+                    persistence_scope.as_deref(),
+                    persistence_decision.as_deref(),
+                    prefix.as_deref(),
+                ) {
+                    sirix_local_api::resolve_session_shell_rule(persist_decision, scope, prefix)
+                        .await
+                        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
                     app_server.reload_user_config().await?;
                 }
                 self.submit_thread_op(
@@ -4983,12 +4984,12 @@ impl App {
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
                                         /*effort*/ None,
-                                    /*summary*/ None,
-                                    /*service_tier*/ None,
-                                    /*developer_instructions*/ None,
-                                    /*collaboration_mode*/ None,
-                                    /*personality*/ None,
-                                )
+                                        /*summary*/ None,
+                                        /*service_tier*/ None,
+                                        /*developer_instructions*/ None,
+                                        /*collaboration_mode*/ None,
+                                        /*personality*/ None,
+                                    )
                                     .into(),
                                 ));
                                 self.app_event_tx.send(
@@ -5010,12 +5011,12 @@ impl App {
                                         Some(windows_sandbox_level),
                                         /*model*/ None,
                                         /*effort*/ None,
-                                    /*summary*/ None,
-                                    /*service_tier*/ None,
-                                    /*developer_instructions*/ None,
-                                    /*collaboration_mode*/ None,
-                                    /*personality*/ None,
-                                )
+                                        /*summary*/ None,
+                                        /*service_tier*/ None,
+                                        /*developer_instructions*/ None,
+                                        /*collaboration_mode*/ None,
+                                        /*personality*/ None,
+                                    )
                                     .into(),
                                 ));
                                 self.app_event_tx
@@ -5476,23 +5477,27 @@ impl App {
                                 "Failed to reload Sirix config after switching agent: {err}"
                             ));
                         }
-                        self.chat_widget.submit_op(AppCommand::override_turn_context(
-                            /*cwd*/ None,
-                            /*approval_policy*/ None,
-                            /*approvals_reviewer*/ None,
-                            /*sandbox_policy*/ None,
-                            /*windows_sandbox_level*/ None,
-                            Some(response.model_id.clone()),
-                            /*effort*/ None,
-                            /*summary*/ None,
-                            /*service_tier*/ None,
-                            Some(Some(response.developer_instructions.clone())),
-                            /*collaboration_mode*/ None,
-                            /*personality*/ None,
-                        ));
+                        self.chat_widget
+                            .submit_op(AppCommand::override_turn_context(
+                                /*cwd*/ None,
+                                /*approval_policy*/ None,
+                                /*approvals_reviewer*/ None,
+                                /*sandbox_policy*/ None,
+                                /*windows_sandbox_level*/ None,
+                                Some(response.model_id.clone()),
+                                /*effort*/ None,
+                                /*summary*/ None,
+                                /*service_tier*/ None,
+                                Some(Some(response.developer_instructions.clone())),
+                                /*collaboration_mode*/ None,
+                                /*personality*/ None,
+                            ));
                         self.chat_widget.set_model(response.model_id.as_str());
                         self.chat_widget.add_info_message(
-                            format!("Switched Sirix agent to {} ({})", response.name, response.agent_id),
+                            format!(
+                                "Switched Sirix agent to {} ({})",
+                                response.name, response.agent_id
+                            ),
                             None,
                         );
                     }

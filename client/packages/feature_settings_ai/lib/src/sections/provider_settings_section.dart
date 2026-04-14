@@ -25,9 +25,9 @@ class ProviderSettingsSection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final defaultAgent = state.config.agents.where((item) => item.id == 'default-agent').isEmpty
+    final defaultAgent = state.config.agents.where((item) => item.id == 'codex').isEmpty
         ? null
-        : state.config.agents.firstWhere((item) => item.id == 'default-agent');
+        : state.config.agents.firstWhere((item) => item.id == 'codex');
 
     return ListView(
       children: [

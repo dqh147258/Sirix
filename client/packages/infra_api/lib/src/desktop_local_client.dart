@@ -146,7 +146,7 @@ class DesktopLocalClient {
     return SirixAiConfig.fromJson(_decodeMap(response));
   }
 
-  Future<String> previewAgentSystemPrompt({
+  Future<Object?> previewAgentSystemPrompt({
     required SirixAiConfig config,
     required String agentId,
     String? cwd,
@@ -161,7 +161,7 @@ class DesktopLocalClient {
       },
     );
     final decoded = _decodeMap(response);
-    return decoded['prompt'] as String? ?? '';
+    return decoded['preview'];
   }
 
   Future<ShellRulesConfigModel> getShellRules() async {

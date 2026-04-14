@@ -1,45 +1,41 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    env,
-    ffi::OsString,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::LazyLock,
 };
 
 use anyhow::Context;
-use rmcp::model::{
-    ClientCapabilities, ClientInfo, CreateElicitationRequestParams, CreateElicitationResult,
-    ElicitationCapability, FormElicitationCapability, Implementation, Resource, ResourceTemplate,
-    Tool,
-};
-use rmcp::service::{self, RequestContext};
-use rmcp::transport::child_process::TokioChildProcess;
-use rmcp::ClientHandler;
-use rmcp::RoleClient;
+use codex_core::build_responses_request_preview;
+use codex_core::config::Config;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncBufReadExt;
-use tokio::io::BufReader;
-use tokio::process::Command;
+use tokio::sync::Mutex;
 use toml::Value as TomlValue;
 use uuid::Uuid;
 
-const DEFAULT_AGENT_ID: &str = "default-agent";
+const DEFAULT_AGENT_ID: &str = "codex";
+const LEGACY_DEFAULT_AGENT_ID: &str = "default-agent";
+const DEFAULT_AGENT_NAME: &str = "Codex";
+const DEFAULT_AGENT_DESCRIPTION: &str =
+    "Built-in Codex agent with the standard Codex system prompt.";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_MODEL_ID: &str = "gpt-5";
 const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
+const SIRIX_AGENT_ROLES_DIR: &str = "agent-roles";
 pub const SIRIX_AGENT_RUNTIME_FILE_NAME: &str = "sirix-agent-runtime.json";
 pub const SIRIX_CONFIG_OVERRIDES_FILE_NAME: &str = "sirix-config-overrides.json";
 pub const SIRIX_EXEC_POLICY_RULES_DIR: &str = "rules";
 pub const SIRIX_EXEC_POLICY_RULES_FILE: &str = "default.rules";
 pub const SIRIX_CONFIG_OVERRIDES_PATH_ENV: &str = "SIRIX_CONFIG_OVERRIDES_PATH";
 pub const SIRIX_EXEC_POLICY_PATH_ENV: &str = "SIRIX_EXEC_POLICY_PATH";
+pub const SIRIX_AGENT_RUNTIME_PATH_ENV: &str = "SIRIX_AGENT_RUNTIME_PATH";
 const SIRIX_SHARED_CODEX_HOME_DIR_NAME: &str = "codex-home";
 const SIRIX_OLD_SHARED_CODEX_HOME_DIR_NAME: &str = "shared-codex-home";
 const SIRIX_SHARED_STORAGE_MIGRATION_SENTINEL: &str = ".legacy-session-storage-migrated-v2";
 const SIRIX_SESSIONS_SUBDIR: &str = "sessions";
 const SIRIX_ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
 const SIRIX_SESSION_INDEX_FILE_NAME: &str = "session_index.jsonl";
+static PROMPT_PREVIEW_RUNTIME_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -306,8 +302,8 @@ impl Default for SirixConfig {
             mcp_servers: Vec::new(),
             agents: vec![AgentConfig {
                 id: DEFAULT_AGENT_ID.to_string(),
-                name: "Default Agent".to_string(),
-                description: "Default Sirix coding agent.".to_string(),
+                name: DEFAULT_AGENT_NAME.to_string(),
+                description: DEFAULT_AGENT_DESCRIPTION.to_string(),
                 provider_id: DEFAULT_PROVIDER_ID.to_string(),
                 model_id: DEFAULT_MODEL_ID.to_string(),
                 fallback_provider_id: String::new(),
@@ -398,10 +394,12 @@ impl SirixConfigStore {
     }
 
     pub fn save_global(&self, config: &SirixConfig) -> anyhow::Result<()> {
+        let mut normalized = config.clone();
+        normalize_sirix_config(&mut normalized);
         fs::create_dir_all(&self.sirix_home)
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
         let serialized =
-            toml::to_string_pretty(config).context("failed to serialize sirix config")?;
+            toml::to_string_pretty(&normalized).context("failed to serialize sirix config")?;
         fs::write(&self.config_path, serialized)
             .with_context(|| format!("failed to write {}", self.config_path.display()))?;
         Ok(())
@@ -909,8 +907,8 @@ fn resolve_agent(config: &SirixConfig, preferred: Option<&str>) -> anyhow::Resul
         }
     }
 
-    // Sirix CLI 默认启动不显式传 agent_id，所以这里优先解析 `default-agent`。
-    // 这样 Provider/Model 页面上设置的“默认模型”可以直接反映到 CLI 启动结果。
+    // Sirix CLI 默认启动不显式传 agent_id，所以这里优先解析内置 `codex` Agent。
+    // 这样 Provider/Model 页面上设置的默认模型会直接反映到 CLI 的默认启动结果。
     if let Some(default_agent) = config
         .agents
         .iter()
@@ -1019,102 +1017,25 @@ fn build_codex_bridge_toml(
         root.insert("models".to_string(), TomlValue::Array(picker_models));
     }
 
-    let enabled_skills = effective
-        .skills
-        .iter()
-        .filter(|item| item.enabled)
-        .filter(|item| launch.agent.skill_ids.contains(&item.id))
-        .map(|item| {
-            let mut entry = toml::map::Map::<String, TomlValue>::new();
-            entry.insert("path".to_string(), TomlValue::String(item.path.clone()));
-            entry.insert("enabled".to_string(), TomlValue::Boolean(true));
-            TomlValue::Table(entry)
-        })
-        .collect::<Vec<_>>();
-    if !enabled_skills.is_empty() {
-        let mut skills = toml::map::Map::<String, TomlValue>::new();
-        skills.insert("config".to_string(), TomlValue::Array(enabled_skills));
-        root.insert("skills".to_string(), TomlValue::Table(skills));
-    }
-
-    let enabled_mcp = effective
-        .mcp_servers
-        .iter()
-        .filter(|item| item.enabled)
-        .filter(|item| launch.agent.mcp_server_ids.contains(&item.id))
-        .map(|item| {
-            let mut value = parse_mcp_config_value(&item.json_config)
-                .with_context(|| format!("invalid mcp config for {}", item.id))?;
-
-            if !effective.mcp.enabled {
-                return Ok(None);
-            }
-            match infer_mcp_transport(&value)
-                .with_context(|| format!("mcp server {} has unknown transport", item.id))?
-            {
-                McpTransportKind::Stdio if !effective.mcp.allow_stdio => return Ok(None),
-                McpTransportKind::Http if !effective.mcp.allow_http => return Ok(None),
-                _ => {}
-            }
-
-            if let Some(table) = value.as_table_mut() {
-                if !item.enabled_tools.is_empty() {
-                    table.insert(
-                        "enabled_tools".to_string(),
-                        TomlValue::Array(
-                            item.enabled_tools
-                                .iter()
-                                .cloned()
-                                .map(TomlValue::String)
-                                .collect(),
-                        ),
-                    );
-                }
-                if !item.disabled_tools.is_empty() {
-                    table.insert(
-                        "disabled_tools".to_string(),
-                        TomlValue::Array(
-                            item.disabled_tools
-                                .iter()
-                                .cloned()
-                                .map(TomlValue::String)
-                                .collect(),
-                        ),
-                    );
-                }
-            }
-            Ok(Some((item.id.clone(), value)))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    if !enabled_mcp.is_empty() {
-        let mut servers = toml::map::Map::<String, TomlValue>::new();
-        for (id, value) in enabled_mcp {
-            servers.insert(id, value);
-        }
-        root.insert("mcp_servers".to_string(), TomlValue::Table(servers));
-    }
-
-    if let Some(workspace_source) = launch.workspace_source.as_ref() {
-        if workspace_source.ends_with(Path::new(".codex").join("config.toml")) {
-            let workspace_raw = fs::read_to_string(workspace_source)
-                .with_context(|| format!("failed to read {}", workspace_source.display()))?;
-            let workspace_value = toml::from_str::<TomlValue>(&workspace_raw)
-                .with_context(|| format!("failed to parse {}", workspace_source.display()))?;
-            if let Some(table) = workspace_value.as_table() {
-                if effective.mcp.enabled {
-                    if let Some(mcp) = table.get("mcp_servers") {
-                        root.insert("mcp_servers".to_string(), mcp.clone());
-                    }
-                }
-                if let Some(skills) = table.get("skills") {
-                    root.insert("skills".to_string(), skills.clone());
-                }
-            }
-        }
-    }
+    // Keep Desktop Server as the source of truth for per-agent skills, MCP,
+    // and delegatable Sirix sub-agents. These sections intentionally use the
+    // native Codex config shapes so the runtime can inject them through its
+    // standard prompt/tool pipelines instead of Sirix-specific prompt text.
+    root.insert(
+        "skills".to_string(),
+        build_sirix_skill_config(&effective, &launch.agent),
+    );
+    root.insert(
+        "mcp_servers".to_string(),
+        build_sirix_mcp_servers_table(&effective, &launch.agent)?,
+    );
+    let role_dir = launch.session_storage_dir.join(SIRIX_AGENT_ROLES_DIR);
+    let role_files =
+        write_sirix_agent_role_files(&effective, &launch.session_providers, &role_dir)?;
+    root.insert(
+        "agents".to_string(),
+        build_sirix_agent_role_entries(&effective, &launch.agent, &role_files),
+    );
 
     let mut sandbox_workspace_write = toml::map::Map::<String, TomlValue>::new();
     sandbox_workspace_write.insert(
@@ -1282,10 +1203,79 @@ fn bridge_session_proxy_base_url(local_ws_port: u16, ai_session_id: Uuid) -> Str
     format!("http://127.0.0.1:{local_ws_port}/ai/sessions/{ai_session_id}/provider/v1")
 }
 
+fn is_builtin_codex_agent(agent_id: &str) -> bool {
+    agent_id == DEFAULT_AGENT_ID
+}
+
+fn first_enabled_text_model(config: &SirixConfig) -> Option<(&ProviderConfig, &ModelConfig)> {
+    config.providers.iter().find_map(|provider| {
+        if !provider.enabled {
+            return None;
+        }
+        provider
+            .models
+            .iter()
+            .find(|model| model.enabled && matches!(model.model_kind, ModelKind::Text))
+            .map(|model| (provider, model))
+    })
+}
+
+fn migrate_default_agent_to_codex(config: &mut SirixConfig) {
+    let legacy_index = config
+        .agents
+        .iter()
+        .position(|agent| agent.id == LEGACY_DEFAULT_AGENT_ID);
+    let codex_index = config
+        .agents
+        .iter()
+        .position(|agent| is_builtin_codex_agent(agent.id.as_str()));
+
+    match (legacy_index, codex_index) {
+        (Some(legacy_index), None) => {
+            let agent = &mut config.agents[legacy_index];
+            agent.id = DEFAULT_AGENT_ID.to_string();
+            if agent.name.trim().is_empty() || agent.name == "Default Agent" {
+                agent.name = DEFAULT_AGENT_NAME.to_string();
+            }
+            if agent.description.trim().is_empty()
+                || agent.description == "Default Sirix coding agent."
+            {
+                agent.description = DEFAULT_AGENT_DESCRIPTION.to_string();
+            }
+        }
+        (Some(legacy_index), Some(codex_index)) if legacy_index != codex_index => {
+            config.agents.remove(legacy_index);
+        }
+        _ => {}
+    }
+}
+
+fn normalize_builtin_codex_agent(agent: &mut AgentConfig, default_builtin_tools: &[String]) {
+    // Keep the built-in Codex profile aligned with the embedded Codex runtime.
+    // Sirix may still choose provider/model, fallback, MCP, skills, and sub-agents
+    // for this profile, but it should not carry a custom prompt overlay or a
+    // partial builtin-tool set that drifts away from Codex defaults.
+    if !is_builtin_codex_agent(agent.id.as_str()) {
+        return;
+    }
+
+    agent.id = DEFAULT_AGENT_ID.to_string();
+    if agent.name.trim().is_empty() {
+        agent.name = DEFAULT_AGENT_NAME.to_string();
+    }
+    if agent.description.trim().is_empty() {
+        agent.description = DEFAULT_AGENT_DESCRIPTION.to_string();
+    }
+    agent.enabled = true;
+    agent.system_prompt.clear();
+    agent.builtin_tool_ids = default_builtin_tools.to_vec();
+}
+
 fn normalize_sirix_config(config: &mut SirixConfig) {
     // Keep legacy config migration centralized here so the rest of the runtime
     // can rely on the newer Agent schema without duplicating fallback logic.
     let default_builtin_tools = default_builtin_tool_ids();
+    migrate_default_agent_to_codex(config);
     let all_skill_ids = config
         .skills
         .iter()
@@ -1343,7 +1333,49 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                 agent.approval_mode = shell_rule.approval_mode.clone();
             }
         }
+
+        normalize_builtin_codex_agent(agent, &default_builtin_tools);
     }
+
+    if !config
+        .agents
+        .iter()
+        .any(|agent| is_builtin_codex_agent(agent.id.as_str()))
+    {
+        if let Some((provider, model)) = first_enabled_text_model(config) {
+            config.agents.insert(
+                0,
+                AgentConfig {
+                    id: DEFAULT_AGENT_ID.to_string(),
+                    name: DEFAULT_AGENT_NAME.to_string(),
+                    description: DEFAULT_AGENT_DESCRIPTION.to_string(),
+                    provider_id: provider.id.clone(),
+                    model_id: model.id.clone(),
+                    fallback_provider_id: String::new(),
+                    fallback_model_id: String::new(),
+                    system_prompt: String::new(),
+                    approval_mode: ApprovalMode::Ask,
+                    builtin_tool_ids: default_builtin_tools,
+                    skill_ids: Vec::new(),
+                    mcp_server_ids: Vec::new(),
+                    sub_agent_ids: Vec::new(),
+                    enabled: true,
+                    legacy_builtin_tools_enabled: None,
+                    legacy_enabled_skill_ids: Vec::new(),
+                    legacy_disabled_skill_ids: Vec::new(),
+                    legacy_enabled_mcp_server_ids: Vec::new(),
+                    legacy_disabled_mcp_server_ids: Vec::new(),
+                    legacy_capability_rules: Vec::new(),
+                },
+            );
+        }
+    }
+}
+
+pub fn normalized_sirix_config(config: &SirixConfig) -> SirixConfig {
+    let mut normalized = config.clone();
+    normalize_sirix_config(&mut normalized);
+    normalized
 }
 
 pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
@@ -1563,7 +1595,7 @@ fn parse_config_with_compat(raw: &str, source: &Path) -> anyhow::Result<SirixCon
 }
 
 fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
-    let value = toml::from_str::<TomlValue>(raw).context("legacy config is not valid TOML")?;
+    let value = parse_toml_document_value(raw).context("legacy config is not valid TOML")?;
     let table = value
         .as_table()
         .context("legacy config root must be a table")?;
@@ -1669,7 +1701,7 @@ fn extract_cli_close_confirmation_override(
     raw: &str,
     source: &Path,
 ) -> anyhow::Result<Option<bool>> {
-    let value = toml::from_str::<TomlValue>(raw).with_context(|| {
+    let value = parse_toml_document_value(raw).with_context(|| {
         format!(
             "failed to parse {} while inspecting CLI close toggle",
             source.display()
@@ -1965,8 +1997,19 @@ fn toml_from_json(value: serde_json::Value) -> TomlValue {
     }
 }
 
+fn parse_toml_document_value(raw: &str) -> anyhow::Result<TomlValue> {
+    // `toml` 0.9 parses `Value` as a single literal/inline value, not a complete
+    // document. Sirix config files and many imported Codex-compatible config
+    // fragments are full TOML documents with table headers, so normalize them to
+    // a top-level table here.
+    toml::from_str::<toml::Table>(raw)
+        .map(TomlValue::Table)
+        .context("failed to parse TOML document")
+}
+
 fn parse_mcp_config_value(raw: &str) -> anyhow::Result<TomlValue> {
-    toml::from_str::<TomlValue>(raw)
+    parse_toml_document_value(raw)
+        .or_else(|_| toml::from_str::<TomlValue>(raw).context("failed to parse TOML value"))
         .or_else(|_| toml::from_str::<serde_json::Value>(raw).map(toml_from_json))
         .context("failed to parse MCP config as TOML or JSON")
 }
@@ -2409,90 +2452,359 @@ pub fn build_agent_system_prompt(config: &SirixConfig, agent: &AgentConfig) -> S
         sections.push(agent.system_prompt.trim().to_string());
     }
 
-    // Render the capability inventory directly into developer instructions so the
-    // preview button and the runtime stay aligned on what the current agent is
-    // actually allowed to use. Tool gating still happens in the runtime layer;
-    // this section exists to make those constraints legible to the model.
-    if !agent.builtin_tool_ids.is_empty() {
-        let mut section = String::from("<builtin_tools>\n");
-        for tool_id in &agent.builtin_tool_ids {
-            section.push_str(&format!("- {tool_id}\n"));
-        }
-        section.push_str("</builtin_tools>");
-        sections.push(section);
-    }
+    sections.join("\n\n")
+}
 
-    let selected_skills = agent
-        .skill_ids
-        .iter()
-        .filter_map(|id| config.skills.iter().find(|candidate| candidate.id == *id))
-        .filter(|candidate| candidate.enabled)
-        .collect::<Vec<_>>();
-    if !selected_skills.is_empty() {
-        let mut section = String::from("<skills>\n");
-        for skill in selected_skills {
-            let sandbox_scope = if skill.allow_outside_sandbox {
-                "outside_sandbox_allowed"
-            } else {
-                "workspace_only"
-            };
-            section.push_str(&format!(
-                "- {} ({}) path={} scope={}\n",
-                skill.name,
-                skill.id,
-                skill.path.trim(),
-                sandbox_scope
-            ));
-        }
-        section.push_str("</skills>");
-        sections.push(section);
-    }
+fn agent_preview_session_storage_dir(sirix_home: &Path, agent: &AgentConfig) -> PathBuf {
+    sirix_home
+        .join("runtime")
+        .join("prompt-preview")
+        .join(agent.id.as_str())
+}
 
-    let selected_mcp_servers = agent
-        .mcp_server_ids
-        .iter()
-        .filter_map(|id| {
-            config
-                .mcp_servers
-                .iter()
-                .find(|candidate| candidate.id == *id)
-        })
-        .filter(|candidate| candidate.enabled)
-        .collect::<Vec<_>>();
-    if !selected_mcp_servers.is_empty() {
-        let mut section = String::from("<mcp_servers>\n");
-        for server in selected_mcp_servers {
-            section.push_str(&format!(
-                "- {} ({}) approval_mode={}\n",
-                server.name,
-                server.id,
-                prompt_approval_mode_label(&server.approval_mode)
-            ));
-        }
-        section.push_str("</mcp_servers>");
-        sections.push(section);
-    }
-
-    let sub_agents = agent
+fn selected_agent_sub_agents<'a>(
+    config: &'a SirixConfig,
+    agent: &'a AgentConfig,
+) -> Vec<&'a AgentConfig> {
+    agent
         .sub_agent_ids
         .iter()
         .filter_map(|id| config.agents.iter().find(|candidate| candidate.id == *id))
-        .filter(|candidate| candidate.enabled)
+        .filter(|candidate| candidate.enabled && is_agent_launchable(config, candidate))
+        .collect()
+}
+
+fn render_agent_role_description(
+    config: &SirixConfig,
+    agent: &AgentConfig,
+    sub_agents: &[&AgentConfig],
+) -> String {
+    let mut lines = Vec::<String>::new();
+    if agent.description.trim().is_empty() {
+        lines.push(format!(
+            "Use `{}` when the task should run with this Sirix agent profile.",
+            agent.id
+        ));
+    } else {
+        lines.push(format!(
+            "Use `{}` for tasks matching this Sirix agent profile: {}",
+            agent.id,
+            agent.description.trim()
+        ));
+    }
+    lines.push(format!(
+        "This Sirix agent uses model `{}` / `{}`.",
+        agent.provider_id, agent.model_id
+    ));
+
+    let skill_names = config
+        .skills
+        .iter()
+        .filter(|skill| skill.enabled && agent.skill_ids.contains(&skill.id))
+        .map(|skill| skill.name.as_str())
         .collect::<Vec<_>>();
-    if !sub_agents.is_empty() {
-        let mut section = String::from("<subagents>\n");
-        for sub_agent in sub_agents {
-            section.push_str(&format!("- {} ({})", sub_agent.name, sub_agent.id,));
-            if !sub_agent.description.trim().is_empty() {
-                section.push_str(&format!(": {}", sub_agent.description.trim()));
-            }
-            section.push('\n');
-        }
-        section.push_str("</subagents>");
-        sections.push(section);
+    if !skill_names.is_empty() {
+        lines.push(format!(
+            "Available local skills: {}.",
+            skill_names.join(", ")
+        ));
     }
 
-    sections.join("\n\n")
+    let mcp_names = config
+        .mcp_servers
+        .iter()
+        .filter(|server| server.enabled && agent.mcp_server_ids.contains(&server.id))
+        .map(|server| server.name.as_str())
+        .collect::<Vec<_>>();
+    if !mcp_names.is_empty() {
+        lines.push(format!("Available MCP servers: {}.", mcp_names.join(", ")));
+    }
+
+    if sub_agents.is_empty() {
+        lines.push("This Sirix agent cannot spawn additional Sirix sub-agents.".to_string());
+    } else {
+        lines.push(format!(
+            "This Sirix agent can further delegate to: {}.",
+            sub_agents
+                .iter()
+                .map(|item| format!("`{}`", item.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn build_sirix_skill_config(config: &SirixConfig, agent: &AgentConfig) -> TomlValue {
+    // Mirror Codex's `skills.config` shape so prompt injection and explicit skill
+    // loading continue to work through the native skills pipeline instead of a
+    // Sirix-only prompt shim.
+    let config_entries = config
+        .skills
+        .iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| {
+            let mut entry = toml::map::Map::<String, TomlValue>::new();
+            entry.insert("path".to_string(), TomlValue::String(skill.path.clone()));
+            entry.insert(
+                "enabled".to_string(),
+                TomlValue::Boolean(agent.skill_ids.contains(&skill.id)),
+            );
+            TomlValue::Table(entry)
+        })
+        .collect::<Vec<_>>();
+
+    let mut skills = toml::map::Map::<String, TomlValue>::new();
+    skills.insert("config".to_string(), TomlValue::Array(config_entries));
+    TomlValue::Table(skills)
+}
+
+fn build_sirix_agent_role_entries(
+    config: &SirixConfig,
+    agent: &AgentConfig,
+    role_files: &HashMap<String, PathBuf>,
+) -> TomlValue {
+    // Codex config expects user-defined roles directly under `[agents.<role>]`.
+    // It does not accept an intermediate `roles` table in TOML input, even
+    // though the runtime stores them under an internal `roles` field after
+    // deserialization. Writing the flattened shape here keeps Sirix bridge
+    // output compatible with `ConfigToml`.
+    let mut roles = toml::map::Map::<String, TomlValue>::new();
+    let sub_agents = selected_agent_sub_agents(config, agent);
+    for sub_agent in &sub_agents {
+        let Some(role_file) = role_files.get(sub_agent.id.as_str()) else {
+            continue;
+        };
+
+        let nested_sub_agents = selected_agent_sub_agents(config, sub_agent);
+        let mut role = toml::map::Map::<String, TomlValue>::new();
+        role.insert(
+            "description".to_string(),
+            TomlValue::String(render_agent_role_description(
+                config,
+                sub_agent,
+                &nested_sub_agents,
+            )),
+        );
+        role.insert(
+            "config_file".to_string(),
+            TomlValue::String(role_file.display().to_string()),
+        );
+        role.insert(
+            "nickname_candidates".to_string(),
+            TomlValue::Array(vec![TomlValue::String(sub_agent.name.clone())]),
+        );
+        roles.insert(sub_agent.id.clone(), TomlValue::Table(role));
+    }
+    TomlValue::Table(roles)
+}
+
+fn build_sirix_mcp_servers_table(
+    config: &SirixConfig,
+    agent: &AgentConfig,
+) -> anyhow::Result<TomlValue> {
+    let mut servers = toml::map::Map::<String, TomlValue>::new();
+    for server in config.mcp_servers.iter().filter(|item| item.enabled) {
+        let mut value = parse_mcp_config_value(&server.json_config)
+            .with_context(|| format!("invalid mcp config for {}", server.id))?;
+        let transport = infer_mcp_transport(&value)
+            .with_context(|| format!("mcp server {} has unknown transport", server.id))?;
+        let transport_allowed = match transport {
+            McpTransportKind::Stdio => config.mcp.allow_stdio,
+            McpTransportKind::Http => config.mcp.allow_http,
+        };
+        if let Some(table) = value.as_table_mut() {
+            table.insert(
+                "enabled".to_string(),
+                TomlValue::Boolean(
+                    config.mcp.enabled
+                        && transport_allowed
+                        && agent.mcp_server_ids.contains(&server.id),
+                ),
+            );
+            if !server.enabled_tools.is_empty() {
+                table.insert(
+                    "enabled_tools".to_string(),
+                    TomlValue::Array(
+                        server
+                            .enabled_tools
+                            .iter()
+                            .cloned()
+                            .map(TomlValue::String)
+                            .collect(),
+                    ),
+                );
+            }
+            if !server.disabled_tools.is_empty() {
+                table.insert(
+                    "disabled_tools".to_string(),
+                    TomlValue::Array(
+                        server
+                            .disabled_tools
+                            .iter()
+                            .cloned()
+                            .map(TomlValue::String)
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        servers.insert(server.id.clone(), value);
+    }
+    Ok(TomlValue::Table(servers))
+}
+
+fn role_model_picker_id(
+    providers: &[ProviderConfig],
+    agent: &AgentConfig,
+) -> anyhow::Result<String> {
+    let duplicate_model_ids = duplicate_session_text_model_ids(providers);
+    let provider = providers
+        .iter()
+        .find(|item| item.id == agent.provider_id)
+        .with_context(|| {
+            format!(
+                "provider {} not found for role {}",
+                agent.provider_id, agent.id
+            )
+        })?;
+    let model = provider
+        .models
+        .iter()
+        .find(|item| item.id == agent.model_id)
+        .with_context(|| format!("model {} not found for role {}", agent.model_id, agent.id))?;
+    Ok(session_picker_model_id(
+        provider,
+        model,
+        &duplicate_model_ids,
+    ))
+}
+
+fn build_sirix_role_config_value(
+    config: &SirixConfig,
+    providers: &[ProviderConfig],
+    agent: &AgentConfig,
+    role_files: &HashMap<String, PathBuf>,
+) -> anyhow::Result<TomlValue> {
+    let mut root = toml::map::Map::<String, TomlValue>::new();
+    root.insert(
+        "developer_instructions".to_string(),
+        TomlValue::String(build_agent_system_prompt(config, agent)),
+    );
+    root.insert(
+        "model".to_string(),
+        TomlValue::String(role_model_picker_id(providers, agent)?),
+    );
+    root.insert(
+        "skills".to_string(),
+        build_sirix_skill_config(config, agent),
+    );
+    root.insert(
+        "mcp_servers".to_string(),
+        build_sirix_mcp_servers_table(config, agent)?,
+    );
+    root.insert(
+        "agents".to_string(),
+        build_sirix_agent_role_entries(config, agent, role_files),
+    );
+    Ok(TomlValue::Table(root))
+}
+
+fn is_windows_reserved_file_stem(stem: &str) -> bool {
+    let upper = stem.to_ascii_uppercase();
+    matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .map(|suffix| matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+            .unwrap_or(false)
+}
+
+fn sanitize_agent_id_for_role_file_stem(agent_id: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut stem = String::with_capacity(agent_id.len());
+    for &byte in agent_id.as_bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-' => {
+                stem.push(char::from(byte));
+            }
+            _ => {
+                stem.push('~');
+                stem.push(char::from(HEX[(byte >> 4) as usize]));
+                stem.push(char::from(HEX[(byte & 0x0f) as usize]));
+            }
+        }
+    }
+    if stem.is_empty() {
+        "agent".to_string()
+    } else {
+        stem
+    }
+}
+
+fn role_file_stem_for_agent_id(agent_id: &str, used_stems: &mut HashSet<String>) -> String {
+    // Role file names are generated on every launch/preview and must be safe on
+    // Windows/macOS/Linux. We percent-escape non [A-Za-z0-9_-] bytes so:
+    // 1) path separators like `/` or `\\` cannot escape `role_dir`,
+    // 2) Windows-forbidden characters (for example `: * ?`) become valid, and
+    // 3) IDs stay deterministic even with non-ASCII bytes.
+    let mut stem = sanitize_agent_id_for_role_file_stem(agent_id);
+    // Windows reserved basenames (CON/PRN/AUX/NUL/COM1-9/LPT1-9) cannot be used
+    // even when an extension is present, so add a marker suffix.
+    if is_windows_reserved_file_stem(stem.as_str()) {
+        stem.push('~');
+    }
+    if used_stems.insert(stem.clone()) {
+        return stem;
+    }
+
+    let base = stem.clone();
+    let mut suffix = 2usize;
+    loop {
+        let candidate = format!("{base}~{suffix}");
+        if used_stems.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn write_sirix_agent_role_files(
+    config: &SirixConfig,
+    providers: &[ProviderConfig],
+    role_dir: &Path,
+) -> anyhow::Result<HashMap<String, PathBuf>> {
+    fs::create_dir_all(role_dir)
+        .with_context(|| format!("failed to create {}", role_dir.display()))?;
+
+    let mut role_files = HashMap::new();
+    let mut used_stems = HashSet::new();
+    for agent in config
+        .agents
+        .iter()
+        .filter(|item| item.enabled && is_agent_launchable(config, item))
+    {
+        let role_stem = role_file_stem_for_agent_id(agent.id.as_str(), &mut used_stems);
+        role_files.insert(agent.id.clone(), role_dir.join(format!("{role_stem}.toml")));
+    }
+
+    for agent in config
+        .agents
+        .iter()
+        .filter(|item| item.enabled && is_agent_launchable(config, item))
+    {
+        let role_value = build_sirix_role_config_value(config, providers, agent, &role_files)?;
+        let role_path = role_files
+            .get(agent.id.as_str())
+            .with_context(|| format!("missing role path for {}", agent.id))?;
+        let serialized =
+            toml::to_string_pretty(&role_value).context("failed to serialize Sirix role config")?;
+        fs::write(role_path, serialized)
+            .with_context(|| format!("failed to write {}", role_path.display()))?;
+    }
+
+    Ok(role_files)
 }
 
 pub async fn build_agent_system_prompt_preview(
@@ -2500,699 +2812,84 @@ pub async fn build_agent_system_prompt_preview(
     agent: &AgentConfig,
     sirix_home: &Path,
     workspace_root: Option<&Path>,
-) -> anyhow::Result<String> {
-    let mut sections = Vec::<String>::new();
-    if !config.cli.supplemental_system_prompt.trim().is_empty() {
-        sections.push(config.cli.supplemental_system_prompt.trim().to_string());
-    }
-    if !agent.system_prompt.trim().is_empty() {
-        sections.push(agent.system_prompt.trim().to_string());
-    }
-
-    if let Some(section) = build_builtin_tool_prompt_section(&agent.builtin_tool_ids) {
-        sections.push(section);
-    }
-    if let Some(section) = build_skill_prompt_section(config, agent) {
-        sections.push(section);
-    }
-    if let Some(section) =
-        build_mcp_server_prompt_section(config, agent, sirix_home, workspace_root).await?
-    {
-        sections.push(section);
-    }
-    if let Some(section) = build_sub_agent_prompt_section(config, agent) {
-        sections.push(section);
-    }
-
-    Ok(sections.join("\n\n").trim().to_string())
-}
-
-fn build_skill_prompt_section(config: &SirixConfig, agent: &AgentConfig) -> Option<String> {
-    let selected_skills = agent
-        .skill_ids
+) -> anyhow::Result<serde_json::Value> {
+    let workspace_root = workspace_root
+        .map(Path::to_path_buf)
+        .unwrap_or(std::env::current_dir().context("failed to resolve current_dir for preview")?);
+    let provider = config
+        .providers
         .iter()
-        .filter_map(|id| config.skills.iter().find(|candidate| candidate.id == *id))
-        .filter(|candidate| candidate.enabled)
-        .collect::<Vec<_>>();
-    if selected_skills.is_empty() {
-        return None;
-    }
-
-    let mut section = String::from("# Skills\n\n");
-    section.push_str(
-        "These local skills are available to the selected agent and may extend workflow guidance or specialist behavior.\n",
-    );
-    for skill in selected_skills {
-        let sandbox_scope = if skill.allow_outside_sandbox {
-            "outside_sandbox_allowed"
-        } else {
-            "workspace_only"
-        };
-        section.push_str(&format!(
-            "\n## {} (`{}`)\n- Path: `{}`\n- Scope: `{}`\n",
-            skill.name,
-            skill.id,
-            skill.path.trim(),
-            sandbox_scope
-        ));
-    }
-
-    Some(section.trim().to_string())
-}
-
-fn build_sub_agent_prompt_section(config: &SirixConfig, agent: &AgentConfig) -> Option<String> {
-    let sub_agents = agent
-        .sub_agent_ids
-        .iter()
-        .filter_map(|id| config.agents.iter().find(|candidate| candidate.id == *id))
-        .filter(|candidate| candidate.enabled)
-        .collect::<Vec<_>>();
-    if sub_agents.is_empty() {
-        return None;
-    }
-
-    let mut section = String::from("# Sub Agents\n\n");
-    section.push_str(
-        "These Sirix agent profiles can be selected or referenced as sub-agents in this workspace.\n",
-    );
-    for sub_agent in sub_agents {
-        section.push_str(&format!("\n## {} (`{}`)\n", sub_agent.name, sub_agent.id));
-        if !sub_agent.description.trim().is_empty() {
-            section.push_str(&format!(
-                "- Description: {}\n",
-                sub_agent.description.trim()
-            ));
-        } else {
-            section.push_str("- Description: No description provided.\n");
-        }
-        section.push_str(&format!(
-            "- Model: `{}` / `{}`\n",
-            sub_agent.provider_id, sub_agent.model_id
-        ));
-    }
-
-    Some(section.trim().to_string())
-}
-
-fn build_builtin_tool_prompt_section(tool_ids: &[String]) -> Option<String> {
-    if tool_ids.is_empty() {
-        return None;
-    }
-
-    let mut section = String::from("# Builtin Tools\n\n");
-    section.push_str(
-        "Only the builtin tools listed below should be treated as available. Each entry describes the intended use of that tool inside Sirix.\n",
-    );
-    for tool_id in tool_ids {
-        let description = builtin_tool_prompt_description(tool_id.as_str());
-        section.push_str(&format!("\n## `{tool_id}`\n{description}\n"));
-    }
-    Some(section.trim().to_string())
-}
-
-// The preview should expose the same intent and calling surface the model will
-// see conceptually, instead of only listing opaque tool ids. Keeping these
-// descriptions centralized here also avoids the settings page drifting away
-// from the runtime capabilities when more tools are added later.
-fn builtin_tool_prompt_description(tool_id: &str) -> &'static str {
-    match tool_id {
-        "shell" => {
-            "Run a shell command in the workspace. Use this for short, direct command execution when no interactive follow-up is required."
-        }
-        "shell_command" => {
-            "Run a structured shell command request. Use this when the runtime expects a shell invocation with explicit command arguments and approval handling."
-        }
-        "exec_command" => {
-            "Start a command in a PTY and capture its output. Typical inputs include `cmd`, optional `workdir`, `yield_time_ms`, and `max_output_tokens`."
-        }
-        "write_stdin" => {
-            "Send additional input to a command that is already running in an interactive PTY session. Use it to answer prompts, continue a REPL, or poll for more output."
-        }
-        "apply_patch" => {
-            "Edit files through a structured patch payload. Prefer this when making targeted code changes so the diff is explicit and reviewable."
-        }
-        "update_plan" => {
-            "Update the visible execution plan for the current task. Use it to record steps, statuses, and short explanations while working."
-        }
-        "request_user_input" => {
-            "Pause execution and ask the user a short structured question with recommended options. Use this only when a blocking decision cannot be inferred safely."
-        }
-        "request_permissions" => {
-            "Request extra `network` or `file_system` permissions before attempting an operation that would otherwise be blocked."
-        }
-        "view_image" => {
-            "Attach a local image from disk so the model can inspect it in context. Use this before reasoning about screenshots or other local visual assets."
-        }
-        "web_search" => {
-            "Search the web and optionally open result pages for up-to-date information. Use it when current external facts or references are required."
-        }
-        "image_generation" => {
-            "Generate or edit images through the model-backed image tool when the task requires bitmap asset creation or transformation."
-        }
-        "code_mode" => {
-            "Use the code-mode helper to inspect or generate tool-driven coding workflows when the runtime exposes a code-mode capability."
-        }
-        "js_repl" => {
-            "Execute JavaScript snippets in the configured JS runtime. Use it for fast calculations, DOM-less script evaluation, or small data transformations."
-        }
-        "js_repl_reset" => {
-            "Reset the JavaScript REPL session so the next `js_repl` call starts from a clean state."
-        }
-        "list_dir" => {
-            "List directories and files from the local workspace when the runtime exposes directory browsing as a dedicated builtin."
-        }
-        "list_mcp_resources" => {
-            "List direct MCP resources that a connected MCP server exposes."
-        }
-        "list_mcp_resource_templates" => {
-            "List MCP resource templates that can later be materialized or read."
-        }
-        "read_mcp_resource" => {
-            "Read a concrete MCP resource by URI after discovering it from the MCP resource listings."
-        }
-        "spawn_agent" => {
-            "Create a sub-agent for a bounded parallel task. Use it only when delegation is explicitly allowed and the subtask is independent enough to run separately."
-        }
-        "send_message" => {
-            "Send an additional message to an existing sub-agent so it can continue, refine, or redirect its assigned work."
-        }
-        "followup_task" => {
-            "Schedule or enqueue a follow-up task for later execution when the runtime exposes deferred task orchestration."
-        }
-        "wait_agent" => {
-            "Wait for one or more sub-agents to complete and return their final status."
-        }
-        "close_agent" => {
-            "Close a sub-agent and release its resources once its work is no longer needed."
-        }
-        "list_agents" => {
-            "List available sub-agents or delegated agent sessions that currently exist in the runtime."
-        }
-        _ => "Builtin tool available for this agent.",
-    }
-}
-
-async fn build_mcp_server_prompt_section(
-    config: &SirixConfig,
-    agent: &AgentConfig,
-    sirix_home: &Path,
-    workspace_root: Option<&Path>,
-) -> anyhow::Result<Option<String>> {
-    let selected_servers = config
-        .mcp_servers
-        .iter()
-        .filter(|candidate| candidate.enabled)
-        .filter(|candidate| agent.mcp_server_ids.contains(&candidate.id))
-        .collect::<Vec<_>>();
-    if selected_servers.is_empty() || !config.mcp.enabled {
-        return Ok(None);
-    }
-
-    let codex_home = sirix_home.join("runtime").join("prompt-preview");
-    fs::create_dir_all(&codex_home)
-        .with_context(|| format!("failed to create preview MCP home {}", codex_home.display()))?;
-
-    let mut section = String::from("# MCP Servers\n\n");
-    section.push_str(
-        "The selected agent can access the following MCP servers. The preview expands each server into its currently discoverable tools, resources, and schemas.\n",
-    );
-
-    for server in selected_servers {
-        let discovery =
-            discover_mcp_server_capabilities(server, workspace_root, codex_home.as_path()).await;
-        section.push_str(&format!("\n## {} (`{}`)\n", server.name, server.id));
-        section.push_str(&format!(
-            "- Approval Mode: `{}`\n",
-            prompt_approval_mode_label(&server.approval_mode)
-        ));
-        section.push_str(&format!(
-            "- Transport: `{}`\n",
-            preview_mcp_transport_label(server)?
-        ));
-        match discovery {
-            Ok(discovery) => {
-                if let Some(instructions) = discovery
-                    .instructions
-                    .as_deref()
-                    .filter(|value| !value.trim().is_empty())
-                {
-                    section.push_str("\n### Server Instructions\n");
-                    section.push_str(instructions.trim());
-                    section.push('\n');
-                }
-
-                render_mcp_tools_into_section(&mut section, &discovery.tools);
-                render_mcp_resource_templates_into_section(
-                    &mut section,
-                    &discovery.resource_templates,
-                );
-                render_mcp_resources_into_section(&mut section, &discovery.resources);
-
-                if !discovery.warnings.is_empty() {
-                    section.push_str("\n### Discovery Notes\n");
-                    for warning in discovery.warnings {
-                        section.push_str(&format!("- {warning}\n"));
-                    }
-                }
-
-                if discovery.tools.is_empty()
-                    && discovery.resource_templates.is_empty()
-                    && discovery.resources.is_empty()
-                {
-                    section.push_str(
-                        "\n### Discovery Result\n- No tools or resources were discovered during preview. The server may require authentication, may have failed to initialize, or may simply expose no prompt-visible capabilities.\n",
-                    );
-                }
-            }
-            Err(error) => {
-                section.push_str("\n### Discovery Error\n");
-                section.push_str(&format!("- {}\n", error));
-            }
-        }
-    }
-
-    Ok(Some(section.trim().to_string()))
-}
-
-#[derive(Debug, Clone)]
-struct PreviewMcpServerDiscovery {
-    instructions: Option<String>,
-    tools: Vec<Tool>,
-    resource_templates: Vec<ResourceTemplate>,
-    resources: Vec<Resource>,
-    warnings: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-enum PreviewMcpTransport {
-    Stdio {
-        program: OsString,
-        args: Vec<OsString>,
-        env: Option<HashMap<OsString, OsString>>,
-        env_vars: Vec<String>,
-        cwd: Option<PathBuf>,
-    },
-    Http {
-        url: String,
-    },
-}
-
-async fn discover_mcp_server_capabilities(
-    server: &McpServerConfig,
-    workspace_root: Option<&Path>,
-    _codex_home: &Path,
-) -> anyhow::Result<PreviewMcpServerDiscovery> {
-    let transport = build_preview_mcp_transport(server, workspace_root)?;
-    match transport {
-        PreviewMcpTransport::Stdio {
-            program,
-            args,
-            env,
-            env_vars,
-            cwd,
-        } => discover_stdio_mcp_server_capabilities(server, program, args, env, env_vars, cwd).await,
-        PreviewMcpTransport::Http { url, .. } => Ok(PreviewMcpServerDiscovery {
-            instructions: None,
-            tools: Vec::new(),
-            resource_templates: Vec::new(),
-            resources: Vec::new(),
-            warnings: vec![format!(
-                "HTTP MCP preview is not expanded yet. Server metadata is shown for `{url}`, but live tool/schema discovery currently runs only for stdio MCP servers."
-            )],
-        }),
-    }
-}
-
-#[derive(Clone)]
-struct PreviewClientHandler {
-    client_info: ClientInfo,
-}
-
-impl ClientHandler for PreviewClientHandler {
-    fn get_info(&self) -> ClientInfo {
-        self.client_info.clone()
-    }
-
-    async fn create_elicitation(
-        &self,
-        _request: CreateElicitationRequestParams,
-        _context: RequestContext<RoleClient>,
-    ) -> Result<CreateElicitationResult, rmcp::ErrorData> {
-        Err(rmcp::ErrorData::internal_error(
-            "MCP elicitation is not supported while rendering prompt preview".to_string(),
-            None,
-        ))
-    }
-}
-
-fn preview_client_info() -> ClientInfo {
-    ClientInfo {
-        meta: None,
-        capabilities: ClientCapabilities {
-            experimental: None,
-            extensions: None,
-            roots: None,
-            sampling: None,
-            elicitation: Some(ElicitationCapability {
-                form: Some(FormElicitationCapability {
-                    schema_validation: None,
-                }),
-                url: None,
-            }),
-            tasks: None,
-        },
-        client_info: Implementation {
-            name: "sirix-preview".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            title: Some("Sirix Prompt Preview".into()),
-            description: None,
-            icons: None,
-            website_url: None,
-        },
-        protocol_version: rmcp::model::ProtocolVersion::V_2025_06_18,
-    }
-}
-
-async fn discover_stdio_mcp_server_capabilities(
-    server: &McpServerConfig,
-    program: OsString,
-    args: Vec<OsString>,
-    env_overrides: Option<HashMap<OsString, OsString>>,
-    env_vars: Vec<String>,
-    cwd: Option<PathBuf>,
-) -> anyhow::Result<PreviewMcpServerDiscovery> {
-    let mut command = Command::new(&program);
-    command
-        .kill_on_drop(true)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .args(&args);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    if let Some(env_overrides) = env_overrides {
-        command.envs(env_overrides);
-    }
-    for key in env_vars {
-        if let Ok(value) = env::var(&key) {
-            command.env(&key, value);
-        }
-    }
-    #[cfg(unix)]
-    command.process_group(0);
-
-    let program_label = program.to_string_lossy().to_string();
-    let (transport, stderr) = TokioChildProcess::builder(command)
-        .spawn()
-        .with_context(|| format!("failed to spawn MCP preview process {}", server.id))?;
-    if let Some(stderr) = stderr {
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            loop {
-                match reader.next_line().await {
-                    Ok(Some(line)) => {
-                        tracing::info!("MCP preview stderr ({program_label}): {line}");
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        tracing::warn!(
-                            "Failed to read MCP preview stderr ({program_label}): {error}"
-                        );
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    let service = tokio::time::timeout(
-        Duration::from_secs(6),
-        service::serve_client(
-            PreviewClientHandler {
-                client_info: preview_client_info(),
-            },
-            transport,
-        ),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out handshaking with MCP server after 6s"))?
-    .map_err(|error| anyhow::anyhow!("handshaking with MCP server failed: {error}"))?;
-
-    let initialize_result = service
-        .peer()
-        .peer_info()
+        .find(|item| item.id == agent.provider_id && item.enabled)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("handshake succeeded but server info was missing"))?;
+        .with_context(|| {
+            format!(
+                "provider {} not found for agent {}",
+                agent.provider_id, agent.id
+            )
+        })?;
+    let model = provider
+        .models
+        .iter()
+        .find(|item| item.id == agent.model_id && item.enabled)
+        .cloned()
+        .with_context(|| format!("model {} not found for agent {}", agent.model_id, agent.id))?;
+    let preview_storage_dir = agent_preview_session_storage_dir(sirix_home, agent);
+    fs::create_dir_all(&preview_storage_dir)
+        .with_context(|| format!("failed to create {}", preview_storage_dir.display()))?;
 
-    let mut warnings = Vec::new();
-    let tools = match tokio::time::timeout(Duration::from_secs(4), service.list_tools(None)).await {
-        Ok(Ok(result)) => result.tools,
-        Ok(Err(error)) => {
-            warnings.push(format!("tools/list failed: {error}"));
-            Vec::new()
-        }
-        Err(_) => {
-            warnings.push("tools/list timed out after 4s".to_string());
-            Vec::new()
-        }
+    let launch = AiLaunchConfig {
+        effective_config: config.clone(),
+        agent: agent.clone(),
+        provider,
+        model,
+        session_providers: config.providers.clone(),
+        codex_home: sirix_home.join("runtime").join("prompt-preview"),
+        session_storage_dir: preview_storage_dir.clone(),
+        workspace_root: workspace_root.clone(),
+        workspace_source: None,
     };
-    let resources =
-        match tokio::time::timeout(Duration::from_secs(4), service.list_resources(None)).await {
-            Ok(Ok(result)) => result.resources,
-            Ok(Err(error)) => {
-                warnings.push(format!("resources/list failed: {error}"));
-                Vec::new()
-            }
-            Err(_) => {
-                warnings.push("resources/list timed out after 4s".to_string());
-                Vec::new()
-            }
-        };
-    let resource_templates = match tokio::time::timeout(
-        Duration::from_secs(4),
-        service.list_resource_templates(None),
+    let bridge_config = build_codex_bridge_toml(
+        config.clone(),
+        &launch,
+        workspace_root.as_path(),
+        /*local_ws_port*/ 0,
+        Uuid::nil(),
+    )?;
+    let cli_overrides = bridge_config
+        .into_iter()
+        .collect::<Vec<(String, TomlValue)>>();
+    let codex_config = Config::load_default_with_cli_overrides_for_codex_home(
+        launch.codex_home.clone(),
+        cli_overrides,
     )
-    .await
-    {
-        Ok(Ok(result)) => result.resource_templates,
-        Ok(Err(error)) => {
-            warnings.push(format!("resources/templates/list failed: {error}"));
-            Vec::new()
-        }
-        Err(_) => {
-            warnings.push("resources/templates/list timed out after 4s".to_string());
-            Vec::new()
-        }
+    .context("failed to build Codex preview config")?;
+
+    let runtime_path = preview_storage_dir.join(SIRIX_AGENT_RUNTIME_FILE_NAME);
+    let runtime = SessionAgentRuntimeConfig {
+        agent_id: agent.id.clone(),
+        shell_mode: agent.approval_mode.clone(),
+        builtin_tool_ids: agent.builtin_tool_ids.clone(),
     };
+    let serialized_runtime =
+        serde_json::to_string_pretty(&runtime).context("failed to serialize preview runtime")?;
+    fs::write(&runtime_path, serialized_runtime)
+        .with_context(|| format!("failed to write {}", runtime_path.display()))?;
 
-    Ok(PreviewMcpServerDiscovery {
-        instructions: initialize_result.instructions,
-        tools,
-        resource_templates,
-        resources,
-        warnings,
-    })
-}
-
-fn build_preview_mcp_transport(
-    server: &McpServerConfig,
-    workspace_root: Option<&Path>,
-) -> anyhow::Result<PreviewMcpTransport> {
-    let value = parse_mcp_config_value(&server.json_config)
-        .with_context(|| format!("invalid mcp config for {}", server.id))?;
-    let table = value
-        .as_table()
-        .context("MCP config must be a table/object")?;
-    let transport = table.get("transport").and_then(TomlValue::as_table);
-
-    match infer_mcp_transport(&value)? {
-        McpTransportKind::Stdio => {
-            let program = lookup_non_empty_string(table, &["command", "cmd"])
-                .or_else(|| {
-                    transport
-                        .and_then(|nested| lookup_non_empty_string(nested, &["command", "cmd"]))
-                })
-                .context("stdio MCP transport requires command/cmd")?;
-            let args = lookup_string_array(table, &["args"])?
-                .or_else(|| {
-                    transport
-                        .and_then(|nested| lookup_string_array(nested, &["args"]).ok().flatten())
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .map(OsString::from)
-                .collect::<Vec<_>>();
-            let env = lookup_string_map(table, &["env"])?
-                .or_else(|| {
-                    transport.and_then(|nested| lookup_string_map(nested, &["env"]).ok().flatten())
-                })
-                .map(|items| {
-                    items
-                        .into_iter()
-                        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-                        .collect::<HashMap<_, _>>()
-                });
-            let env_vars = lookup_string_array(table, &["env_vars"])?
-                .or_else(|| {
-                    transport.and_then(|nested| {
-                        lookup_string_array(nested, &["env_vars"]).ok().flatten()
-                    })
-                })
-                .unwrap_or_default();
-            let cwd = lookup_non_empty_string(table, &["cwd"])
-                .or_else(|| transport.and_then(|nested| lookup_non_empty_string(nested, &["cwd"])))
-                .map(PathBuf::from)
-                .map(|path| {
-                    if path.is_relative() {
-                        workspace_root.map_or(path.clone(), |root| root.join(path))
-                    } else {
-                        path
-                    }
-                });
-            Ok(PreviewMcpTransport::Stdio {
-                program: OsString::from(program),
-                args,
-                env,
-                env_vars,
-                cwd,
-            })
-        }
-        McpTransportKind::Http => {
-            let url = lookup_non_empty_string(table, &["url", "endpoint"])
-                .or_else(|| {
-                    transport
-                        .and_then(|nested| lookup_non_empty_string(nested, &["url", "endpoint"]))
-                })
-                .context("http MCP transport requires url/endpoint")?;
-            let bearer_token = lookup_non_empty_string(table, &["bearer_token"])
-                .or_else(|| {
-                    transport.and_then(|nested| lookup_non_empty_string(nested, &["bearer_token"]))
-                })
-                .or_else(|| {
-                    lookup_non_empty_string(table, &["bearer_token_env_var"])
-                        .and_then(|key| env::var(key).ok())
-                })
-                .or_else(|| {
-                    transport
-                        .and_then(|nested| {
-                            lookup_non_empty_string(nested, &["bearer_token_env_var"])
-                        })
-                        .and_then(|key| env::var(key).ok())
-                });
-            let http_headers = lookup_string_map(table, &["http_headers"])?
-                .or_else(|| {
-                    transport.and_then(|nested| {
-                        lookup_string_map(nested, &["http_headers"]).ok().flatten()
-                    })
-                })
-                .map(|items| items.into_iter().collect::<HashMap<_, _>>());
-            let env_http_headers = lookup_string_map(table, &["env_http_headers"])?
-                .or_else(|| {
-                    transport.and_then(|nested| {
-                        lookup_string_map(nested, &["env_http_headers"])
-                            .ok()
-                            .flatten()
-                    })
-                })
-                .map(|items| items.into_iter().collect::<HashMap<_, _>>());
-            let _ = (bearer_token, http_headers, env_http_headers);
-            Ok(PreviewMcpTransport::Http { url })
-        }
+    let _guard = PROMPT_PREVIEW_RUNTIME_ENV_LOCK.lock().await;
+    let previous_runtime_env = env::var(SIRIX_AGENT_RUNTIME_PATH_ENV).ok();
+    env::set_var(SIRIX_AGENT_RUNTIME_PATH_ENV, runtime_path.as_os_str());
+    // Preview the actual Responses API request shape generated by the embedded
+    // Codex runtime. We intentionally pass an empty user-input list here so the
+    // preview focuses on static agent context (system prompt, developer blocks,
+    // tools, skills, MCP wiring) instead of echoing a transient conversation.
+    let request_result = build_responses_request_preview(codex_config, Vec::new()).await;
+    match previous_runtime_env {
+        Some(previous) => env::set_var(SIRIX_AGENT_RUNTIME_PATH_ENV, previous),
+        None => env::remove_var(SIRIX_AGENT_RUNTIME_PATH_ENV),
     }
-}
+    let request = request_result.context("failed to build Codex request preview")?;
 
-fn render_mcp_tools_into_section(section: &mut String, tools: &[Tool]) {
-    if tools.is_empty() {
-        return;
-    }
-
-    let mut ordered = tools.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.name.cmp(&right.name));
-
-    section.push_str("\n### Available Tools\n");
-    for tool in ordered {
-        section.push_str(&format!("\n- `{}`", tool.name));
-        if let Some(description) = tool
-            .description
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            section.push_str(&format!(": {}", description.trim()));
-        }
-        section.push('\n');
-        section.push_str("  Input Schema:\n");
-        section.push_str("  ```json\n");
-        let input_schema = serde_json::to_value(tool.input_schema.as_ref())
-            .unwrap_or_else(|_| serde_json::json!({}));
-        section.push_str(&indent_json(&input_schema));
-        section.push_str("\n  ```\n");
-    }
-}
-
-fn render_mcp_resource_templates_into_section(
-    section: &mut String,
-    templates: &[ResourceTemplate],
-) {
-    if templates.is_empty() {
-        return;
-    }
-
-    section.push_str("\n### Resource Templates\n");
-    let mut ordered = templates.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.uri_template.cmp(&right.uri_template));
-    for template in ordered {
-        let description = template.description.as_deref().unwrap_or("No description.");
-        section.push_str(&format!(
-            "- `{}` (`{}`): {}\n",
-            template.uri_template, template.name, description
-        ));
-    }
-}
-
-fn render_mcp_resources_into_section(section: &mut String, resources: &[Resource]) {
-    if resources.is_empty() {
-        return;
-    }
-
-    section.push_str("\n### Direct Resources\n");
-    let mut ordered = resources.iter().collect::<Vec<_>>();
-    ordered.sort_by(|left, right| left.uri.cmp(&right.uri));
-    for resource in ordered {
-        let description = resource.description.as_deref().unwrap_or("No description.");
-        section.push_str(&format!(
-            "- `{}` (`{}`): {}\n",
-            resource.uri, resource.name, description
-        ));
-    }
-}
-
-fn indent_json(value: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(value)
-        .unwrap_or_else(|_| value.to_string())
-        .lines()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn preview_mcp_transport_label(server: &McpServerConfig) -> anyhow::Result<&'static str> {
-    let value = parse_mcp_config_value(&server.json_config)
-        .with_context(|| format!("invalid mcp config for {}", server.id))?;
-    match infer_mcp_transport(&value)
-        .with_context(|| format!("mcp server {} has unknown transport", server.id))?
-    {
-        McpTransportKind::Stdio => Ok("stdio"),
-        McpTransportKind::Http => Ok("http"),
-    }
-}
-
-fn prompt_approval_mode_label(mode: &ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Allow => "allow",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Deny => "deny",
-    }
+    serde_json::to_value(request).context("failed to serialize request preview")
 }
 
 fn render_exec_policy_prefix_rule(
@@ -3346,7 +3043,7 @@ fn merge_projects_into_config_path(
     let mut root = if path.is_file() {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        toml::from_str::<TomlValue>(&raw)
+        parse_toml_document_value(&raw)
             .with_context(|| format!("failed to parse {}", path.display()))?
     } else {
         TomlValue::Table(toml::map::Map::new())
@@ -3481,6 +3178,10 @@ fn render_toml_key(key: &str) -> String {
 mod tests {
     use super::*;
 
+    fn unique_session_storage_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("sirix-{label}-{}", Uuid::new_v4()))
+    }
+
     fn test_agent(provider_id: &str, model_id: &str, prompt: &str) -> AgentConfig {
         AgentConfig {
             id: "agent".to_string(),
@@ -3504,6 +3205,209 @@ mod tests {
             legacy_disabled_mcp_server_ids: Vec::new(),
             legacy_capability_rules: Vec::new(),
         }
+    }
+
+    #[test]
+    fn role_file_stem_escapes_path_and_windows_forbidden_characters() {
+        let mut used = HashSet::new();
+        let stem = role_file_stem_for_agent_id("../agent\\name:*?\"<>|", &mut used);
+        assert_eq!(stem, "~2e~2e~2fagent~5cname~3a~2a~3f~22~3c~3e~7c");
+        assert!(!stem.contains('/'));
+        assert!(!stem.contains('\\'));
+    }
+
+    #[test]
+    fn write_sirix_agent_role_files_avoids_windows_reserved_basename() {
+        let role_dir = unique_session_storage_dir("reserved-role-stem");
+        let mut config = SirixConfig::default();
+        let mut agent = test_agent(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID, "reserved");
+        agent.id = "CON".to_string();
+        config.agents = vec![agent.clone()];
+
+        let role_files = write_sirix_agent_role_files(&config, &config.providers, &role_dir)
+            .expect("role files should be generated");
+        let role_path = role_files
+            .get(agent.id.as_str())
+            .expect("role path should exist for CON agent");
+
+        assert!(role_path.starts_with(&role_dir));
+        assert_eq!(role_path.parent(), Some(role_dir.as_path()));
+        assert_eq!(role_path.extension().and_then(|value| value.to_str()), Some("toml"));
+        assert_eq!(
+            role_path.file_name().and_then(|value| value.to_str()),
+            Some("CON~.toml")
+        );
+        assert!(role_path.is_file());
+    }
+
+    #[test]
+    fn normalized_config_migrates_legacy_default_agent_to_builtin_codex() {
+        let mut config = SirixConfig::default();
+        config.agents = vec![AgentConfig {
+            id: LEGACY_DEFAULT_AGENT_ID.to_string(),
+            name: "Default Agent".to_string(),
+            description: "Default Sirix coding agent.".to_string(),
+            provider_id: DEFAULT_PROVIDER_ID.to_string(),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            fallback_provider_id: String::new(),
+            fallback_model_id: String::new(),
+            system_prompt: "legacy override".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            builtin_tool_ids: vec!["shell".to_string()],
+            skill_ids: vec!["skill-a".to_string()],
+            mcp_server_ids: vec!["mcp-a".to_string()],
+            sub_agent_ids: vec!["reviewer".to_string()],
+            enabled: false,
+            legacy_builtin_tools_enabled: None,
+            legacy_enabled_skill_ids: Vec::new(),
+            legacy_disabled_skill_ids: Vec::new(),
+            legacy_enabled_mcp_server_ids: Vec::new(),
+            legacy_disabled_mcp_server_ids: Vec::new(),
+            legacy_capability_rules: Vec::new(),
+        }];
+
+        let normalized = normalized_sirix_config(&config);
+        assert_eq!(normalized.agents.len(), 1);
+        let agent = &normalized.agents[0];
+        assert_eq!(agent.id, DEFAULT_AGENT_ID);
+        assert_eq!(agent.name, DEFAULT_AGENT_NAME);
+        assert_eq!(agent.description, DEFAULT_AGENT_DESCRIPTION);
+        assert_eq!(agent.provider_id, DEFAULT_PROVIDER_ID);
+        assert_eq!(agent.model_id, DEFAULT_MODEL_ID);
+        assert_eq!(agent.skill_ids, vec!["skill-a".to_string()]);
+        assert_eq!(agent.mcp_server_ids, vec!["mcp-a".to_string()]);
+        assert_eq!(agent.sub_agent_ids, vec!["reviewer".to_string()]);
+        assert_eq!(agent.system_prompt, "");
+        assert_eq!(agent.builtin_tool_ids, default_builtin_tool_ids());
+        assert!(agent.enabled);
+    }
+
+    #[test]
+    fn bridge_injects_sirix_sub_agents_as_codex_roles() {
+        let session_dir = unique_session_storage_dir("roles");
+        let codex_home = unique_session_storage_dir("roles-codex-home");
+        let skill = SkillConfig {
+            id: "review-skill".to_string(),
+            name: "Review Skill".to_string(),
+            path: "/tmp/review-skill".to_string(),
+            enabled: true,
+            allow_outside_sandbox: false,
+        };
+        let mcp_server = McpServerConfig {
+            id: "docs".to_string(),
+            name: "Docs".to_string(),
+            enabled: true,
+            approval_mode: ApprovalMode::Ask,
+            enabled_tools: vec!["search".to_string()],
+            disabled_tools: Vec::new(),
+            json_config: r#"
+command = "docs-mcp"
+args = ["serve"]
+"#
+            .to_string(),
+        };
+        let reviewer = AgentConfig {
+            id: "reviewer".to_string(),
+            name: "Reviewer".to_string(),
+            description: "Review-focused Sirix agent.".to_string(),
+            provider_id: DEFAULT_PROVIDER_ID.to_string(),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            fallback_provider_id: String::new(),
+            fallback_model_id: String::new(),
+            system_prompt: "Review carefully".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            builtin_tool_ids: default_builtin_tool_ids(),
+            skill_ids: vec![skill.id.clone()],
+            mcp_server_ids: vec![mcp_server.id.clone()],
+            sub_agent_ids: Vec::new(),
+            enabled: true,
+            legacy_builtin_tools_enabled: None,
+            legacy_enabled_skill_ids: Vec::new(),
+            legacy_disabled_skill_ids: Vec::new(),
+            legacy_enabled_mcp_server_ids: Vec::new(),
+            legacy_disabled_mcp_server_ids: Vec::new(),
+            legacy_capability_rules: Vec::new(),
+        };
+        let root_agent = AgentConfig {
+            id: DEFAULT_AGENT_ID.to_string(),
+            name: DEFAULT_AGENT_NAME.to_string(),
+            description: DEFAULT_AGENT_DESCRIPTION.to_string(),
+            provider_id: DEFAULT_PROVIDER_ID.to_string(),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            fallback_provider_id: String::new(),
+            fallback_model_id: String::new(),
+            system_prompt: String::new(),
+            approval_mode: ApprovalMode::Ask,
+            builtin_tool_ids: default_builtin_tool_ids(),
+            skill_ids: Vec::new(),
+            mcp_server_ids: Vec::new(),
+            sub_agent_ids: vec![reviewer.id.clone()],
+            enabled: true,
+            legacy_builtin_tools_enabled: None,
+            legacy_enabled_skill_ids: Vec::new(),
+            legacy_disabled_skill_ids: Vec::new(),
+            legacy_enabled_mcp_server_ids: Vec::new(),
+            legacy_disabled_mcp_server_ids: Vec::new(),
+            legacy_capability_rules: Vec::new(),
+        };
+
+        let config = SirixConfig {
+            skills: vec![skill.clone()],
+            mcp_servers: vec![mcp_server.clone()],
+            agents: vec![root_agent.clone(), reviewer.clone()],
+            ..SirixConfig::default()
+        };
+        let provider = config.providers[0].clone();
+        let launch = AiLaunchConfig {
+            effective_config: config.clone(),
+            agent: root_agent,
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider],
+            codex_home: codex_home.clone(),
+            session_storage_dir: session_dir.clone(),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        };
+
+        let bridge = build_codex_bridge_toml(
+            config,
+            &launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            Uuid::nil(),
+        )
+        .expect("bridge config should build");
+
+        let role = bridge
+            .get("agents")
+            .and_then(TomlValue::as_table)
+            .and_then(|agents| agents.get("reviewer"))
+            .and_then(TomlValue::as_table)
+            .expect("reviewer role should exist");
+        let description = role
+            .get("description")
+            .and_then(TomlValue::as_str)
+            .expect("role description should exist");
+        assert!(description.contains("Review-focused Sirix agent."));
+        assert!(description.contains("Review Skill"));
+        assert!(description.contains("Docs"));
+
+        let role_path = role
+            .get("config_file")
+            .and_then(TomlValue::as_str)
+            .map(PathBuf::from)
+            .expect("role config file should exist");
+        let body = fs::read_to_string(&role_path).expect("role config should be readable");
+        assert!(body.contains("developer_instructions = \"Review carefully\""));
+        assert!(body.contains("[mcp_servers.docs]"));
+        assert!(body.contains("[[skills.config]]"));
+
+        let cli_overrides = bridge.into_iter().collect::<Vec<(String, TomlValue)>>();
+        let loaded =
+            Config::load_default_with_cli_overrides_for_codex_home(codex_home, cli_overrides)
+                .expect("bridge config should deserialize into Codex config");
+        assert!(loaded.agent_roles.contains_key("reviewer"));
     }
 
     #[test]
@@ -3536,7 +3440,7 @@ mod tests {
             model: provider.models[0].clone(),
             session_providers: vec![provider],
             codex_home: PathBuf::from("/tmp/.sirix"),
-            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
+            session_storage_dir: unique_session_storage_dir("proxy"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };
@@ -3690,7 +3594,7 @@ mod tests {
             model: provider.models[0].clone(),
             session_providers: vec![provider.clone()],
             codex_home: PathBuf::from("/tmp/.sirix"),
-            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
+            session_storage_dir: unique_session_storage_dir("close-toggle"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };
@@ -3799,7 +3703,7 @@ mod tests {
             model: active_provider.models[0].clone(),
             session_providers: vec![openai_provider, active_provider.clone()],
             codex_home: PathBuf::from("/tmp/.sirix"),
-            session_storage_dir: PathBuf::from("/tmp/.sirix/runtime/sessions/test"),
+            session_storage_dir: unique_session_storage_dir("providers"),
             workspace_root: PathBuf::from("/tmp/workspace"),
             workspace_source: None,
         };

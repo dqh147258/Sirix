@@ -343,7 +343,7 @@ class AiSettingsToggleTile extends StatelessWidget {
   final String title;
   final String? subtitle;
   final bool value;
-  final ValueChanged<bool> onChanged;
+  final ValueChanged<bool>? onChanged;
   final double? width;
 
   @override
@@ -393,7 +393,7 @@ class AiSettingsToggleTile extends StatelessWidget {
           Switch(
             value: value,
             onChanged: onChanged,
-            activeColor: palette.primaryBright,
+            activeThumbColor: palette.primaryBright,
           ),
         ],
       ),

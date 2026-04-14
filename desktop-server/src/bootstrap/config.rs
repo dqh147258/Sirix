@@ -1,7 +1,7 @@
 use std::fs;
 
 use serde::Deserialize;
-use toml::{map::Map, Value};
+use toml::{map::Map, Table, Value};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -102,7 +102,10 @@ fn default_manual_approve_timeout_seconds() -> u64 {
 
 fn read_toml(path: &str) -> anyhow::Result<Value> {
     let content = fs::read_to_string(path)?;
-    Ok(content.parse::<Value>()?)
+    // `toml` 0.9 no longer treats `Value` parsing as "parse a full TOML document".
+    // Desktop Server config files are document-style TOML with top-level tables
+    // such as `[backend]`, so parse the full document as a table explicitly.
+    Ok(Value::Table(toml::from_str::<Table>(&content)?))
 }
 
 fn apply_env_overrides(root: &mut Value, prefix: &str) -> anyhow::Result<()> {

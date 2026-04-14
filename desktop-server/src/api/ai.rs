@@ -35,9 +35,10 @@ use crate::app::{
         config::{
             build_agent_system_prompt, build_agent_system_prompt_preview,
             duplicate_session_text_model_ids, effective_model_context_window,
-            infer_provider_default_context_window, resolve_session_picker_model,
-            session_picker_model_id, validate_sirix_config, ApprovalMode, ModelConfig, ModelKind,
-            ProviderConfig, ProviderKind, ShellRulesConfig, SirixConfig,
+            infer_provider_default_context_window, normalized_sirix_config,
+            resolve_session_picker_model, session_picker_model_id, validate_sirix_config,
+            ApprovalMode, ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig,
+            SirixConfig,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -139,7 +140,7 @@ pub struct AgentSystemPromptPreviewRequest {
 
 #[derive(Debug, Serialize)]
 pub struct AgentSystemPromptPreviewResponse {
-    pub prompt: String,
+    pub preview: JsonValue,
 }
 
 pub async fn get_openai_auth_status(
@@ -212,12 +213,13 @@ pub async fn set_ai_config(
     State(state): State<AppState>,
     Json(payload): Json<SirixConfig>,
 ) -> Result<Json<SirixConfig>, ApiError> {
-    validate_sirix_config(&payload).map_err(ApiError::bad_request_anyhow)?;
+    let normalized = normalized_sirix_config(&payload);
+    validate_sirix_config(&normalized).map_err(ApiError::bad_request_anyhow)?;
     state
         .sirix_config_store
-        .save_global(&payload)
+        .save_global(&normalized)
         .map_err(ApiError::internal)?;
-    Ok(Json(payload))
+    Ok(Json(normalized))
 }
 
 pub async fn get_shell_rules(
@@ -258,9 +260,9 @@ pub async fn preview_agent_system_prompt(
     State(state): State<AppState>,
     Json(payload): Json<AgentSystemPromptPreviewRequest>,
 ) -> Result<Json<AgentSystemPromptPreviewResponse>, ApiError> {
-    validate_sirix_config(&payload.config).map_err(ApiError::bad_request_anyhow)?;
-    let agent = payload
-        .config
+    let normalized = normalized_sirix_config(&payload.config);
+    validate_sirix_config(&normalized).map_err(ApiError::bad_request_anyhow)?;
+    let agent = normalized
         .agents
         .iter()
         .find(|candidate| candidate.id == payload.agent_id.trim())
@@ -275,14 +277,14 @@ pub async fn preview_agent_system_prompt(
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
     let prompt = build_agent_system_prompt_preview(
-        &payload.config,
+        &normalized,
         &agent,
         state.sirix_config_store.sirix_home(),
         workspace_root.as_deref(),
     )
     .await
     .map_err(ApiError::internal)?;
-    Ok(Json(AgentSystemPromptPreviewResponse { prompt }))
+    Ok(Json(AgentSystemPromptPreviewResponse { preview: prompt }))
 }
 
 pub async fn discover_provider_models(

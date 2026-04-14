@@ -7,7 +7,7 @@ import 'package:infra_api/infra_api.dart';
 
 import 'ai_settings_state.dart';
 
-const String _defaultAgentId = 'default-agent';
+const String _defaultAgentId = 'codex';
 
 class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   AiSettingsViewModel(this._localClient) : super(const AiSettingsState());
@@ -71,7 +71,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     }
   }
 
-  Future<String> previewSystemPrompt({
+  Future<Object?> previewSystemPrompt({
     required SirixAiConfig config,
     required String agentId,
     String? cwd,
@@ -428,6 +428,9 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   }
 
   void removeAgent(String agentId) {
+    if (agentId == _defaultAgentId) {
+      return;
+    }
     final agents =
         state.config.agents.where((item) => item.id != agentId).toList(growable: false);
     final cleanedAgents = [
@@ -461,9 +464,9 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     String? preferredProviderId,
     String? preferredModelId,
   }) {
-    // Provider/Model 页面现在直接维护 Sirix CLI 的“默认模型”。
-    // 运行时默认启动链路仍然以 `default-agent` 为入口，所以这里把页面上的
-    // 默认模型选择同步收敛到 `default-agent`，避免再引入第二套默认模型存储。
+    // Provider/Model 页面现在直接维护 Sirix CLI 的默认 Codex Agent 模型。
+    // 运行时默认启动链路以内置 `codex` Agent 为入口，所以这里把页面上的
+    // 默认模型选择同步收敛到 `codex`，避免再引入第二套默认模型存储。
     final providers = config.providers;
     final existingDefaultAgent = _firstWhereOrNull(
       config.agents,
@@ -506,10 +509,12 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
 
     final defaultAgent = (existingDefaultAgent ?? _buildDefaultAgent()).copyWith(
       id: _defaultAgentId,
-      name: existingDefaultAgent?.name ?? 'Default Agent',
+      name: existingDefaultAgent?.name ?? 'Codex',
       providerId: selected.providerId,
       modelId: selected.modelId,
       enabled: true,
+      systemPrompt: '',
+      builtinToolIds: kBuiltinToolCatalog,
     );
 
     return config.copyWith(agents: [defaultAgent, ...otherAgents]);
@@ -518,8 +523,8 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   AgentConfigModel _buildDefaultAgent() {
     return const AgentConfigModel(
       id: _defaultAgentId,
-      name: 'Default Agent',
-      description: 'Default Sirix coding agent.',
+      name: 'Codex',
+      description: 'Built-in Codex agent with the standard Codex system prompt.',
       providerId: '',
       modelId: '',
       approvalMode: ApprovalMode.ask,

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 
 import 'package:app_core/app_core.dart';
@@ -6,6 +8,10 @@ import 'package:infra_api/infra_api.dart';
 import '../ai_settings_state.dart';
 import '../ai_settings_view_model.dart';
 import '../settings_ui.dart';
+
+const String _builtinCodexAgentId = 'codex';
+
+bool _isBuiltinCodexAgent(AgentConfigModel agent) => agent.id == _builtinCodexAgentId;
 
 class AgentSettingsSection extends StatefulWidget {
   const AgentSettingsSection({
@@ -267,6 +273,7 @@ class _AgentDetailPane extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
+    final isBuiltinCodex = _isBuiltinCodexAgent(agent);
     final skills = state.config.skills.where((item) => agent.skillIds.contains(item.id)).toList();
     final mcpServers =
         state.config.mcpServers.where((item) => agent.mcpServerIds.contains(item.id)).toList();
@@ -320,7 +327,9 @@ class _AgentDetailPane extends StatelessWidget {
                   const SizedBox(width: 16),
                   Switch(
                     value: agent.enabled,
-                    onChanged: (value) => vm.upsertAgent(agent.copyWith(enabled: value)),
+                    onChanged: isBuiltinCodex
+                        ? null
+                        : (value) => vm.upsertAgent(agent.copyWith(enabled: value)),
                     activeThumbColor: palette.primaryBright,
                   ),
                 ],
@@ -347,7 +356,7 @@ class _AgentDetailPane extends StatelessWidget {
                     label: const Text('Preview System Prompt'),
                   ),
                   OutlinedButton.icon(
-                    onPressed: () => vm.removeAgent(agent.id),
+                    onPressed: isBuiltinCodex ? null : () => vm.removeAgent(agent.id),
                     icon: const Icon(Icons.delete_outline_rounded),
                     label: const Text('Delete Agent'),
                   ),
@@ -366,6 +375,12 @@ class _AgentDetailPane extends StatelessWidget {
                   ('Description', agent.description),
                   ('Primary Provider', agent.providerId),
                   ('Primary Model', agent.modelId),
+                  (
+                    'Built-in Profile',
+                    isBuiltinCodex
+                        ? 'Uses the standard Codex system prompt and the full builtin tool set. Only MCP, skills, provider/model, and sub-agents are configurable here.'
+                        : 'No',
+                  ),
                   (
                     'Fallback',
                     agent.fallbackProviderId.trim().isEmpty || agent.fallbackModelId.trim().isEmpty
@@ -413,18 +428,20 @@ class _AgentDetailPane extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Custom System Prompt',
+                isBuiltinCodex ? 'Built-in System Prompt' : 'Custom System Prompt',
                 style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
               ),
               const SizedBox(height: 8),
               Text(
-                agent.systemPrompt.trim().isEmpty
-                    ? 'No additional system prompt has been configured for this agent.'
-                    : agent.systemPrompt,
+                isBuiltinCodex
+                    ? 'This profile always uses the standard Codex system prompt. Desktop Server only adds the shared CLI supplemental prompt plus the agent-specific MCP, skills, and sub-agent runtime config.'
+                    : agent.systemPrompt.trim().isEmpty
+                        ? 'No additional system prompt has been configured for this agent.'
+                        : agent.systemPrompt,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: agent.systemPrompt.trim().isEmpty
+                      color: (isBuiltinCodex || agent.systemPrompt.trim().isEmpty)
                           ? palette.textMuted
                           : palette.textSecondary,
                       height: 1.55,
@@ -517,6 +534,7 @@ Future<AgentConfigModel?> _showAgentDialog(
   final systemPromptController = TextEditingController(
     text: existing?.systemPrompt ?? '',
   );
+  final isBuiltinCodex = existing != null && _isBuiltinCodexAgent(existing);
 
   var providerId = existing?.providerId ?? providers.first.id;
   if (providers.every((provider) => provider.id != providerId)) {
@@ -589,7 +607,13 @@ Future<AgentConfigModel?> _showAgentDialog(
           children: [
             TextField(
               controller: idController,
-              decoration: const InputDecoration(labelText: 'Agent ID'),
+              readOnly: isBuiltinCodex,
+              decoration: InputDecoration(
+                labelText: 'Agent ID',
+                helperText: isBuiltinCodex
+                    ? 'The built-in Codex profile keeps a fixed runtime id.'
+                    : null,
+              ),
             ),
             TextField(
               controller: nameController,
@@ -610,9 +634,13 @@ Future<AgentConfigModel?> _showAgentDialog(
               children: [
                 AiSettingsToggleTile(
                   title: 'Enabled',
-                  subtitle: 'Controls whether the profile can be selected in Sirix CLI.',
+                  subtitle: isBuiltinCodex
+                      ? 'The built-in Codex profile always stays enabled so Sirix keeps a stable default agent.'
+                      : 'Controls whether the profile can be selected in Sirix CLI.',
                   value: enabled,
-                  onChanged: (value) => setState(() => enabled = value),
+                  onChanged: isBuiltinCodex
+                      ? null
+                      : (value) => setState(() => enabled = value),
                 ),
               ],
             ),
@@ -730,11 +758,14 @@ Future<AgentConfigModel?> _showAgentDialog(
               ),
             TextField(
               controller: systemPromptController,
+              readOnly: isBuiltinCodex,
               minLines: 5,
               maxLines: 8,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Agent Prompt',
-                hintText: 'Add agent-specific instructions here.',
+                hintText: isBuiltinCodex
+                    ? 'The built-in Codex profile always uses the standard Codex system prompt.'
+                    : 'Add agent-specific instructions here.',
                 alignLabelWithHint: true,
               ),
             ),
@@ -758,12 +789,15 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _SelectionField(
               title: 'Builtin Tools',
-              subtitle: 'New agents start with all builtin tools enabled, and you can remove any tool that should not be exposed to this agent.',
+              subtitle: isBuiltinCodex
+                  ? 'The built-in Codex profile always exposes the full builtin Codex tool set.'
+                  : 'New agents start with all builtin tools enabled, and you can remove any tool that should not be exposed to this agent.',
               selectionSummary: _summarizeSelection(
                 selectedIds: builtinToolIds,
                 allIds: kBuiltinToolCatalog,
               ),
               chips: builtinToolIds,
+              enabled: !isBuiltinCodex,
               onPressed: () async {
                 final selected = await _showMultiSelectDialog(
                   context,
@@ -847,7 +881,7 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _SelectionField(
               title: 'Sub Agents',
-              subtitle: 'Selected agents are injected into the runtime system prompt as discoverable sub-agent options.',
+              subtitle: 'Selected agents are exposed to Codex as spawnable Sirix sub-agent roles with role descriptions and runtime role configs.',
               selectionSummary: _summarizeSelection(
                 selectedIds: subAgentIds,
                 allIds: state.config.agents
@@ -863,7 +897,7 @@ Future<AgentConfigModel?> _showAgentDialog(
                 final selected = await _showMultiSelectDialog(
                   context,
                   title: 'Sub Agents',
-                  subtitle: 'Select the agents that should be advertised as sub-agents inside the system prompt.',
+                  subtitle: 'Select the agents that should be exposed as Sirix sub-agent roles for this profile.',
                   items: [
                     for (final subAgent in state.config.agents)
                       if (subAgent.id != idController.text.trim())
@@ -901,20 +935,20 @@ Future<AgentConfigModel?> _showAgentDialog(
   }
 
   return AgentConfigModel(
-    id: idController.text.trim(),
+    id: isBuiltinCodex ? _builtinCodexAgentId : idController.text.trim(),
     name: nameController.text.trim(),
     description: descriptionController.text.trim(),
     providerId: providerId,
     modelId: modelId,
     fallbackProviderId: fallbackProviderId,
     fallbackModelId: fallbackModelId,
-    systemPrompt: systemPromptController.text,
+    systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
     approvalMode: approvalMode,
-    builtinToolIds: builtinToolIds,
+    builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
     skillIds: skillIds,
     mcpServerIds: mcpServerIds,
     subAgentIds: subAgentIds,
-    enabled: enabled,
+    enabled: isBuiltinCodex ? true : enabled,
   );
 }
 
@@ -925,6 +959,7 @@ class _SelectionField extends StatelessWidget {
     required this.selectionSummary,
     required this.chips,
     required this.onPressed,
+    this.enabled = true,
   });
 
   final String title;
@@ -932,6 +967,7 @@ class _SelectionField extends StatelessWidget {
   final String selectionSummary;
   final List<String> chips;
   final VoidCallback onPressed;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -967,7 +1003,7 @@ class _SelectionField extends StatelessWidget {
               ),
               const SizedBox(width: 12),
               OutlinedButton.icon(
-                onPressed: onPressed,
+                onPressed: enabled ? onPressed : null,
                 icon: const Icon(Icons.tune_rounded),
                 label: const Text('Select'),
               ),
@@ -1079,9 +1115,9 @@ Future<void> _showPromptPreviewDialog(
     context: context,
     title: 'System Prompt Preview',
     subtitle:
-        'This preview expands the selected agent into the composed system prompt, including discovered MCP tools, schemas, skills, and sub-agents.',
-    width: 900,
-    child: FutureBuilder<String>(
+        'This preview shows the actual Responses request body generated through the embedded Codex runtime for the selected agent. Conversation turns are omitted so you can focus on instructions, context blocks, skills, and tool schemas.',
+    width: 1040,
+    child: FutureBuilder<Object?>(
       future: previewFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
@@ -1094,25 +1130,29 @@ Future<void> _showPromptPreviewDialog(
         }
 
         if (snapshot.hasError) {
-          return SelectableText(
-            'Failed to generate prompt preview: ${snapshot.error}',
+          return SingleChildScrollView(
+            child: SelectableText(
+              'Failed to generate prompt preview: ${snapshot.error}',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontFamily: 'JetBrains Mono',
+                    height: 1.6,
+                    color: palette.textSecondary,
+                  ),
+            ),
+          );
+        }
+
+        final preview = snapshot.data;
+        if (preview == null) {
+          return Text(
+            'No preview data generated.',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  fontFamily: 'JetBrains Mono',
-                  height: 1.6,
                   color: palette.textSecondary,
                 ),
           );
         }
 
-        final preview = (snapshot.data ?? '').trim();
-        return SelectableText(
-          preview.isEmpty ? 'No system prompt content generated.' : preview,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                fontFamily: 'JetBrains Mono',
-                height: 1.6,
-                color: palette.textSecondary,
-              ),
-        );
+        return _PromptPreviewContent(preview: preview);
       },
     ),
     actions: [
@@ -1168,4 +1208,810 @@ String _approvalModeLabel(ApprovalMode mode) {
     ApprovalMode.ask => 'Ask',
     ApprovalMode.deny => 'Deny',
   };
+}
+
+enum _PromptPreviewMode {
+  readable,
+  rawJson,
+}
+
+class _PromptPreviewContent extends StatefulWidget {
+  const _PromptPreviewContent({
+    required this.preview,
+  });
+
+  final Object? preview;
+
+  @override
+  State<_PromptPreviewContent> createState() => _PromptPreviewContentState();
+}
+
+class _PromptPreviewContentState extends State<_PromptPreviewContent> {
+  _PromptPreviewMode _mode = _PromptPreviewMode.readable;
+
+  @override
+  Widget build(BuildContext context) {
+    final previewMap = _normalizePreviewMap(widget.preview);
+    final instructions = _readNonEmptyString(previewMap['instructions']);
+    final inputBlocks = _extractPreviewInputBlocks(previewMap);
+    final tools = _extractPreviewTools(previewMap);
+    final rawJson = _prettyPreviewJson(widget.preview);
+    final model = _readNonEmptyString(previewMap['model']);
+    final toolChoice = _readNonEmptyString(previewMap['tool_choice']);
+    final stream = previewMap['stream'];
+    final parallelCalls = previewMap['parallel_tool_calls'];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // The user asked for two complementary ways to inspect the same preview:
+        // a readable UI for prompt/tool review and the original JSON for exact
+        // payload verification.
+        _PromptPreviewModeSwitcher(
+          mode: _mode,
+          onChanged: (mode) => setState(() => _mode = mode),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (model != null) AiSettingsChip(label: 'model: $model'),
+            AiSettingsChip(label: 'input blocks: ${inputBlocks.length}'),
+            AiSettingsChip(label: 'tools: ${tools.length}'),
+            if (toolChoice != null) AiSettingsChip(label: 'tool_choice: $toolChoice'),
+            if (stream is bool) AiSettingsChip(label: 'stream: ${stream ? 'on' : 'off'}'),
+            if (parallelCalls is bool)
+              AiSettingsChip(
+                label: 'parallel: ${parallelCalls ? 'enabled' : 'disabled'}',
+              ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        if (_mode == _PromptPreviewMode.readable)
+          _PromptPreviewReadableView(
+            instructions: instructions,
+            inputBlocks: inputBlocks,
+            tools: tools,
+            previewMap: previewMap,
+          )
+        else
+          _PromptPreviewRawJsonView(rawJson: rawJson),
+      ],
+    );
+  }
+}
+
+class _PromptPreviewModeSwitcher extends StatelessWidget {
+  const _PromptPreviewModeSwitcher({
+    required this.mode,
+    required this.onChanged,
+  });
+
+  final _PromptPreviewMode mode;
+  final ValueChanged<_PromptPreviewMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.42),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PromptPreviewModeButton(
+            label: 'Readable View',
+            icon: Icons.auto_awesome_mosaic_rounded,
+            selected: mode == _PromptPreviewMode.readable,
+            onPressed: () => onChanged(_PromptPreviewMode.readable),
+          ),
+          _PromptPreviewModeButton(
+            label: 'Raw JSON',
+            icon: Icons.data_object_rounded,
+            selected: mode == _PromptPreviewMode.rawJson,
+            onPressed: () => onChanged(_PromptPreviewMode.rawJson),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewModeButton extends StatelessWidget {
+  const _PromptPreviewModeButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      margin: const EdgeInsets.only(right: 4),
+      decoration: BoxDecoration(
+        color: selected ? palette.primaryBright : Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onPressed,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: selected ? Colors.black : palette.textSecondary,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      fontFamily: 'Inter',
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.4,
+                      color: selected ? Colors.black : palette.textSecondary,
+                    ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PromptPreviewReadableView extends StatelessWidget {
+  const _PromptPreviewReadableView({
+    required this.instructions,
+    required this.inputBlocks,
+    required this.tools,
+    required this.previewMap,
+  });
+
+  final String? instructions;
+  final List<_PromptPreviewInputBlock> inputBlocks;
+  final List<_PromptPreviewToolDefinition> tools;
+  final Map<String, Object?> previewMap;
+
+  @override
+  Widget build(BuildContext context) {
+    final reasoning = previewMap['reasoning'];
+    final includeItems = _normalizePreviewList(previewMap['include']);
+    final serviceTier = _readNonEmptyString(previewMap['service_tier']);
+    final promptCacheKey = _readNonEmptyString(previewMap['prompt_cache_key']);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _PromptPreviewSectionCard(
+          title: 'Request Overview',
+          subtitle: 'High-level runtime flags from the generated Responses payload.',
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              _PromptPreviewFact(
+                label: 'Reasoning',
+                value: reasoning == null ? 'disabled' : 'configured',
+              ),
+              _PromptPreviewFact(
+                label: 'Include fields',
+                value: includeItems.isEmpty ? 'none' : includeItems.length.toString(),
+              ),
+              _PromptPreviewFact(
+                label: 'Service tier',
+                value: serviceTier ?? 'default',
+              ),
+              _PromptPreviewFact(
+                label: 'Prompt cache key',
+                value: promptCacheKey ?? 'not set',
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _PromptPreviewSectionCard(
+          title: 'System Instructions',
+          subtitle: 'The `instructions` field sent directly to the model.',
+          child: _PromptPreviewCodeBlock(
+            text: instructions ?? 'No instructions generated.',
+            empty: instructions == null,
+          ),
+        ),
+        const SizedBox(height: 16),
+        _PromptPreviewSectionCard(
+          title: 'Context Blocks',
+          subtitle:
+              'Static developer and environment blocks assembled into `input[]`. Conversation turns stay excluded here by design.',
+          child: inputBlocks.isEmpty
+              ? const _PromptPreviewEmptyMessage(
+                  text: 'No static context blocks were generated for this preview.',
+                )
+              : Column(
+                  children: [
+                    for (var index = 0; index < inputBlocks.length; index += 1) ...[
+                      _PromptPreviewInputBlockCard(block: inputBlocks[index]),
+                      if (index < inputBlocks.length - 1) const SizedBox(height: 12),
+                    ],
+                  ],
+                ),
+        ),
+        const SizedBox(height: 16),
+        _PromptPreviewSectionCard(
+          title: 'Tools',
+          subtitle:
+              'Tool registry, descriptions, and parameter requirements extracted from the generated request.',
+          child: tools.isEmpty
+              ? const _PromptPreviewEmptyMessage(
+                  text: 'No tools were attached to this request.',
+                )
+              : Column(
+                  children: [
+                    for (var index = 0; index < tools.length; index += 1) ...[
+                      _PromptPreviewToolCard(tool: tools[index]),
+                      if (index < tools.length - 1) const SizedBox(height: 12),
+                    ],
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PromptPreviewRawJsonView extends StatelessWidget {
+  const _PromptPreviewRawJsonView({
+    required this.rawJson,
+  });
+
+  final String rawJson;
+
+  @override
+  Widget build(BuildContext context) {
+    return _PromptPreviewSectionCard(
+      title: 'Raw JSON',
+      subtitle: 'Exact preview payload for line-by-line verification against runtime traffic.',
+      child: _PromptPreviewCodeBlock(text: rawJson),
+    );
+  }
+}
+
+class _PromptPreviewSectionCard extends StatelessWidget {
+  const _PromptPreviewSectionCard({
+    required this.title,
+    required this.subtitle,
+    required this.child,
+  });
+
+  final String title;
+  final String subtitle;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return AiSettingsCard(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontFamily: 'Space Grotesk',
+                  fontWeight: FontWeight.w700,
+                  color: palette.textPrimary,
+                ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            subtitle,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: palette.textMuted,
+                  height: 1.5,
+                ),
+          ),
+          const SizedBox(height: 16),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewFact extends StatelessWidget {
+  const _PromptPreviewFact({
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      constraints: const BoxConstraints(minWidth: 180),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: palette.textMuted,
+                  letterSpacing: 1.2,
+                  fontWeight: FontWeight.w800,
+                ),
+          ),
+          const SizedBox(height: 8),
+          SelectableText(
+            value,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: palette.textPrimary,
+                  fontFamily: 'JetBrains Mono',
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewCodeBlock extends StatelessWidget {
+  const _PromptPreviewCodeBlock({
+    required this.text,
+    this.empty = false,
+  });
+
+  final String text;
+  final bool empty;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: SelectableText(
+        text,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              fontFamily: 'JetBrains Mono',
+              height: 1.55,
+              color: empty ? palette.textMuted : palette.textSecondary,
+            ),
+      ),
+    );
+  }
+}
+
+class _PromptPreviewInputBlockCard extends StatelessWidget {
+  const _PromptPreviewInputBlockCard({
+    required this.block,
+  });
+
+  final _PromptPreviewInputBlock block;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              AiSettingsChip(label: 'role: ${block.role}'),
+              AiSettingsChip(label: 'type: ${block.type}'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          SelectableText(
+            block.text,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  fontFamily: 'JetBrains Mono',
+                  height: 1.55,
+                  color: palette.textSecondary,
+                ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewToolCard extends StatelessWidget {
+  const _PromptPreviewToolCard({
+    required this.tool,
+  });
+
+  final _PromptPreviewToolDefinition tool;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final description = tool.description;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                tool.name,
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontFamily: 'Space Grotesk',
+                      fontWeight: FontWeight.w700,
+                      color: palette.textPrimary,
+                    ),
+              ),
+              AiSettingsChip(label: 'type: ${tool.type}'),
+              AiSettingsChip(label: 'params: ${tool.parameters.length}'),
+              if (tool.requiredParameters.isNotEmpty)
+                AiSettingsChip(label: 'required: ${tool.requiredParameters.length}'),
+              if (tool.strict != null)
+                AiSettingsChip(label: 'strict: ${tool.strict! ? 'true' : 'false'}'),
+            ],
+          ),
+          if (description != null) ...[
+            const SizedBox(height: 12),
+            SelectableText(
+              description,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: palette.textSecondary,
+                    height: 1.5,
+                  ),
+            ),
+          ],
+          if (tool.requiredParameters.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: tool.requiredParameters
+                  .map((param) => AiSettingsChip(label: 'required `$param`'))
+                  .toList(growable: false),
+            ),
+          ],
+          if (tool.parameters.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            // Tool schemas vary a lot across built-in tools and MCP tools. Keep
+            // the summary card readable, and let parameter-level detail expand
+            // only when someone wants to inspect usage constraints closely.
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(top: 8),
+              title: Text(
+                'Parameter Details',
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      color: palette.textPrimary,
+                    ),
+              ),
+              children: [
+                Column(
+                  children: [
+                    for (var index = 0; index < tool.parameters.length; index += 1) ...[
+                      _PromptPreviewToolParameterCard(parameter: tool.parameters[index]),
+                      if (index < tool.parameters.length - 1) const SizedBox(height: 10),
+                    ],
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewToolParameterCard extends StatelessWidget {
+  const _PromptPreviewToolParameterCard({
+    required this.parameter,
+  });
+
+  final _PromptPreviewToolParameter parameter;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.24),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              Text(
+                parameter.name,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: palette.textPrimary,
+                      fontFamily: 'JetBrains Mono',
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+              if (parameter.type != null) AiSettingsChip(label: parameter.type!),
+              if (parameter.required) const AiSettingsChip(label: 'required'),
+            ],
+          ),
+          if (parameter.description != null) ...[
+            const SizedBox(height: 10),
+            SelectableText(
+              parameter.description!,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: palette.textSecondary,
+                    height: 1.5,
+                  ),
+            ),
+          ],
+          if (parameter.enumValues.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: parameter.enumValues
+                  .map((value) => AiSettingsChip(label: value))
+                  .toList(growable: false),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PromptPreviewEmptyMessage extends StatelessWidget {
+  const _PromptPreviewEmptyMessage({
+    required this.text,
+  });
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Text(
+      text,
+      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+            color: palette.textMuted,
+          ),
+    );
+  }
+}
+
+class _PromptPreviewInputBlock {
+  const _PromptPreviewInputBlock({
+    required this.role,
+    required this.type,
+    required this.text,
+  });
+
+  final String role;
+  final String type;
+  final String text;
+}
+
+class _PromptPreviewToolDefinition {
+  const _PromptPreviewToolDefinition({
+    required this.name,
+    required this.type,
+    required this.parameters,
+    required this.requiredParameters,
+    this.description,
+    this.strict,
+  });
+
+  final String name;
+  final String type;
+  final String? description;
+  final bool? strict;
+  final List<_PromptPreviewToolParameter> parameters;
+  final List<String> requiredParameters;
+}
+
+class _PromptPreviewToolParameter {
+  const _PromptPreviewToolParameter({
+    required this.name,
+    required this.required,
+    this.type,
+    this.description,
+    this.enumValues = const [],
+  });
+
+  final String name;
+  final bool required;
+  final String? type;
+  final String? description;
+  final List<String> enumValues;
+}
+
+Map<String, Object?> _normalizePreviewMap(Object? value) {
+  // The preview payload is sourced from runtime JSON. Normalize every map to
+  // string-keyed access so the UI stays stable even if tool schema objects come
+  // from slightly different serializers.
+  if (value is! Map) {
+    return const {};
+  }
+  return {
+    for (final entry in value.entries) entry.key.toString(): entry.value,
+  };
+}
+
+List<Object?> _normalizePreviewList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return List<Object?>.from(value);
+}
+
+String? _readNonEmptyString(Object? value) {
+  if (value is! String) {
+    return null;
+  }
+  final trimmed = value.trim();
+  return trimmed.isEmpty ? null : trimmed;
+}
+
+String _prettyPreviewJson(Object? value) {
+  try {
+    return const JsonEncoder.withIndent('  ').convert(value);
+  } catch (_) {
+    return value.toString();
+  }
+}
+
+List<String> _readStringList(Object? value) {
+  if (value is! List) {
+    return const [];
+  }
+  return value.map((item) => item.toString()).toList(growable: false);
+}
+
+String? _extractContentText(Map<String, Object?> contentMap) {
+  for (final key in const ['input_text', 'text', 'output_text']) {
+    final value = _readNonEmptyString(contentMap[key]);
+    if (value != null) {
+      return value;
+    }
+  }
+  return null;
+}
+
+List<_PromptPreviewInputBlock> _extractPreviewInputBlocks(Map<String, Object?> previewMap) {
+  final blocks = <_PromptPreviewInputBlock>[];
+  for (final inputItem in _normalizePreviewList(previewMap['input'])) {
+    final itemMap = _normalizePreviewMap(inputItem);
+    final role = _readNonEmptyString(itemMap['role']) ?? 'unknown';
+    final content = itemMap['content'];
+
+    if (content is String && content.trim().isNotEmpty) {
+      blocks.add(
+        _PromptPreviewInputBlock(
+          role: role,
+          type: 'text',
+          text: content,
+        ),
+      );
+      continue;
+    }
+
+    for (final contentItem in _normalizePreviewList(content)) {
+      final contentMap = _normalizePreviewMap(contentItem);
+      final text = _extractContentText(contentMap);
+      if (text == null) {
+        continue;
+      }
+      blocks.add(
+        _PromptPreviewInputBlock(
+          role: role,
+          type: _readNonEmptyString(contentMap['type']) ?? 'content',
+          text: text,
+        ),
+      );
+    }
+  }
+  return blocks;
+}
+
+List<_PromptPreviewToolDefinition> _extractPreviewTools(Map<String, Object?> previewMap) {
+  final tools = <_PromptPreviewToolDefinition>[];
+
+  for (final toolValue in _normalizePreviewList(previewMap['tools'])) {
+    final toolMap = _normalizePreviewMap(toolValue);
+    final parametersMap = _normalizePreviewMap(toolMap['parameters']);
+    final propertiesMap = _normalizePreviewMap(parametersMap['properties']);
+    final requiredParameters = _readStringList(parametersMap['required']);
+    final requiredLookup = requiredParameters.toSet();
+    final parameters = <_PromptPreviewToolParameter>[];
+
+    for (final entry in propertiesMap.entries) {
+      final propertyMap = _normalizePreviewMap(entry.value);
+      final typeValue = propertyMap['type'];
+      final parameterType = switch (typeValue) {
+        String() => typeValue,
+        List() => typeValue.map((item) => item.toString()).join(' | '),
+        _ => null,
+      };
+      parameters.add(
+        _PromptPreviewToolParameter(
+          name: entry.key,
+          required: requiredLookup.contains(entry.key),
+          type: parameterType,
+          description: _readNonEmptyString(propertyMap['description']),
+          enumValues: _readStringList(propertyMap['enum']),
+        ),
+      );
+    }
+
+    tools.add(
+      _PromptPreviewToolDefinition(
+        name: _readNonEmptyString(toolMap['name']) ??
+            _readNonEmptyString(toolMap['type']) ??
+            'unnamed_tool',
+        type: _readNonEmptyString(toolMap['type']) ?? 'unknown',
+        description: _readNonEmptyString(toolMap['description']),
+        strict: toolMap['strict'] is bool ? toolMap['strict'] as bool : null,
+        parameters: parameters,
+        requiredParameters: requiredParameters,
+      ),
+    );
+  }
+
+  return tools;
 }

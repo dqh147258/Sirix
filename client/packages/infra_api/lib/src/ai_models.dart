@@ -560,6 +560,7 @@ class AgentConfigModel {
     this.fallbackModelId = '',
     this.systemPrompt = '',
     this.approvalMode = ApprovalMode.ask,
+    this.shellRules = const ShellRulesConfigModel(),
     this.builtinToolIds = kBuiltinToolCatalog,
     this.skillIds = const [],
     this.mcpServerIds = const [],
@@ -576,6 +577,7 @@ class AgentConfigModel {
   final String fallbackModelId;
   final String systemPrompt;
   final ApprovalMode approvalMode;
+  final ShellRulesConfigModel shellRules;
   final List<String> builtinToolIds;
   final List<String> skillIds;
   final List<String> mcpServerIds;
@@ -606,6 +608,9 @@ class AgentConfigModel {
       fallbackModelId: json['fallback_model_id'] as String? ?? '',
       systemPrompt: json['system_prompt'] as String? ?? '',
       approvalMode: approvalModeFromJson(json['approval_mode'] as String?),
+      shellRules: ShellRulesConfigModel.fromJson(
+        (json['shell_rules'] as Map<Object?, Object?>? ?? const {}).cast<String, dynamic>(),
+      ),
       builtinToolIds: builtinToolIds.isEmpty
           ? (json['builtin_tools_enabled'] as bool? ?? true)
               ? kBuiltinToolCatalog
@@ -631,6 +636,7 @@ class AgentConfigModel {
       'fallback_model_id': fallbackModelId,
       'system_prompt': systemPrompt,
       'approval_mode': _approvalModeJson(approvalMode),
+      'shell_rules': shellRules.toJson(),
       'builtin_tool_ids': builtinToolIds,
       'skill_ids': skillIds,
       'mcp_server_ids': mcpServerIds,
@@ -649,6 +655,7 @@ class AgentConfigModel {
     String? fallbackModelId,
     String? systemPrompt,
     ApprovalMode? approvalMode,
+    ShellRulesConfigModel? shellRules,
     List<String>? builtinToolIds,
     List<String>? skillIds,
     List<String>? mcpServerIds,
@@ -665,6 +672,7 @@ class AgentConfigModel {
       fallbackModelId: fallbackModelId ?? this.fallbackModelId,
       systemPrompt: systemPrompt ?? this.systemPrompt,
       approvalMode: approvalMode ?? this.approvalMode,
+      shellRules: shellRules ?? this.shellRules,
       builtinToolIds: builtinToolIds ?? this.builtinToolIds,
       skillIds: skillIds ?? this.skillIds,
       mcpServerIds: mcpServerIds ?? this.mcpServerIds,

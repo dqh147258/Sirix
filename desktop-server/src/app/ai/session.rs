@@ -423,6 +423,7 @@ fn prepare_session_launch_files(
     let exec_policy_path = config_store.write_session_exec_policy_file(
         &launch.session_storage_dir,
         cwd,
+        &launch.agent,
         session_shell_rules,
     )?;
 

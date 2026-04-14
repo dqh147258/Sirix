@@ -232,6 +232,8 @@ pub struct AgentConfig {
     #[serde(default)]
     pub approval_mode: ApprovalMode,
     #[serde(default)]
+    pub shell_rules: ShellRulesConfig,
+    #[serde(default)]
     pub builtin_tool_ids: Vec<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
@@ -310,6 +312,7 @@ impl Default for SirixConfig {
                 fallback_model_id: String::new(),
                 system_prompt: String::new(),
                 approval_mode: ApprovalMode::Ask,
+                shell_rules: ShellRulesConfig::default(),
                 builtin_tool_ids: default_builtin_tool_ids(),
                 skill_ids: Vec::new(),
                 mcp_server_ids: Vec::new(),
@@ -468,10 +471,8 @@ impl SirixConfigStore {
         agent: &AgentConfig,
         session_shell_rules: &ShellRulesConfig,
     ) -> anyhow::Result<SessionAgentRuntimeConfig> {
-        let effective_shell_rules = merge_shell_rules(
-            self.effective_shell_rules(cwd)?,
-            session_shell_rules.clone(),
-        );
+        let effective_shell_rules =
+            self.effective_shell_rules_for_agent(cwd, agent, session_shell_rules)?;
         let shell_mode = match agent.approval_mode {
             ApprovalMode::Allow => ApprovalMode::Allow,
             ApprovalMode::Deny => ApprovalMode::Deny,
@@ -516,12 +517,11 @@ impl SirixConfigStore {
         &self,
         session_storage_dir: &Path,
         cwd: &Path,
+        agent: &AgentConfig,
         session_shell_rules: &ShellRulesConfig,
     ) -> anyhow::Result<PathBuf> {
-        let effective_shell_rules = merge_shell_rules(
-            self.effective_shell_rules(cwd)?,
-            session_shell_rules.clone(),
-        );
+        let effective_shell_rules =
+            self.effective_shell_rules_for_agent(cwd, agent, session_shell_rules)?;
         let rules_dir = session_storage_dir.join(SIRIX_EXEC_POLICY_RULES_DIR);
         fs::create_dir_all(&rules_dir)
             .with_context(|| format!("failed to create {}", rules_dir.display()))?;
@@ -548,6 +548,23 @@ impl SirixConfigStore {
         };
         fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
         Ok(path)
+    }
+
+    pub fn effective_shell_rules_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+        session_shell_rules: &ShellRulesConfig,
+    ) -> anyhow::Result<ShellRulesConfig> {
+        // Agent-level rules sit between global/workspace defaults and temporary
+        // session decisions so the Edit Agent screen can override shared policy
+        // without breaking the existing runtime "remember this decision" flow.
+        let workspace_rules = self.effective_shell_rules(cwd)?;
+        let agent_rules = merge_shell_rule_prefixes(workspace_rules, agent.shell_rules.clone());
+        Ok(merge_shell_rule_prefixes(
+            agent_rules,
+            session_shell_rules.clone(),
+        ))
     }
 
     pub fn effective_for_workspace(
@@ -1334,6 +1351,8 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
             }
         }
 
+        normalize_shell_rules(&mut agent.shell_rules);
+
         normalize_builtin_codex_agent(agent, &default_builtin_tools);
     }
 
@@ -1355,6 +1374,7 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                     fallback_model_id: String::new(),
                     system_prompt: String::new(),
                     approval_mode: ApprovalMode::Ask,
+                    shell_rules: ShellRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tools,
                     skill_ids: Vec::new(),
                     mcp_server_ids: Vec::new(),
@@ -2372,6 +2392,32 @@ fn merge_shell_rules(base: ShellRulesConfig, overlay: ShellRulesConfig) -> Shell
     merged
 }
 
+fn merge_shell_rule_prefixes(
+    base: ShellRulesConfig,
+    overlay: ShellRulesConfig,
+) -> ShellRulesConfig {
+    let mut merged = ShellRulesConfig {
+        version: base.version.max(overlay.version),
+        // Agent/session overlays only contribute allow/deny prefixes. Their
+        // default `ask` mode must not silently erase the global/workspace mode.
+        mode: base.mode,
+        allow: base.allow,
+        deny: base.deny,
+    };
+
+    for rule in overlay.allow {
+        upsert_shell_rule(&mut merged.allow, &rule);
+        merged.deny.retain(|existing| existing != &rule);
+    }
+    for rule in overlay.deny {
+        upsert_shell_rule(&mut merged.deny, &rule);
+        merged.allow.retain(|existing| existing != &rule);
+    }
+
+    normalize_shell_rules(&mut merged);
+    merged
+}
+
 fn merge_cli_settings(base: CliSettings, overlay: CliSettings) -> CliSettings {
     CliSettings {
         supplemental_system_prompt: if overlay.supplemental_system_prompt.trim().is_empty() {
@@ -3193,6 +3239,7 @@ mod tests {
             fallback_model_id: String::new(),
             system_prompt: prompt.to_string(),
             approval_mode: ApprovalMode::Ask,
+            shell_rules: ShellRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),
@@ -3232,7 +3279,10 @@ mod tests {
 
         assert!(role_path.starts_with(&role_dir));
         assert_eq!(role_path.parent(), Some(role_dir.as_path()));
-        assert_eq!(role_path.extension().and_then(|value| value.to_str()), Some("toml"));
+        assert_eq!(
+            role_path.extension().and_then(|value| value.to_str()),
+            Some("toml")
+        );
         assert_eq!(
             role_path.file_name().and_then(|value| value.to_str()),
             Some("CON~.toml")
@@ -3253,6 +3303,7 @@ mod tests {
             fallback_model_id: String::new(),
             system_prompt: "legacy override".to_string(),
             approval_mode: ApprovalMode::Ask,
+            shell_rules: ShellRulesConfig::default(),
             builtin_tool_ids: vec!["shell".to_string()],
             skill_ids: vec!["skill-a".to_string()],
             mcp_server_ids: vec!["mcp-a".to_string()],
@@ -3280,6 +3331,42 @@ mod tests {
         assert_eq!(agent.system_prompt, "");
         assert_eq!(agent.builtin_tool_ids, default_builtin_tool_ids());
         assert!(agent.enabled);
+    }
+
+    #[test]
+    fn agent_and_session_shell_prefixes_override_broader_defaults_without_resetting_mode() {
+        let base = ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Allow,
+            allow: vec!["git".to_string()],
+            deny: vec!["git push".to_string(), "rm -rf".to_string()],
+        };
+        let agent = ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: vec!["git push".to_string()],
+            deny: vec!["cargo test".to_string()],
+        };
+        let session = ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Ask,
+            allow: vec!["cargo test".to_string()],
+            deny: vec!["git status".to_string()],
+        };
+
+        let merged = merge_shell_rule_prefixes(merge_shell_rule_prefixes(base, agent), session);
+
+        assert_eq!(merged.mode, ApprovalMode::Allow);
+        assert!(merged.allow.contains(&"git".to_string()));
+        assert!(
+            !merged.deny.contains(&"git push".to_string()),
+            "agent allow should remove the broader default deny for git push"
+        );
+        assert!(merged.allow.contains(&"cargo test".to_string()));
+        assert!(!merged.deny.contains(&"git push".to_string()));
+        assert!(!merged.deny.contains(&"cargo test".to_string()));
+        assert!(merged.deny.contains(&"git status".to_string()));
+        assert!(merged.deny.contains(&"rm -rf".to_string()));
     }
 
     #[test]
@@ -3316,6 +3403,7 @@ args = ["serve"]
             fallback_model_id: String::new(),
             system_prompt: "Review carefully".to_string(),
             approval_mode: ApprovalMode::Ask,
+            shell_rules: ShellRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: vec![skill.id.clone()],
             mcp_server_ids: vec![mcp_server.id.clone()],
@@ -3338,6 +3426,7 @@ args = ["serve"]
             fallback_model_id: String::new(),
             system_prompt: String::new(),
             approval_mode: ApprovalMode::Ask,
+            shell_rules: ShellRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),

@@ -7,6 +7,7 @@
 - Agent 配置不再只是设置页摆设，Sirix CLI 运行时会真正读取并应用当前 Agent 的模型、系统提示词、MCP、Skills、Builtin Tools、Sub Agent 和 shell 授权模式。
 - Sirix CLI 新增 `/agent` 指令，用于展示当前 Session 可用的 Agent 列表并切换当前使用的 Agent；切换后，运行时模型与系统提示词会同步更新。
 - Shell 授权规则独立成单独设置项，拆分为全局规则与工作区规则，并支持运行时 `Allow once / session / workspace / global`、`Deny once / session / workspace / global` 以及前缀级持久化授权。
+- Agent 设置页补充了 Agent 级 Shell allow/deny 前缀规则，这层规则会叠加到全局/工作区规则之上，若前缀冲突则 Agent 规则优先，Session 临时规则仍然最高优先级。
 
 同时补充了 Agent fallback model 能力：当主模型连续失败 3 次后，在当前 Session 内临时禁用 1 小时并切到 fallback model；切换 Agent 后该状态失效。
 
@@ -15,9 +16,10 @@
 ### 1. desktop-server 配置、会话与本地 API
 
 - `desktop-server/src/app/ai/config.rs`
-  - Agent 配置模型升级为 `description / fallback / approval_mode / builtin_tool_ids / skill_ids / mcp_server_ids / sub_agent_ids`
+  - Agent 配置模型升级为 `description / fallback / approval_mode / shell_rules / builtin_tool_ids / skill_ids / mcp_server_ids / sub_agent_ids`
   - 增加 `ShellRulesConfig`
   - 增加全局与工作区 shell-rules.json 读写、合并与前缀归并逻辑
+  - 增加 Agent Shell Rules 与 Session Shell Rules 的分层叠加逻辑，并修正 Agent/Session 前缀覆盖时不应重置全局 shell mode
   - 增加 Agent 系统提示词拼装逻辑，并把 Sub Agent 描述注入最终 prompt
 - `desktop-server/src/app/ai/session.rs`
   - 增加 session 级 runtime 状态，记录当前 Agent、Builtin Tools、Shell Rules 与 fallback model 状态
@@ -70,6 +72,7 @@
 - `client/packages/feature_settings_ai/lib/src/sections/agent_settings_section.dart`
   - 重写 Agent 页面
   - 增加 Description、Fallback Model、Sub Agent、多选 Builtin Tools / Skills / MCP Servers
+  - 增加 Agent 级 Shell Rules 编辑区，支持 allow/deny 前缀覆盖全局规则
   - 增加“预览系统提示词”按钮，并改为通过 desktop-server 生成完整预览
   - 预览内容会展开 Builtin Tools 描述、Skills、Sub Agent，以及 MCP 的实时能力清单
   - 去掉旧的 Capability Rules UI 和编号式标题
@@ -117,6 +120,19 @@ Shell Rules 独立于 Agent 设置页保存：
 1. 先读取全局规则
 2. 再叠加工作区规则
 3. 如果前缀冲突，工作区优先
+
+Agent 规则加入后，完整优先级变成：
+
+1. 先读取全局规则
+2. 再叠加工作区规则
+3. 再叠加 Agent 规则
+4. 最后叠加 Session 临时规则
+
+其中：
+
+- 全局/工作区规则仍然决定共享默认策略
+- Agent 规则用于给某个 Agent profile 单独放宽或收紧命令前缀
+- Session 临时规则继续覆盖前面所有层级，用于当前运行中的一次性“记住这个决定”
 
 运行时授权时，若用户选择 `Allow session / workspace / global` 或 `Deny session / workspace / global`，会先进入“命令前缀选择”二阶段，再把最终前缀写入对应作用域。对于已存在更细前缀、后续又允许更粗前缀的情况，保存时会做归并，避免规则无限膨胀。
 

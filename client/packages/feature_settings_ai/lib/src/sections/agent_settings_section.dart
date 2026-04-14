@@ -388,6 +388,7 @@ class _AgentDetailPane extends StatelessWidget {
                         : '${agent.fallbackProviderId} / ${agent.fallbackModelId}',
                   ),
                   ('Shell Authorization', _approvalModeLabel(agent.approvalMode)),
+                  ('Agent Shell Rules', _shellRulesSummary(agent.shellRules)),
                 ],
               ),
             );
@@ -566,11 +567,14 @@ Future<AgentConfigModel?> _showAgentDialog(
   var fallbackProviderId = existing?.fallbackProviderId ?? '';
   var fallbackModelId = existing?.fallbackModelId ?? '';
   var approvalMode = existing?.approvalMode ?? ApprovalMode.ask;
+  var shellRules = existing?.shellRules ?? const ShellRulesConfigModel();
   var enabled = existing?.enabled ?? true;
   var builtinToolIds = [...(existing?.builtinToolIds ?? kBuiltinToolCatalog)];
   var skillIds = [...(existing?.skillIds ?? const <String>[])];
   var mcpServerIds = [...(existing?.mcpServerIds ?? const <String>[])];
   var subAgentIds = [...(existing?.subAgentIds ?? const <String>[])];
+  final allowRulesController = TextEditingController(text: shellRules.allow.join('\n'));
+  final denyRulesController = TextEditingController(text: shellRules.deny.join('\n'));
 
   final submitted = await showAiSettingsDialog<bool>(
     context: context,
@@ -596,6 +600,7 @@ Future<AgentConfigModel?> _showAgentDialog(
           fallbackModelId: fallbackModelId,
           systemPrompt: systemPromptController.text,
           approvalMode: approvalMode,
+          shellRules: shellRules,
           builtinToolIds: builtinToolIds,
           skillIds: skillIds,
           mcpServerIds: mcpServerIds,
@@ -708,6 +713,79 @@ Future<AgentConfigModel?> _showAgentDialog(
                   setState(() => approvalMode = value);
                 }
               },
+            ),
+            AiSettingsCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Agent Shell Rules',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'These allow and deny prefixes are merged on top of the global and workspace shell rules. If the same prefix conflicts, the agent definition wins. Temporary runtime decisions can still override both for the current session.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: context.sirix.textMuted,
+                        ),
+                  ),
+                  const SizedBox(height: 16),
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final stacked = constraints.maxWidth < 720;
+                      final allowEditor = _AgentRuleEditor(
+                        title: 'Allow Prefixes',
+                        subtitle: 'Use allow entries when this agent should skip prompts for a known-safe command family.',
+                        hintText: 'git status\ngit diff',
+                        controller: allowRulesController,
+                        accentColor: context.sirix.primaryBright,
+                        onChanged: (value) {
+                          setState(() {
+                            shellRules = shellRules.copyWith(
+                              allow: _parseShellRuleLines(value),
+                            );
+                          });
+                        },
+                      );
+                      final denyEditor = _AgentRuleEditor(
+                        title: 'Deny Prefixes',
+                        subtitle: 'Use deny entries when this agent must never run a prefix even if it is globally allowed.',
+                        hintText: 'rm -rf\nsudo rm',
+                        controller: denyRulesController,
+                        accentColor: context.sirix.error,
+                        onChanged: (value) {
+                          setState(() {
+                            shellRules = shellRules.copyWith(
+                              deny: _parseShellRuleLines(value),
+                            );
+                          });
+                        },
+                      );
+
+                      if (stacked) {
+                        return Column(
+                          children: [
+                            allowEditor,
+                            const SizedBox(height: 12),
+                            denyEditor,
+                          ],
+                        );
+                      }
+
+                      return Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: allowEditor),
+                          const SizedBox(width: 12),
+                          Expanded(child: denyEditor),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
             DropdownButtonFormField<String>(
               key: ValueKey('fallback-provider-$fallbackProviderId'),
@@ -944,12 +1022,87 @@ Future<AgentConfigModel?> _showAgentDialog(
     fallbackModelId: fallbackModelId,
     systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
     approvalMode: approvalMode,
+    shellRules: shellRules,
     builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
     skillIds: skillIds,
     mcpServerIds: mcpServerIds,
     subAgentIds: subAgentIds,
     enabled: isBuiltinCodex ? true : enabled,
   );
+}
+
+class _AgentRuleEditor extends StatelessWidget {
+  const _AgentRuleEditor({
+    required this.title,
+    required this.subtitle,
+    required this.hintText,
+    required this.controller,
+    required this.accentColor,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String subtitle;
+  final String hintText;
+  final TextEditingController controller;
+  final Color accentColor;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: accentColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                title,
+                style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: palette.textMuted,
+                ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: controller,
+            minLines: 7,
+            maxLines: 10,
+            onChanged: onChanged,
+            decoration: InputDecoration(
+              labelText: 'One command prefix per line',
+              hintText: hintText,
+              alignLabelWithHint: true,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _SelectionField extends StatelessWidget {
@@ -1200,6 +1353,23 @@ String _summarizeSelection({
     return 'All ${allIds.length} selected.';
   }
   return '${selectedIds.length} of ${allIds.length} selected.';
+}
+
+List<String> _parseShellRuleLines(String raw) {
+  return raw
+      .split('\n')
+      .map((line) => line.trim())
+      .where((line) => line.isNotEmpty)
+      .toList(growable: false);
+}
+
+String _shellRulesSummary(ShellRulesConfigModel shellRules) {
+  final allowCount = shellRules.allow.length;
+  final denyCount = shellRules.deny.length;
+  if (allowCount == 0 && denyCount == 0) {
+    return 'No agent-specific overrides.';
+  }
+  return 'Allow $allowCount, Deny $denyCount';
 }
 
 String _approvalModeLabel(ApprovalMode mode) {

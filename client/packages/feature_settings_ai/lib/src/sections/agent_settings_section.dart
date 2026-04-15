@@ -140,118 +140,163 @@ class _AgentListPane extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final agentCards = [
+      for (final agent in state.config.agents) _AgentListItem(
+        agent: agent,
+        selected: agent.id == selectedAgentId,
+        compact: compact,
+        onTap: () => onSelect(agent.id),
+      ),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final hasBoundedHeight = constraints.hasBoundedHeight;
+        final listView = ListView.separated(
+          padding: EdgeInsets.zero,
+          // This pane sits next to another vertical scroll view in the desktop
+          // split layout. Mark it as non-primary so it does not try to reuse
+          // the route-level PrimaryScrollController and collide with the
+          // detail pane's own ListView at runtime.
+          primary: false,
+          shrinkWrap: !hasBoundedHeight,
+          physics: hasBoundedHeight
+              ? const ClampingScrollPhysics()
+              : const NeverScrollableScrollPhysics(),
+          itemCount: agentCards.length,
+          separatorBuilder: (_, __) => const SizedBox(height: 8),
+          itemBuilder: (context, index) => agentCards[index],
+        );
+
+        return AiSettingsCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              AiSettingsSectionHeader(
+                title: 'Agent Profiles',
+                subtitle: 'Switch between local runtime profiles and manage the exact tools, MCP servers, skills, and fallback model each one can use.',
+                action: FilledButton.icon(
+                  onPressed: onCreate,
+                  icon: const Icon(Icons.add_rounded),
+                  label: const Text('New Agent'),
+                ),
+              ),
+              if (state.config.agents.isEmpty)
+                const AiSettingsEmptyState(text: 'No agents configured yet.')
+              else if (hasBoundedHeight)
+                Expanded(
+                  // The left agent rail now owns its own scrollable viewport so
+                  // long profile lists stay usable inside the fixed desktop
+                  // split-pane layout instead of overflowing the card.
+                  child: Scrollbar(
+                    thumbVisibility: true,
+                    child: listView,
+                  ),
+                )
+              else
+                listView,
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _AgentListItem extends StatelessWidget {
+  const _AgentListItem({
+    required this.agent,
+    required this.selected,
+    required this.compact,
+    required this.onTap,
+  });
+
+  final AgentConfigModel agent;
+  final bool selected;
+  final bool compact;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
     final palette = context.sirix;
 
-    return AiSettingsCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          AiSettingsSectionHeader(
-            title: 'Agent Profiles',
-            subtitle: 'Switch between local runtime profiles and manage the exact tools, MCP servers, skills, and fallback model each one can use.',
-            action: FilledButton.icon(
-              onPressed: onCreate,
-              icon: const Icon(Icons.add_rounded),
-              label: const Text('New Agent'),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(10),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          padding: EdgeInsets.all(compact ? 12 : 14),
+          decoration: BoxDecoration(
+            color: selected ? palette.surfaceMuted.withValues(alpha: 0.52) : palette.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: selected
+                  ? palette.primaryBright.withValues(alpha: 0.4)
+                  : palette.glassStroke,
             ),
           ),
-          if (state.config.agents.isEmpty)
-            const AiSettingsEmptyState(text: 'No agents configured yet.')
-          else
-            Column(
-              children: [
-                for (final agent in state.config.agents)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Material(
-                      color: Colors.transparent,
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () => onSelect(agent.id),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 140),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: agent.id == selectedAgentId
-                                ? palette.surfaceMuted.withValues(alpha: 0.52)
-                                : palette.surface,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: agent.id == selectedAgentId
-                                  ? palette.primaryBright.withValues(alpha: 0.4)
-                                  : palette.glassStroke,
-                            ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: compact ? 30 : 34,
+                height: compact ? 30 : 34,
+                decoration: BoxDecoration(
+                  color: agent.enabled
+                      ? palette.primaryBright.withValues(alpha: 0.16)
+                      : palette.surfaceMuted,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.smart_toy_rounded,
+                  size: compact ? 16 : 18,
+                  color: agent.enabled ? palette.primaryBright : palette.textMuted,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      agent.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            fontSize: compact ? 14 : null,
                           ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                width: 34,
-                                height: 34,
-                                decoration: BoxDecoration(
-                                  color: agent.enabled
-                                      ? palette.primaryBright.withValues(alpha: 0.16)
-                                      : palette.surfaceMuted,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Icon(
-                                  Icons.smart_toy_rounded,
-                                  size: 18,
-                                  color: agent.enabled
-                                      ? palette.primaryBright
-                                      : palette.textMuted,
-                                ),
-                              ),
-                              if (!compact) ...[
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        agent.name,
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        agent.description.trim().isEmpty
-                                            ? agent.id
-                                            : agent.description,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                              color: palette.textMuted,
-                                            ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      Wrap(
-                                        spacing: 8,
-                                        runSpacing: 8,
-                                        children: [
-                                          AiSettingsChip(label: agent.providerId),
-                                          AiSettingsChip(label: agent.modelId),
-                                          AiSettingsChip(
-                                            label: agent.enabled ? 'Enabled' : 'Disabled',
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        ),
-                      ),
                     ),
-                  ),
-              ],
-            ),
-        ],
+                    const SizedBox(height: 3),
+                    Text(
+                      agent.description.trim().isEmpty ? agent.id : agent.description,
+                      maxLines: compact ? 2 : 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                            color: palette.textMuted,
+                            height: compact ? 1.35 : 1.45,
+                          ),
+                    ),
+                    if (!compact) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          AiSettingsChip(label: agent.providerId),
+                          AiSettingsChip(label: agent.modelId),
+                          AiSettingsChip(label: agent.enabled ? 'Enabled' : 'Disabled'),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -283,6 +328,10 @@ class _AgentDetailPane extends StatelessWidget {
 
     return ListView(
       padding: const EdgeInsets.only(bottom: 8),
+      // The agent detail column shares the same screen with the profile list.
+      // Keeping it off the PrimaryScrollController avoids attaching one
+      // controller to multiple desktop panes when both sides are scrollable.
+      primary: false,
       children: [
         AiSettingsCard(
           child: Column(

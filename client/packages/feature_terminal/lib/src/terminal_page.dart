@@ -1,8 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:xterm/xterm.dart' show TerminalTheme, TerminalThemes, TerminalView;
+import 'package:xterm/xterm.dart'
+    show Terminal, TerminalController, TerminalTheme, TerminalThemes, TerminalView;
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
@@ -37,6 +39,7 @@ class TerminalPage extends ConsumerStatefulWidget {
 class _TerminalPageState extends ConsumerState<TerminalPage> {
   final TerminalTheme _theme = TerminalThemes.defaultTheme;
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
+  final Map<String, TerminalController> _terminalControllers = <String, TerminalController>{};
   late TerminalPageConfig _config;
 
   @override
@@ -66,6 +69,9 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   @override
   void dispose() {
     _focusNode.dispose();
+    for (final controller in _terminalControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -88,9 +94,12 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final activeTerminal = state.activeTerminal;
     final activeTerminalId = state.activeTerminalId;
     final terminal = viewModel.terminalFor(activeTerminalId);
+    final terminalController = _terminalControllerFor(activeTerminalId);
     final approvalRequest = state.activeApprovalRequest;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;
+
+    _disposeInactiveTerminalControllers(state.terminals.map((item) => item.id));
 
     return Column(
       children: [
@@ -241,6 +250,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                                   : TerminalView(
                                       terminal,
                                       key: ValueKey(activeTerminalId),
+                                      controller: terminalController,
                                       theme: _theme,
                                       focusNode: _focusNode,
                                       autofocus: true,
@@ -301,11 +311,30 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                       ],
                     ),
                   ),
-                  _TerminalFooter(
-                    activeTerminal: activeTerminal,
-                    compact: widget.compact,
-                    statusLabel: statusLabel,
-                  ),
+                  if (terminalController == null)
+                    _TerminalFooter(
+                      activeTerminal: activeTerminal,
+                      compact: widget.compact,
+                      statusLabel: statusLabel,
+                      hasSelection: false,
+                      onCopySelection: null,
+                    )
+                  else
+                    ListenableBuilder(
+                      listenable: terminalController,
+                      builder: (context, _) => _TerminalFooter(
+                        activeTerminal: activeTerminal,
+                        compact: widget.compact,
+                        statusLabel: statusLabel,
+                        hasSelection: terminalController.selection != null,
+                        onCopySelection: terminal == null
+                            ? null
+                            : () => _copySelection(
+                                  terminal: terminal,
+                                  controller: terminalController,
+                                ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -313,6 +342,42 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
         ),
       ],
     );
+  }
+
+  TerminalController? _terminalControllerFor(String? terminalId) {
+    if (terminalId == null || terminalId.isEmpty) {
+      return null;
+    }
+
+    return _terminalControllers.putIfAbsent(terminalId, TerminalController.new);
+  }
+
+  void _disposeInactiveTerminalControllers(Iterable<String> terminalIds) {
+    final activeIds = terminalIds.toSet();
+    final staleIds = _terminalControllers.keys
+        .where((terminalId) => !activeIds.contains(terminalId))
+        .toList(growable: false);
+    for (final terminalId in staleIds) {
+      // Each terminal tab owns an independent controller so selection ranges
+      // cannot leak across buffers. Dispose controllers as tabs disappear to
+      // avoid keeping stale anchors alive after the terminal session is closed.
+      _terminalControllers.remove(terminalId)?.dispose();
+    }
+  }
+
+  Future<void> _copySelection({
+    required Terminal terminal,
+    required TerminalController controller,
+  }) async {
+    final selection = controller.selection;
+    if (selection == null) {
+      return;
+    }
+
+    // Keep an explicit copy affordance in the shared terminal footer so
+    // desktop users are not forced to remember terminal-specific shortcuts.
+    final text = terminal.buffer.getText(selection);
+    await Clipboard.setData(ClipboardData(text: text));
   }
 }
 
@@ -563,11 +628,15 @@ class _TerminalFooter extends StatelessWidget {
     required this.activeTerminal,
     required this.compact,
     required this.statusLabel,
+    required this.hasSelection,
+    required this.onCopySelection,
   });
 
   final TerminalSessionSummary? activeTerminal;
   final bool compact;
   final String statusLabel;
+  final bool hasSelection;
+  final VoidCallback? onCopySelection;
 
   @override
   Widget build(BuildContext context) {
@@ -597,8 +666,48 @@ class _TerminalFooter extends StatelessWidget {
                 : 'COL ${activeTerminal!.cols}  ROW ${activeTerminal!.rows}',
           ),
           const Spacer(),
+          _FooterActionText(
+            label: compact ? 'COPY' : 'COPY SELECTION',
+            enabled: hasSelection && onCopySelection != null,
+            onTap: onCopySelection,
+          ),
+          const SizedBox(width: 16),
           _StatusText(text: statusLabel),
         ],
+      ),
+    );
+  }
+}
+
+class _FooterActionText extends StatelessWidget {
+  const _FooterActionText({
+    required this.label,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool enabled;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return InkWell(
+      onTap: enabled ? onTap : null,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: enabled ? palette.primaryBright : palette.textMuted.withValues(alpha: 0.45),
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.2,
+          ),
+        ),
       ),
     );
   }

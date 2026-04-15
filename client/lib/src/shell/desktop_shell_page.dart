@@ -200,7 +200,7 @@ class _DesktopShellHeader extends StatelessWidget {
             )
           : Row(
               children: [
-                Text('RemoteTerm', style: Theme.of(context).textTheme.titleLarge),
+                Text('Sirix', style: Theme.of(context).textTheme.titleLarge),
                 const SizedBox(width: 18),
                 Expanded(
                   child: SingleChildScrollView(
@@ -248,7 +248,7 @@ class _DesktopBrandRow extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('RemoteTerm', style: Theme.of(context).textTheme.titleLarge),
+              Text('Sirix', style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 4),
               Text(
                 registeredDeviceId ?? context.l10n.desktopNodeActive,

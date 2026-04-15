@@ -163,7 +163,7 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                     Row(
                       children: [
                         Text(
-                          'RemoteTerm',
+                          'Sirix',
                           style: Theme.of(context).textTheme.titleLarge?.copyWith(
                                 fontWeight: FontWeight.bold,
                               ),
@@ -172,9 +172,15 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
-                            _TopNavBarTab(label: 'Dashboard', active: true, palette: palette),
-                            _TopNavBarTab(label: 'Sessions', active: false, palette: palette),
-                            _TopNavBarTab(label: 'Network', active: false, palette: palette),
+                            // Keep the top bar focused on the active workspace only.
+                            // The old Sessions / Network placeholders looked clickable but
+                            // did not map to real content, so the optimize task removes
+                            // those dead tabs instead of leaving misleading navigation.
+                            _TopNavBarTab(
+                              label: currentSection.label,
+                              active: true,
+                              palette: palette,
+                            ),
                           ],
                         ),
                       ],
@@ -302,7 +308,7 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                                 ? Center(
                                     child: Tooltip(
                                       message:
-                                          'RemoteTerm Pro\nCONNECTED: ${authorizeState.pendingRequests.length} NODES',
+                                          'Sirix Pro\nCONNECTED: ${authorizeState.pendingRequests.length} NODES',
                                       waitDuration: const Duration(milliseconds: 250),
                                       child: Container(
                                         width: 44,
@@ -325,7 +331,7 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        'RemoteTerm Pro',
+                                        'Sirix Pro',
                                         style: TextStyle(
                                           fontSize: 18,
                                           fontWeight: FontWeight.w900,
@@ -645,173 +651,330 @@ class _TopNavBarTab extends StatelessWidget {
   }
 }
 
-class _DesktopDashboardPage extends ConsumerWidget {
+class _DesktopDashboardPage extends ConsumerStatefulWidget {
   const _DesktopDashboardPage({required this.session});
+
   final AuthSession session;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_DesktopDashboardPage> createState() => _DesktopDashboardPageState();
+}
+
+class _DesktopDashboardPageState extends ConsumerState<_DesktopDashboardPage> {
+  bool _terminalExpanded = false;
+
+  @override
+  Widget build(BuildContext context) {
     final authorizeState = ref.watch(desktopAuthorizeViewModelProvider);
     final palette = context.sirix;
-    return Column(children: [
-      // --- PRIMARY DISPLAY ---
-      Expanded(
-          flex: 1,
-          child: Padding(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!_terminalExpanded) ...[
+            Expanded(
+              child: _DashboardDisplayPanel(palette: palette),
+            ),
+            const SizedBox(height: 18),
+          ],
+          Expanded(
+            child: _DashboardTerminalPanel(
+              accessToken: widget.session.accessToken,
+              deviceId: authorizeState.registeredDeviceId,
+              expanded: _terminalExpanded,
+              onToggleExpanded: () {
+                // This local state only changes the Dashboard composition. The
+                // underlying terminal session remains mounted, so expanding the
+                // panel does not interrupt the live PTY or reset existing tabs.
+                setState(() => _terminalExpanded = !_terminalExpanded);
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DashboardDisplayPanel extends StatelessWidget {
+  const _DashboardDisplayPanel({
+    required this.palette,
+  });
+
+  final SirixTheme palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  'PRIMARY DISPLAY',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: 'Space Grotesk',
+                    color: Colors.white,
+                    letterSpacing: -0.5,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  '192.168.1.104:8080',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontFamily: 'JetBrains Mono',
+                    color: palette.secondary.withValues(alpha: 0.7),
+                  ),
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-                    Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                              crossAxisAlignment: CrossAxisAlignment.baseline,
-                              textBaseline: TextBaseline.alphabetic,
-                              children: [
-                                Text('PRIMARY DISPLAY',
-                                    style: TextStyle(
-                                        fontSize: 24,
-                                        fontWeight: FontWeight.bold,
-                                        fontFamily: 'Space Grotesk',
-                                        color: Colors.white,
-                                        letterSpacing: -0.5)),
-                                const SizedBox(width: 12),
-                                Text('192.168.1.104:8080',
-                                    style: TextStyle(
-                                        fontSize: 12,
-                                        fontFamily: 'JetBrains Mono',
-                                        color: palette.secondary
-                                            .withValues(alpha: 0.7))),
-                              ]),
-                          Row(children: [
-                            Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text('LATENCY',
-                                      style: TextStyle(
-                                          fontSize: 9,
-                                          color: palette.textMuted,
-                                          letterSpacing: 1.2)),
-                                  Text('14ms',
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          fontFamily: 'JetBrains Mono',
-                                          color: palette.primaryBright)),
-                                ]),
-                            Container(
-                                width: 1,
-                                height: 24,
-                                color: Colors.white.withValues(alpha: 0.1),
-                                margin:
-                                    const EdgeInsets.symmetric(horizontal: 12)),
-                            Column(
-                                crossAxisAlignment: CrossAxisAlignment.end,
-                                children: [
-                                  Text('FRAMERATE',
-                                      style: TextStyle(
-                                          fontSize: 9,
-                                          color: palette.textMuted,
-                                          letterSpacing: 1.2)),
-                                  Text('60fps',
-                                      style: TextStyle(
-                                          fontSize: 12,
-                                          fontFamily: 'JetBrains Mono',
-                                          color: palette.primaryBright)),
-                                ]),
-                          ])
-                        ]),
+                    Text(
+                      'LATENCY',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: palette.textMuted,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    Text(
+                      '14ms',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'JetBrains Mono',
+                        color: palette.primaryBright,
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  width: 1,
+                  height: 24,
+                  color: Colors.white.withValues(alpha: 0.1),
+                  margin: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      'FRAMERATE',
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: palette.textMuted,
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                    Text(
+                      '60fps',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'JetBrains Mono',
+                        color: palette.primaryBright,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+        Expanded(
+          child: Row(
+            children: [
+              Expanded(
+                flex: 2,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E2023),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+                  ),
+                  child: Stack(
+                    children: [
+                      Center(
+                        child: Icon(
+                          Icons.monitor,
+                          size: 64,
+                          color: palette.textMuted.withValues(alpha: 0.1),
+                        ),
+                      ),
+                      Positioned(
+                        top: 16,
+                        right: 16,
+                        child: Container(
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            color: palette.secondary,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(color: palette.secondary, blurRadius: 12),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: _DashboardMonitorCard(
+                        label: 'MONITOR 02',
+                        palette: palette,
+                      ),
+                    ),
                     const SizedBox(height: 16),
                     Expanded(
-                        child: Row(children: [
-                      // Main Monitor
-                      Expanded(
-                          flex: 2,
-                          child: Container(
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E2023),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                    color:
-                                        Colors.white.withValues(alpha: 0.05)),
-                              ),
-                              child: Stack(children: [
-                                Center(
-                                    child: Icon(Icons.monitor,
-                                        size: 64,
-                                        color: palette.textMuted
-                                            .withValues(alpha: 0.1))),
-                                Positioned(
-                                    top: 16,
-                                    right: 16,
-                                    child: Container(
-                                        width: 12,
-                                        height: 12,
-                                        decoration: BoxDecoration(
-                                          color: palette.secondary,
-                                          shape: BoxShape.circle,
-                                          boxShadow: [
-                                            BoxShadow(
-                                                color: palette.secondary,
-                                                blurRadius: 12)
-                                          ],
-                                        )))
-                              ]))),
-                      const SizedBox(width: 16),
-                      // Sub Monitors
-                      Expanded(
-                          flex: 1,
-                          child: Column(children: [
-                            Expanded(
-                                child: Container(
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF1A1C1F),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                            color: Colors.white
-                                                .withValues(alpha: 0.05))),
-                                    child: Center(
-                                        child: Text('MONITOR 02',
-                                            style: TextStyle(
-                                                fontSize: 10,
-                                                fontFamily: 'Space Grotesk',
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.white,
-                                                letterSpacing: 2))))),
-                            const SizedBox(height: 16),
-                            Expanded(
-                                child: Container(
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF1A1C1F),
-                                        borderRadius: BorderRadius.circular(12),
-                                        border: Border.all(
-                                            color: Colors.white
-                                                .withValues(alpha: 0.05))),
-                                    child: Center(
-                                        child: Text('MONITOR 03',
-                                            style: TextStyle(
-                                                fontSize: 10,
-                                                fontFamily: 'Space Grotesk',
-                                                fontWeight: FontWeight.bold,
-                                                color: Colors.white,
-                                                letterSpacing: 2))))),
-                          ]))
-                    ]))
-                  ]))),
+                      child: _DashboardMonitorCard(
+                        label: 'MONITOR 03',
+                        palette: palette,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
 
-      // --- TERMINAL AREA ---
-      Expanded(
-          flex: 1,
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: TerminalPage(
-              accessToken: session.accessToken,
-              deviceId: authorizeState.registeredDeviceId,
-              showHeader: false,
-              compact: true,
+class _DashboardMonitorCard extends StatelessWidget {
+  const _DashboardMonitorCard({
+    required this.label,
+    required this.palette,
+  });
+
+  final String label;
+  final SirixTheme palette;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1C1F),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+      ),
+      child: Center(
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 10,
+            fontFamily: 'Space Grotesk',
+            fontWeight: FontWeight.bold,
+            color: palette.textPrimary,
+            letterSpacing: 2,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashboardTerminalPanel extends StatelessWidget {
+  const _DashboardTerminalPanel({
+    required this.accessToken,
+    required this.deviceId,
+    required this.expanded,
+    required this.onToggleExpanded,
+  });
+
+  final String accessToken;
+  final String? deviceId;
+  final bool expanded;
+  final VoidCallback onToggleExpanded;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(18, 16, 14, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'TERMINAL WORKSPACE',
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontFamily: 'Space Grotesk',
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.8,
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        expanded
+                            ? 'Expanded workspace keeps the current terminal session in focus until you restore the dashboard layout.'
+                            : 'Use expand to let the terminal occupy the full dashboard content area and hide the display preview.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: palette.textMuted,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                Tooltip(
+                  message: expanded ? 'Restore dashboard layout' : 'Expand terminal workspace',
+                  child: IconButton(
+                    onPressed: onToggleExpanded,
+                    icon: Icon(
+                      expanded ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ))
-    ]);
+          ),
+          Divider(height: 1, color: Colors.white.withValues(alpha: 0.05)),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
+              child: TerminalPage(
+                accessToken: accessToken,
+                deviceId: deviceId,
+                showHeader: false,
+                compact: true,
+                fullBleed: true,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -315,7 +316,7 @@ class TerminalViewState extends State<TerminalView> {
     );
 
     child = Container(
-      color: widget.theme.background.withOpacity(widget.backgroundOpacity),
+      color: widget.theme.background.withValues(alpha: widget.backgroundOpacity),
       padding: widget.padding,
       child: child,
     );
@@ -396,6 +397,18 @@ class TerminalViewState extends State<TerminalView> {
       return resultOverride;
     }
 
+    // Match the platform copy shortcut exactly before PTY key mapping. This
+    // preserves copy-on-selection behavior without stealing plain Ctrl+C on
+    // Windows/Linux, where users still expect SIGINT to reach the shell.
+    if (event is KeyDownEvent && _shouldCopySelection(event)) {
+      final selection = _controller.selection;
+      if (selection != null) {
+        final text = widget.terminal.buffer.getText(selection);
+        Clipboard.setData(ClipboardData(text: text));
+        return KeyEventResult.handled;
+      }
+    }
+
     // ignore: invalid_use_of_protected_member
     final shortcutResult = _shortcutManager.handleKeypress(
       focusNode.context!,
@@ -428,6 +441,23 @@ class TerminalViewState extends State<TerminalView> {
     }
 
     return handled ? KeyEventResult.handled : KeyEventResult.ignored;
+  }
+
+  bool _shouldCopySelection(KeyEvent event) {
+    if (event.logicalKey != LogicalKeyboardKey.keyC) {
+      return false;
+    }
+
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.macOS || TargetPlatform.iOS =>
+        HardwareKeyboard.instance.isMetaPressed &&
+            !HardwareKeyboard.instance.isControlPressed &&
+            !HardwareKeyboard.instance.isAltPressed,
+      _ =>
+        HardwareKeyboard.instance.isControlPressed &&
+            HardwareKeyboard.instance.isShiftPressed &&
+            !HardwareKeyboard.instance.isAltPressed,
+    };
   }
 
   void _onKeyboardShow() {

@@ -52,7 +52,7 @@ class _DesktopAuthForm extends StatelessWidget {
                         letterSpacing: -1.0,
                       ),
                   children: [
-                    const TextSpan(text: 'RemoteTerm '),
+                    const TextSpan(text: 'Sirix '),
                     TextSpan(
                       text: 'Pro',
                       style: TextStyle(color: palette.primaryBright),

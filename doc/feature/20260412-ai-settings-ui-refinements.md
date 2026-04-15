@@ -7,6 +7,7 @@
 主要修改涉及以下文件：
 - `client/packages/feature_settings_ai/lib/src/settings_ui.dart`
 - `client/packages/feature_settings_ai/lib/src/ai_settings_page.dart`
+- `client/packages/feature_settings_ai/lib/src/sections/agent_settings_section.dart`
 
 **输出文档位置** (对于不合理的 UI/设计做出的调整说明记录在此)：
 - `doc/development/20260412/new-ui-deviations.md`
@@ -27,5 +28,9 @@
 5. **外层导航收缩策略 (`ai_settings_page.dart`)**：
    - AI Settings 最外层左侧导航不再在窄宽度切换成顶部 `ChoiceChip`，而是保持桌面侧栏结构。
    - 当宽度不足时，导航自动收缩为仅图标模式，保留选中态高亮和整体风格；标题与说明文字隐藏，通过鼠标悬浮 `Tooltip` 补充展示栏目名称，优先把空间让给右侧配置内容。
+6. **保存反馈与滚动稳定性补强 (`ai_settings_page.dart`, `agent_settings_section.dart`)**：
+   - 保存成功提示改为本地定时自动消失的 transient notice，避免成功横幅长期占据内容区顶部，同时保留错误横幅的持续可见性。
+   - `Agents` 双栏布局中的左侧列表和右侧详情都显式关闭 `PrimaryScrollController` 复用，避免桌面端两个纵向 `ListView` 竞争同一个滚动控制器而在运行时触发异常。
+   - 左侧 Agent 列表在有边界高度时由自身 `Scrollbar + ListView` 承担滚动，配置数量增长后仍能稳定浏览，不会挤压详情区或让整个卡片溢出。
 
 此次改动提升了视觉的精致度，且所有配置数据的绑定依然走 `AiSettingsViewModel`，保证了功能连贯性。

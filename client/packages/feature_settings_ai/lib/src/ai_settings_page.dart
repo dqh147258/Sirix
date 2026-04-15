@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -21,6 +23,9 @@ class AiSettingsPage extends ConsumerStatefulWidget {
 }
 
 class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
+  Timer? _noticeTimer;
+  String? _visibleNoticeMessage;
+
   @override
   void initState() {
     super.initState();
@@ -30,10 +35,44 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
   }
 
   @override
+  void dispose() {
+    _noticeTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final state = ref.watch(aiSettingsViewModelProvider);
     final vm = ref.read(aiSettingsViewModelProvider.notifier);
+
+    ref.listen<AiSettingsState>(aiSettingsViewModelProvider, (previous, next) {
+      final nextNotice = next.noticeMessage?.trim();
+      if (previous?.noticeMessage == next.noticeMessage) {
+        return;
+      }
+
+      _noticeTimer?.cancel();
+      if (nextNotice == null || nextNotice.isEmpty) {
+        if (_visibleNoticeMessage != null && mounted) {
+          setState(() => _visibleNoticeMessage = null);
+        }
+        return;
+      }
+
+      // Save success is a transient acknowledgement rather than a persistent
+      // status banner. Keep it visible long enough to be noticed, then fade it
+      // out locally so the settings screen can return to a steady layout.
+      if (mounted) {
+        setState(() => _visibleNoticeMessage = nextNotice);
+      }
+      _noticeTimer = Timer(const Duration(seconds: 5), () {
+        if (!mounted || _visibleNoticeMessage != nextNotice) {
+          return;
+        }
+        setState(() => _visibleNoticeMessage = null);
+      });
+    });
 
     return Padding(
       padding: const EdgeInsets.all(20),
@@ -146,10 +185,28 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
                     ],
                   ),
                 ),
-                if (state.errorMessage != null)
-                  _Banner(color: palette.error, text: state.errorMessage!),
-                if (state.noticeMessage != null)
-                  _Banner(color: palette.primaryBright, text: state.noticeMessage!),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 260),
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) {
+                    return FadeTransition(
+                      opacity: animation,
+                      child: SizeTransition(
+                        sizeFactor: animation,
+                        axisAlignment: -1,
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: _BannerStack(
+                    key: ValueKey('${state.errorMessage}::$_visibleNoticeMessage'),
+                    errorMessage: state.errorMessage,
+                    noticeMessage: _visibleNoticeMessage,
+                    errorColor: palette.error,
+                    noticeColor: palette.primaryBright,
+                  ),
+                ),
                 Expanded(
                   child: state.loading
                       ? const Center(child: CircularProgressIndicator())
@@ -404,6 +461,36 @@ class _Banner extends StatelessWidget {
         ),
         child: Text(text),
       ),
+    );
+  }
+}
+
+class _BannerStack extends StatelessWidget {
+  const _BannerStack({
+    super.key,
+    required this.errorMessage,
+    required this.noticeMessage,
+    required this.errorColor,
+    required this.noticeColor,
+  });
+
+  final String? errorMessage;
+  final String? noticeMessage;
+  final Color errorColor;
+  final Color noticeColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (errorMessage == null && noticeMessage == null) {
+      return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (errorMessage != null) _Banner(color: errorColor, text: errorMessage!),
+        if (noticeMessage != null) _Banner(color: noticeColor, text: noticeMessage!),
+      ],
     );
   }
 }

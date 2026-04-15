@@ -26,3 +26,6 @@
 5. **平台快捷键行为修正**：
    - 在 `xterm` 视图中仅对平台真实复制快捷键做“优先复制选区”处理：macOS / iOS 使用 `Cmd+C`，Windows / Linux 使用 `Ctrl+Shift+C`。
    - 保留 Windows / Linux 上普通 `Ctrl+C` 直通 shell 的行为，避免用户在已有选区时无法向 PTY 发送中断信号。
+6. **终端空态在极小高度下的自适应 (`terminal_page.dart`)**：
+   - Dashboard 分栏折叠、窗口快速缩放或终端工作区临时收起时，空态容器改为先占满实际 viewport，再由内部根据高度阈值切换为 dense / ultra-compact 布局。
+   - 在高度非常小的情况下会收紧 padding、缩小图标字号，并限制文案行数；若仍然放不下，则由 `SingleChildScrollView` 兜底，避免空态文案在桌面端短视口里直接 overflow。

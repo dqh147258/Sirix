@@ -32,5 +32,6 @@
    - 保存成功提示改为本地定时自动消失的 transient notice，避免成功横幅长期占据内容区顶部，同时保留错误横幅的持续可见性。
    - `Agents` 双栏布局中的左侧列表和右侧详情都显式关闭 `PrimaryScrollController` 复用，避免桌面端两个纵向 `ListView` 竞争同一个滚动控制器而在运行时触发异常。
    - 左侧 Agent 列表在有边界高度时由自身 `Scrollbar + ListView` 承担滚动，配置数量增长后仍能稳定浏览，不会挤压详情区或让整个卡片溢出。
+   - `Agents` 在窄宽度切换为上下堆叠布局时，右侧详情区会根据是否存在有界高度自动切换 `ListView` 的 `shrinkWrap` 与滚动物理参数，避免外层 `ListView` 已经接管滚动后，内层详情列表继续创建独立纵向 viewport 而触发 unbounded height / nested scroll 类布局异常。
 
 此次改动提升了视觉的精致度，且所有配置数据的绑定依然走 `AiSettingsViewModel`，保证了功能连贯性。

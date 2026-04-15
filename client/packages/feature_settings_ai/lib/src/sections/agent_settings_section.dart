@@ -28,6 +28,12 @@ class AgentSettingsSection extends StatefulWidget {
 }
 
 class _AgentSettingsSectionState extends State<AgentSettingsSection> {
+  // Desktop split panes render two independent vertical scroll areas side by
+  // side. The agent rail must keep a dedicated controller so the Scrollbar and
+  // ListView share the same ScrollPosition instead of falling back to the
+  // route-level PrimaryScrollController, which is what triggers the framework
+  // assertion reported by the user.
+  final ScrollController _agentListScrollController = ScrollController();
   String? _selectedAgentId;
 
   @override
@@ -36,6 +42,12 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
     if (widget.state.config.agents.isNotEmpty) {
       _selectedAgentId = widget.state.config.agents.first.id;
     }
+  }
+
+  @override
+  void dispose() {
+    _agentListScrollController.dispose();
+    super.dispose();
   }
 
   @override
@@ -59,6 +71,7 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
           state: widget.state,
           selectedAgentId: _selectedAgentId,
           compact: constraints.maxWidth < 1180 && !stacked,
+          scrollController: _agentListScrollController,
           onSelect: (agentId) => setState(() => _selectedAgentId = agentId),
           onCreate: () async {
             final created = await _showAgentDialog(
@@ -128,6 +141,7 @@ class _AgentListPane extends StatelessWidget {
     required this.state,
     required this.selectedAgentId,
     required this.compact,
+    required this.scrollController,
     required this.onSelect,
     required this.onCreate,
   });
@@ -135,6 +149,7 @@ class _AgentListPane extends StatelessWidget {
   final AiSettingsState state;
   final String? selectedAgentId;
   final bool compact;
+  final ScrollController scrollController;
   final ValueChanged<String> onSelect;
   final Future<void> Function() onCreate;
 
@@ -153,6 +168,7 @@ class _AgentListPane extends StatelessWidget {
       builder: (context, constraints) {
         final hasBoundedHeight = constraints.hasBoundedHeight;
         final listView = ListView.separated(
+          controller: scrollController,
           padding: EdgeInsets.zero,
           // This pane sits next to another vertical scroll view in the desktop
           // split layout. Mark it as non-primary so it does not try to reuse
@@ -189,6 +205,7 @@ class _AgentListPane extends StatelessWidget {
                   // long profile lists stay usable inside the fixed desktop
                   // split-pane layout instead of overflowing the card.
                   child: Scrollbar(
+                    controller: scrollController,
                     thumbVisibility: true,
                     child: listView,
                   ),
@@ -326,181 +343,207 @@ class _AgentDetailPane extends StatelessWidget {
         .where((item) => agent.subAgentIds.contains(item.id))
         .toList(growable: false);
 
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 8),
-      // The agent detail column shares the same screen with the profile list.
-      // Keeping it off the PrimaryScrollController avoids attaching one
-      // controller to multiple desktop panes when both sides are scrollable.
-      primary: false,
-      children: [
-        AiSettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final hasBoundedHeight = constraints.hasBoundedHeight;
+
+        return ListView(
+          padding: const EdgeInsets.only(bottom: 8),
+          // This detail pane is rendered both inside the desktop split view and
+          // inside the narrow stacked mobile-style layout. In the stacked case
+          // the parent already owns the vertical scrollable, so this inner
+          // ListView must shrink-wrap and disable its own scrolling to avoid
+          // creating an unbounded nested viewport.
+          primary: false,
+          shrinkWrap: !hasBoundedHeight,
+          physics: hasBoundedHeight
+              ? const ClampingScrollPhysics()
+              : const NeverScrollableScrollPhysics(),
+          children: [
+            AiSettingsCard(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          agent.name,
-                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          agent.description.trim().isEmpty
-                              ? 'No description provided for this agent.'
-                              : agent.description,
-                          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: palette.textMuted,
-                              ),
-                        ),
-                        const SizedBox(height: 14),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            AiSettingsChip(label: 'id: ${agent.id}'),
-                            AiSettingsChip(label: agent.providerId),
-                            AiSettingsChip(label: agent.modelId),
-                            AiSettingsChip(label: _approvalModeLabel(agent.approvalMode)),
+                            Text(
+                              agent.name,
+                              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              agent.description.trim().isEmpty
+                                  ? 'No description provided for this agent.'
+                                  : agent.description,
+                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                                    color: palette.textMuted,
+                                  ),
+                            ),
+                            const SizedBox(height: 14),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                AiSettingsChip(label: 'id: ${agent.id}'),
+                                AiSettingsChip(label: agent.providerId),
+                                AiSettingsChip(label: agent.modelId),
+                                AiSettingsChip(label: _approvalModeLabel(agent.approvalMode)),
+                              ],
+                            ),
                           ],
                         ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(width: 16),
+                      Switch(
+                        value: agent.enabled,
+                        onChanged: isBuiltinCodex
+                            ? null
+                            : (value) => vm.upsertAgent(agent.copyWith(enabled: value)),
+                        activeThumbColor: palette.primaryBright,
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 16),
-                  Switch(
-                    value: agent.enabled,
-                    onChanged: isBuiltinCodex
-                        ? null
-                        : (value) => vm.upsertAgent(agent.copyWith(enabled: value)),
-                    activeThumbColor: palette.primaryBright,
+                  const SizedBox(height: 18),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: onEdit,
+                        icon: const Icon(Icons.edit_rounded),
+                        label: const Text('Edit Agent'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => _showPromptPreviewDialog(
+                          context,
+                          vm: vm,
+                          state: state,
+                          config: state.config,
+                          agent: agent,
+                        ),
+                        icon: const Icon(Icons.preview_rounded),
+                        label: const Text('Preview System Prompt'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: isBuiltinCodex ? null : () => vm.removeAgent(agent.id),
+                        icon: const Icon(Icons.delete_outline_rounded),
+                        label: const Text('Delete Agent'),
+                      ),
+                    ],
                   ),
                 ],
               ),
-              const SizedBox(height: 18),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
+            ),
+            const SizedBox(height: 16),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final stacked = constraints.maxWidth < 940;
+                final identityCard = AiSettingsCard(
+                  child: _InfoList(
+                    rows: [
+                      ('Description', agent.description),
+                      ('Primary Provider', agent.providerId),
+                      ('Primary Model', agent.modelId),
+                      (
+                        'Built-in Profile',
+                        isBuiltinCodex
+                            ? 'Uses the standard Codex system prompt and the full builtin tool set. Only MCP, skills, provider/model, and sub-agents are configurable here.'
+                            : 'No',
+                      ),
+                      (
+                        'Fallback',
+                        agent.fallbackProviderId.trim().isEmpty ||
+                                agent.fallbackModelId.trim().isEmpty
+                            ? 'Not configured'
+                            : '${agent.fallbackProviderId} / ${agent.fallbackModelId}',
+                      ),
+                      ('Shell Authorization', _approvalModeLabel(agent.approvalMode)),
+                      ('Agent Shell Rules', _shellRulesSummary(agent.shellRules)),
+                    ],
+                  ),
+                );
+                final accessCard = AiSettingsCard(
+                  child: _InfoList(
+                    rows: [
+                      ('Builtin Tools', '${agent.builtinToolIds.length} selected'),
+                      (
+                        'Skills',
+                        skills.isEmpty ? 'None selected' : skills.map((item) => item.name).join(', '),
+                      ),
+                      (
+                        'MCP Servers',
+                        mcpServers.isEmpty
+                            ? 'None selected'
+                            : mcpServers.map((item) => item.name).join(', '),
+                      ),
+                      (
+                        'Sub Agents',
+                        subAgents.isEmpty
+                            ? 'None selected'
+                            : subAgents.map((item) => item.name).join(', '),
+                      ),
+                    ],
+                  ),
+                );
+
+                if (stacked) {
+                  return Column(
+                    children: [
+                      identityCard,
+                      const SizedBox(height: 16),
+                      accessCard,
+                    ],
+                  );
+                }
+
+                return Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: identityCard),
+                    const SizedBox(width: 16),
+                    Expanded(child: accessCard),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 16),
+            AiSettingsCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  FilledButton.icon(
-                    onPressed: onEdit,
-                    icon: const Icon(Icons.edit_rounded),
-                    label: const Text('Edit Agent'),
+                  Text(
+                    isBuiltinCodex ? 'Built-in System Prompt' : 'Custom System Prompt',
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
                   ),
-                  OutlinedButton.icon(
-                    onPressed: () => _showPromptPreviewDialog(
-                      context,
-                      vm: vm,
-                      state: state,
-                      config: state.config,
-                      agent: agent,
-                    ),
-                    icon: const Icon(Icons.preview_rounded),
-                    label: const Text('Preview System Prompt'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: isBuiltinCodex ? null : () => vm.removeAgent(agent.id),
-                    icon: const Icon(Icons.delete_outline_rounded),
-                    label: const Text('Delete Agent'),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 16),
-        LayoutBuilder(
-          builder: (context, constraints) {
-            final stacked = constraints.maxWidth < 940;
-            final identityCard = AiSettingsCard(
-              child: _InfoList(
-                rows: [
-                  ('Description', agent.description),
-                  ('Primary Provider', agent.providerId),
-                  ('Primary Model', agent.modelId),
-                  (
-                    'Built-in Profile',
+                  const SizedBox(height: 8),
+                  Text(
                     isBuiltinCodex
-                        ? 'Uses the standard Codex system prompt and the full builtin tool set. Only MCP, skills, provider/model, and sub-agents are configurable here.'
-                        : 'No',
+                        ? 'This profile always uses the standard Codex system prompt. Desktop Server only adds the shared CLI supplemental prompt plus the agent-specific MCP, skills, and sub-agent runtime config.'
+                        : agent.systemPrompt.trim().isEmpty
+                            ? 'No additional system prompt has been configured for this agent.'
+                            : agent.systemPrompt,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: (isBuiltinCodex || agent.systemPrompt.trim().isEmpty)
+                              ? palette.textMuted
+                              : palette.textSecondary,
+                          height: 1.55,
+                        ),
                   ),
-                  (
-                    'Fallback',
-                    agent.fallbackProviderId.trim().isEmpty || agent.fallbackModelId.trim().isEmpty
-                        ? 'Not configured'
-                        : '${agent.fallbackProviderId} / ${agent.fallbackModelId}',
-                  ),
-                  ('Shell Authorization', _approvalModeLabel(agent.approvalMode)),
-                  ('Agent Shell Rules', _shellRulesSummary(agent.shellRules)),
                 ],
               ),
-            );
-            final accessCard = AiSettingsCard(
-              child: _InfoList(
-                rows: [
-                  ('Builtin Tools', '${agent.builtinToolIds.length} selected'),
-                  ('Skills', skills.isEmpty ? 'None selected' : skills.map((item) => item.name).join(', ')),
-                  ('MCP Servers', mcpServers.isEmpty ? 'None selected' : mcpServers.map((item) => item.name).join(', ')),
-                  ('Sub Agents', subAgents.isEmpty ? 'None selected' : subAgents.map((item) => item.name).join(', ')),
-                ],
-              ),
-            );
-
-            if (stacked) {
-              return Column(
-                children: [
-                  identityCard,
-                  const SizedBox(height: 16),
-                  accessCard,
-                ],
-              );
-            }
-
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: identityCard),
-                const SizedBox(width: 16),
-                Expanded(child: accessCard),
-              ],
-            );
-          },
-        ),
-        const SizedBox(height: 16),
-        AiSettingsCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                isBuiltinCodex ? 'Built-in System Prompt' : 'Custom System Prompt',
-                style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                isBuiltinCodex
-                    ? 'This profile always uses the standard Codex system prompt. Desktop Server only adds the shared CLI supplemental prompt plus the agent-specific MCP, skills, and sub-agent runtime config.'
-                    : agent.systemPrompt.trim().isEmpty
-                        ? 'No additional system prompt has been configured for this agent.'
-                        : agent.systemPrompt,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color: (isBuiltinCodex || agent.systemPrompt.trim().isEmpty)
-                          ? palette.textMuted
-                          : palette.textSecondary,
-                      height: 1.55,
-                    ),
-              ),
-            ],
-          ),
-        ),
-      ],
+            ),
+          ],
+        );
+      },
     );
   }
 }

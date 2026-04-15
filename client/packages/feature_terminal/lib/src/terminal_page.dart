@@ -239,7 +239,19 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                     child: Stack(
                       children: [
                         if (state.terminals.isEmpty && !state.loading)
-                          _TerminalEmptyState(canCreate: canCreate),
+                          Positioned.fill(
+                            // The dashboard embeds TerminalPage in a split
+                            // panel, so the terminal viewport can temporarily
+                            // shrink to a very short height before any session
+                            // is created. Filling the available area here lets
+                            // the empty-state widget inspect the real viewport
+                            // height and switch to a denser layout instead of
+                            // overflowing a loosely sized Stack child.
+                            child: _TerminalEmptyState(
+                              canCreate: canCreate,
+                              compact: widget.compact,
+                            ),
+                          ),
                         Positioned.fill(
                           child: IgnorePointer(
                             ignoring: state.terminals.isEmpty,
@@ -588,37 +600,74 @@ class _TerminalTab extends StatelessWidget {
 }
 
 class _TerminalEmptyState extends StatelessWidget {
-  const _TerminalEmptyState({required this.canCreate});
+  const _TerminalEmptyState({
+    required this.canCreate,
+    required this.compact,
+  });
 
   final bool canCreate;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final l10n = context.l10n;
 
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxHeight = constraints.maxHeight;
+        final dense = compact || (maxHeight.isFinite && maxHeight < 140);
+        final ultraCompact = maxHeight.isFinite && maxHeight < 96;
+        final headline = canCreate ? l10n.noTerminalSession : l10n.terminalStreamUnavailable;
+        final detail = canCreate ? l10n.noTerminalSessionHint : l10n.terminalTargetMissing;
+        final content = Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.terminal_rounded,
-              size: 42,
-              color: palette.textMuted,
-            ),
-            const SizedBox(height: 12),
+            if (!ultraCompact) ...[
+              Icon(
+                Icons.terminal_rounded,
+                size: dense ? 30 : 42,
+                color: palette.textMuted,
+              ),
+              SizedBox(height: dense ? 8 : 12),
+            ],
             Text(
-              canCreate ? l10n.terminalCapabilityHint : l10n.terminalStreamUnavailable,
+              headline,
+              maxLines: ultraCompact ? 1 : 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontSize: dense ? 15 : null,
+                    color: palette.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            SizedBox(height: ultraCompact ? 4 : (dense ? 6 : 10)),
+            Text(
+              detail,
+              maxLines: ultraCompact ? 2 : 3,
+              overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontSize: dense ? 12 : null,
                     color: palette.textSecondary,
+                    height: dense ? 1.25 : null,
                   ),
             ),
           ],
-        ),
-      ),
+        );
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.all(ultraCompact ? 12 : (dense ? 16 : 24)),
+          physics: const ClampingScrollPhysics(),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: maxHeight.isFinite ? maxHeight : 0,
+            ),
+            child: Center(child: content),
+          ),
+        );
+      },
     );
   }
 }

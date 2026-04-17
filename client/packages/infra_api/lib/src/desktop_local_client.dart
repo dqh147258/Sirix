@@ -256,6 +256,7 @@ class DesktopLocalClient {
   Future<void> resolveAiApproval({
     required String sessionId,
     required String capabilityKey,
+    required String agentId,
     required String decision,
     required String scope,
   }) async {
@@ -265,6 +266,7 @@ class DesktopLocalClient {
       body: {
         'session_id': sessionId,
         'capability_key': capabilityKey,
+        'agent_id': agentId,
         'decision': decision,
         'scope': scope,
       },

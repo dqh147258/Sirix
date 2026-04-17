@@ -22,7 +22,7 @@ class TerminalApprovalRequest {
   final String cwd;
   final ApprovalMode configuredMode;
 
-  String get dedupeKey => '$aiSessionId::$capabilityKey';
+  String get dedupeKey => '$aiSessionId::$agentId::$capabilityKey';
 }
 
 @immutable

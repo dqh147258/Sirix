@@ -1,5 +1,5 @@
-use std::io::ErrorKind;
 use std::env;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -210,6 +210,7 @@ pub(crate) struct ExecApprovalRequest<'a> {
     pub(crate) file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
     pub(crate) sandbox_permissions: SandboxPermissions,
     pub(crate) prefix_rule: Option<Vec<String>>,
+    pub(crate) sirix_shell_mode: Option<&'a str>,
 }
 
 impl ExecPolicyManager {
@@ -248,6 +249,7 @@ impl ExecPolicyManager {
             file_system_sandbox_policy,
             sandbox_permissions,
             prefix_rule,
+            sirix_shell_mode,
         } = req;
         let exec_policy = self.current();
         let (commands, used_complex_parsing) = commands_for_exec_policy(command);
@@ -263,6 +265,7 @@ impl ExecPolicyManager {
                 cmd,
                 sandbox_permissions,
                 used_complex_parsing,
+                sirix_shell_mode,
             )
         };
         let match_options = MatchOptions {
@@ -567,8 +570,9 @@ pub fn render_decision_for_unmatched_command(
     command: &[String],
     sandbox_permissions: SandboxPermissions,
     used_complex_parsing: bool,
+    sirix_shell_mode: Option<&str>,
 ) -> Decision {
-    if let Some(mode) = sirix_shell_mode_override() {
+    if let Some(mode) = sirix_shell_mode_override(sirix_shell_mode) {
         return mode;
     }
 
@@ -656,11 +660,19 @@ pub fn render_decision_for_unmatched_command(
     }
 }
 
-fn sirix_shell_mode_override() -> Option<Decision> {
+fn sirix_shell_mode_override(config_shell_mode: Option<&str>) -> Option<Decision> {
+    if let Some(mode) = parse_sirix_shell_mode(config_shell_mode) {
+        return Some(mode);
+    }
+
     let path = env::var(SIRIX_AGENT_RUNTIME_PATH_ENV).ok()?;
     let raw = std::fs::read_to_string(path).ok()?;
     let parsed = serde_json::from_str::<SirixAgentRuntimeFile>(&raw).ok()?;
-    match parsed.shell_mode?.trim().to_ascii_lowercase().as_str() {
+    parse_sirix_shell_mode(parsed.shell_mode.as_deref())
+}
+
+fn parse_sirix_shell_mode(raw: Option<&str>) -> Option<Decision> {
+    match raw?.trim().to_ascii_lowercase().as_str() {
         "allow" => Some(Decision::Allow),
         "ask" => Some(Decision::Prompt),
         "deny" => Some(Decision::Forbidden),

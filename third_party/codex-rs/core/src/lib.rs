@@ -88,6 +88,7 @@ pub mod sandboxing;
 mod session_prefix;
 mod session_startup_prewarm;
 mod shell_detect;
+mod sirix_tool_approval;
 pub mod skills;
 pub(crate) use skills::SkillError;
 pub(crate) use skills::SkillInjections;

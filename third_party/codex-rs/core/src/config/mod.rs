@@ -258,6 +258,15 @@ pub struct Config {
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
 
+    /// Sirix role/profile identity for the current thread when Codex is
+    /// embedded inside the Sirix desktop runtime.
+    pub sirix_agent_id: Option<String>,
+
+    /// Sirix fallback shell mode override for the current role (`allow / ask /
+    /// deny`). Sirix uses this to keep spawned role threads aligned with the
+    /// originating agent profile.
+    pub sirix_shell_mode: Option<String>,
+
     /// Guardian-specific tenant policy config override from requirements.toml.
     /// This is inserted into the fixed guardian prompt template under the
     /// `# Policy Configuration` section rather than replacing the whole
@@ -2050,6 +2059,8 @@ impl Config {
             base_instructions,
             personality,
             developer_instructions,
+            sirix_agent_id: cfg.sirix_agent_id,
+            sirix_shell_mode: cfg.sirix_shell_mode,
             compact_prompt,
             commit_attribution,
             include_permissions_instructions,

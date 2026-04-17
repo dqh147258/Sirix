@@ -528,6 +528,7 @@ impl EscalationPolicy for CoreShellActionProvider {
                     sandbox_policy: &self.sandbox_policy,
                     file_system_sandbox_policy: &self.file_system_sandbox_policy,
                     sandbox_permissions: self.approval_sandbox_permissions,
+                    sirix_shell_mode: self.turn.config.sirix_shell_mode.as_deref(),
                     enable_shell_wrapper_parsing:
                         ENABLE_INTERCEPTED_EXEC_POLICY_SHELL_WRAPPER_PARSING,
                 },
@@ -580,6 +581,7 @@ fn evaluate_intercepted_exec_policy(
         sandbox_policy,
         file_system_sandbox_policy,
         sandbox_permissions,
+        sirix_shell_mode,
         enable_shell_wrapper_parsing,
     } = context;
     let CandidateCommands {
@@ -607,6 +609,7 @@ fn evaluate_intercepted_exec_policy(
             cmd,
             sandbox_permissions,
             used_complex_parsing,
+            sirix_shell_mode,
         )
     };
 
@@ -625,6 +628,7 @@ struct InterceptedExecPolicyContext<'a> {
     sandbox_policy: &'a SandboxPolicy,
     file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
     sandbox_permissions: SandboxPermissions,
+    sirix_shell_mode: Option<&'a str>,
     enable_shell_wrapper_parsing: bool,
 }
 

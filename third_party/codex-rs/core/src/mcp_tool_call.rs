@@ -28,6 +28,9 @@ use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
 use crate::mcp_tool_approval_templates::RenderedMcpToolApprovalParam;
 use crate::mcp_tool_approval_templates::render_mcp_tool_approval_template;
+use crate::sirix_tool_approval::SirixToolApprovalDecision;
+use crate::sirix_tool_approval::mcp_capability_key;
+use crate::sirix_tool_approval::wait_for_sirix_tool_approval;
 use codex_analytics::AppInvocation;
 use codex_analytics::InvocationType;
 use codex_analytics::build_track_events_context;
@@ -138,6 +141,45 @@ pub(crate) async fn handle_mcp_tool_call(
         );
         return CallToolResult::from_result(result);
     }
+
+    // When Sirix hosts Codex, MCP tools should follow the same capability-based
+    // tool approval system as builtin tools. We resolve that policy first and
+    // only fall back to the native Codex MCP prompt flow when Sirix is not
+    // present or when ARC explicitly asks for an additional safety review.
+    let sirix_capability_key = mcp_capability_key(&server, &tool_name);
+    let sirix_tool_approved = match wait_for_sirix_tool_approval(
+        sirix_capability_key.as_str(),
+        turn_context.config.sirix_agent_id.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(SirixToolApprovalDecision::Allow)) => true,
+        Ok(Some(SirixToolApprovalDecision::Deny)) => {
+            let result = notify_mcp_tool_call_skip(
+                sess.as_ref(),
+                turn_context.as_ref(),
+                &call_id,
+                invocation.clone(),
+                "MCP tool call denied by the current Sirix tool approval policy".to_string(),
+                /*already_started*/ false,
+            )
+            .await;
+            let status = if result.is_ok() { "ok" } else { "error" };
+            turn_context.session_telemetry.counter(
+                MCP_CALL_COUNT_METRIC,
+                /*inc*/ 1,
+                &[("status", status)],
+            );
+            return CallToolResult::from_result(result);
+        }
+        Ok(None) => false,
+        Err(error) => {
+            return CallToolResult::from_error_text(format!(
+                "tool approval error for MCP tool `{server}.{tool_name}`: {error}"
+            ));
+        }
+    };
+
     let request_meta =
         build_mcp_tool_call_request_meta(turn_context.as_ref(), &server, metadata.as_ref());
     let connector_id = metadata
@@ -167,6 +209,7 @@ pub(crate) async fn handle_mcp_tool_call(
         &invocation,
         metadata.as_ref(),
         approval_mode,
+        sirix_tool_approved,
     )
     .await
     {
@@ -693,6 +736,7 @@ async fn maybe_request_mcp_tool_approval(
     invocation: &McpInvocation,
     metadata: Option<&McpToolApprovalMetadata>,
     approval_mode: AppToolApproval,
+    sirix_tool_approved: bool,
 ) -> Option<McpToolApprovalDecision> {
     if mcp_permission_prompt_is_auto_approved(
         turn_context.approval_policy.value(),
@@ -703,12 +747,15 @@ async fn maybe_request_mcp_tool_approval(
 
     let annotations = metadata.and_then(|metadata| metadata.annotations.as_ref());
     let approval_required = requires_mcp_tool_approval(annotations);
+    if sirix_tool_approved && !approval_required {
+        return None;
+    }
     if !approval_required && approval_mode != AppToolApproval::Prompt {
         return None;
     }
 
     let mut monitor_reason = None;
-    let auto_approved_by_policy = approval_mode == AppToolApproval::Approve;
+    let auto_approved_by_policy = sirix_tool_approved || approval_mode == AppToolApproval::Approve;
 
     if auto_approved_by_policy {
         match maybe_monitor_auto_approved_mcp_tool_call(
@@ -730,6 +777,10 @@ async fn maybe_request_mcp_tool_approval(
                 ));
             }
         }
+    }
+
+    if sirix_tool_approved && monitor_reason.is_none() {
+        return None;
     }
 
     let session_approval_key = session_mcp_tool_approval_key(invocation, metadata, approval_mode);

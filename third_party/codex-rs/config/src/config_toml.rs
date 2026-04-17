@@ -132,6 +132,17 @@ pub struct ConfigToml {
     #[serde(default)]
     pub developer_instructions: Option<String>,
 
+    /// Sirix-only metadata used to keep spawned role sessions associated with
+    /// the originating Sirix agent profile.
+    #[serde(default)]
+    pub sirix_agent_id: Option<String>,
+
+    /// Sirix-only fallback shell mode (`allow / ask / deny`) for the current
+    /// role. The embedded Codex runtime ignores this field unless Sirix patches
+    /// consult it during approval resolution.
+    #[serde(default)]
+    pub sirix_shell_mode: Option<String>,
+
     /// Whether to inject the `<permissions instructions>` developer block.
     pub include_permissions_instructions: Option<bool>,
 

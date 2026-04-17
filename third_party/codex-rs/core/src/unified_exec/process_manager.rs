@@ -673,6 +673,7 @@ impl UnifiedExecProcessManager {
                     request.sandbox_permissions
                 },
                 prefix_rule: request.prefix_rule.clone(),
+                sirix_shell_mode: context.turn.config.sirix_shell_mode.as_deref(),
             })
             .await;
         let req = UnifiedExecToolRequest {

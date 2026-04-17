@@ -9,6 +9,8 @@ use anyhow::Context;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+const APPROVAL_KEY_SEPARATOR: char = '\u{1f}';
+
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
@@ -33,7 +35,7 @@ pub struct ApprovalRecord {
 #[derive(Default)]
 pub struct AiApprovalRegistry {
     storage_dir: PathBuf,
-    // ai_session_id -> capability_key -> decision
+    // ai_session_id -> (agent_id + capability_key) -> decision
     records: Arc<RwLock<HashMap<Uuid, HashMap<String, ApprovalRecord>>>>,
     pending_requests: Arc<RwLock<HashSet<(Uuid, String)>>>,
 }
@@ -54,14 +56,16 @@ impl AiApprovalRegistry {
     pub async fn resolve_for_check(
         &self,
         ai_session_id: Uuid,
+        agent_id: &str,
         capability_key: &str,
     ) -> Option<ApprovalRecord> {
+        let key = approval_record_key(agent_id, capability_key);
         let mut guard = self.records.write().await;
         let capability_map = guard.get_mut(&ai_session_id)?;
-        let record = capability_map.get(capability_key).copied()?;
+        let record = capability_map.get(&key).copied()?;
         match record.scope {
             ApprovalScope::Once => {
-                capability_map.remove(capability_key);
+                capability_map.remove(&key);
                 let should_delete = capability_map.is_empty();
                 let snapshot = if should_delete {
                     None
@@ -74,6 +78,7 @@ impl AiApprovalRegistry {
                 {
                     tracing::warn!(
                         ai_session_id = %ai_session_id,
+                        agent_id,
                         capability_key,
                         error = %error,
                         "failed to persist once approval removal"
@@ -85,11 +90,18 @@ impl AiApprovalRegistry {
         }
     }
 
-    pub async fn set(&self, ai_session_id: Uuid, capability_key: String, record: ApprovalRecord) {
+    pub async fn set(
+        &self,
+        ai_session_id: Uuid,
+        agent_id: &str,
+        capability_key: &str,
+        record: ApprovalRecord,
+    ) {
+        let key = approval_record_key(agent_id, capability_key);
         let snapshot = {
             let mut guard = self.records.write().await;
             let capability_map = guard.entry(ai_session_id).or_default();
-            capability_map.insert(capability_key, record);
+            capability_map.insert(key, record);
             capability_map.clone()
         };
         if let Err(error) =
@@ -97,23 +109,41 @@ impl AiApprovalRegistry {
         {
             tracing::warn!(
                 ai_session_id = %ai_session_id,
+                agent_id,
+                capability_key,
                 error = %error,
                 "failed to persist approval record"
             );
         }
     }
 
-    pub async fn mark_pending(&self, ai_session_id: Uuid, capability_key: &str) -> bool {
+    pub async fn mark_pending(
+        &self,
+        ai_session_id: Uuid,
+        agent_id: &str,
+        capability_key: &str,
+    ) -> bool {
         let mut guard = self.pending_requests.write().await;
-        guard.insert((ai_session_id, capability_key.to_string()))
+        guard.insert((ai_session_id, approval_record_key(agent_id, capability_key)))
     }
 
-    pub async fn clear_pending(&self, ai_session_id: Uuid, capability_key: &str) {
+    pub async fn clear_pending(&self, ai_session_id: Uuid, agent_id: &str, capability_key: &str) {
         self.pending_requests
             .write()
             .await
-            .remove(&(ai_session_id, capability_key.to_string()));
+            .remove(&(ai_session_id, approval_record_key(agent_id, capability_key)));
     }
+}
+
+fn approval_record_key(agent_id: &str, capability_key: &str) -> String {
+    // Persist approvals per-session and per-agent so one sub-agent's cached
+    // answer cannot silently satisfy another sub-agent asking for the same
+    // capability later in the thread.
+    format!(
+        "{}{APPROVAL_KEY_SEPARATOR}{}",
+        agent_id.trim(),
+        capability_key.trim()
+    )
 }
 
 fn load_records(
@@ -167,4 +197,106 @@ fn persist_session_records(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{env, fs};
+
+    fn temp_storage_dir(test_name: &str) -> PathBuf {
+        let path = env::temp_dir().join(format!("sirix-approval-{test_name}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("create temp approval dir");
+        path
+    }
+
+    #[tokio::test]
+    async fn approvals_are_isolated_per_agent() {
+        let storage_dir = temp_storage_dir("isolated-per-agent");
+        let registry = AiApprovalRegistry::new(&storage_dir).expect("registry");
+        let session_id = Uuid::new_v4();
+
+        registry
+            .set(
+                session_id,
+                "agent-a",
+                "builtin.apply_patch",
+                ApprovalRecord {
+                    decision: ApprovalDecision::Allow,
+                    scope: ApprovalScope::Session,
+                },
+            )
+            .await;
+        registry
+            .set(
+                session_id,
+                "agent-b",
+                "builtin.apply_patch",
+                ApprovalRecord {
+                    decision: ApprovalDecision::Deny,
+                    scope: ApprovalScope::Session,
+                },
+            )
+            .await;
+
+        assert_eq!(
+            registry
+                .resolve_for_check(session_id, "agent-a", "builtin.apply_patch")
+                .await,
+            Some(ApprovalRecord {
+                decision: ApprovalDecision::Allow,
+                scope: ApprovalScope::Session,
+            })
+        );
+        assert_eq!(
+            registry
+                .resolve_for_check(session_id, "agent-b", "builtin.apply_patch")
+                .await,
+            Some(ApprovalRecord {
+                decision: ApprovalDecision::Deny,
+                scope: ApprovalScope::Session,
+            })
+        );
+
+        fs::remove_dir_all(storage_dir).expect("remove temp approval dir");
+    }
+
+    #[tokio::test]
+    async fn pending_requests_are_isolated_per_agent() {
+        let storage_dir = temp_storage_dir("pending-per-agent");
+        let registry = AiApprovalRegistry::new(&storage_dir).expect("registry");
+        let session_id = Uuid::new_v4();
+
+        assert!(
+            registry
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .await
+        );
+        assert!(
+            registry
+                .mark_pending(session_id, "agent-b", "builtin.apply_patch")
+                .await
+        );
+        assert!(
+            !registry
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .await
+        );
+
+        registry
+            .clear_pending(session_id, "agent-a", "builtin.apply_patch")
+            .await;
+        assert!(
+            registry
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .await
+        );
+        assert!(
+            !registry
+                .mark_pending(session_id, "agent-b", "builtin.apply_patch")
+                .await
+        );
+
+        fs::remove_dir_all(storage_dir).expect("remove temp approval dir");
+    }
 }

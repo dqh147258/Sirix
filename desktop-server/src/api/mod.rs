@@ -36,6 +36,10 @@ pub fn router(state: AppState) -> Router {
             "/ai/shell-rules",
             get(ai::get_shell_rules).patch(ai::set_shell_rules),
         )
+        .route(
+            "/ai/tool-rules",
+            get(ai::get_tool_rules).patch(ai::set_tool_rules),
+        )
         .route("/ai/config/effective", get(ai::get_effective_ai_config))
         .route(
             "/ai/providers/models",

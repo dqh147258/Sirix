@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     convert::Infallible,
-    path::PathBuf,
+    path::{Path as StdPath, PathBuf},
 };
 
 use anyhow::Context;
@@ -38,7 +38,7 @@ use crate::app::{
             infer_provider_default_context_window, normalized_sirix_config,
             resolve_session_picker_model, session_picker_model_id, validate_sirix_config,
             ApprovalMode, ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig,
-            SirixConfig,
+            SirixConfig, ToolRulesConfig,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -72,12 +72,14 @@ pub struct LaunchAiSessionRequest {
 pub struct CheckApprovalRequest {
     pub session_id: String,
     pub capability_key: String,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ResolveApprovalRequest {
     pub session_id: String,
     pub capability_key: String,
+    pub agent_id: Option<String>,
     pub decision: ApprovalDecision,
     pub scope: ApprovalScope,
 }
@@ -239,6 +241,27 @@ pub async fn set_shell_rules(
     state
         .sirix_config_store
         .save_global_shell_rules(&payload)
+        .map_err(ApiError::internal)?;
+    Ok(Json(payload))
+}
+
+pub async fn get_tool_rules(
+    State(state): State<AppState>,
+) -> Result<Json<ToolRulesConfig>, ApiError> {
+    let rules = state
+        .sirix_config_store
+        .load_global_tool_rules()
+        .map_err(ApiError::internal)?;
+    Ok(Json(rules))
+}
+
+pub async fn set_tool_rules(
+    State(state): State<AppState>,
+    Json(payload): Json<ToolRulesConfig>,
+) -> Result<Json<ToolRulesConfig>, ApiError> {
+    state
+        .sirix_config_store
+        .save_global_tool_rules(&payload)
         .map_err(ApiError::internal)?;
     Ok(Json(payload))
 }
@@ -552,10 +575,16 @@ pub async fn check_approval(
             payload.session_id
         )));
     };
+    let effective_agent_id = payload
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(record.agent_id.as_str());
 
     if let Some(cached) = state
         .ai_approval_registry
-        .resolve_for_check(record.ai_session_id, capability_key)
+        .resolve_for_check(record.ai_session_id, effective_agent_id, capability_key)
         .await
     {
         let outcome = match cached.decision {
@@ -569,25 +598,32 @@ pub async fn check_approval(
         }));
     }
 
-    let configured_mode = resolve_capability_mode(
+    let resolved = resolve_capability_mode(
         state.sirix_config_store.as_ref(),
-        &record.cwd,
-        &record.agent_id,
+        StdPath::new(&record.cwd),
+        effective_agent_id,
         capability_key,
     )
     .map_err(ApiError::internal)?;
-    let outcome = match configured_mode {
+    let outcome = match resolved.configured_mode {
         ApprovalMode::Allow => "allow",
         ApprovalMode::Deny => "deny",
         ApprovalMode::Ask => {
-            emit_approval_request_event(&state, &record, capability_key, configured_mode.clone())
-                .await;
+            emit_approval_request_event(
+                &state,
+                &record,
+                resolved.agent_id.as_str(),
+                resolved.model_id.as_str(),
+                capability_key,
+                resolved.configured_mode.clone(),
+            )
+            .await;
             "ask"
         }
     };
     Ok(Json(CheckApprovalResponse {
         outcome: outcome.to_string(),
-        configured_mode,
+        configured_mode: resolved.configured_mode,
         cached: false,
     }))
 }
@@ -610,12 +646,19 @@ pub async fn resolve_approval(
             payload.session_id
         )));
     };
+    let effective_agent_id = payload
+        .agent_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(record.agent_id.as_str());
 
     state
         .ai_approval_registry
         .set(
             record.ai_session_id,
-            capability_key.clone(),
+            effective_agent_id,
+            &capability_key,
             ApprovalRecord {
                 decision: payload.decision,
                 scope: payload.scope,
@@ -624,7 +667,7 @@ pub async fn resolve_approval(
         .await;
     state
         .ai_approval_registry
-        .clear_pending(record.ai_session_id, &capability_key)
+        .clear_pending(record.ai_session_id, effective_agent_id, &capability_key)
         .await;
 
     if record.mirrored_to_backend {
@@ -645,6 +688,7 @@ pub async fn resolve_approval(
             "payload": {
                 "ai_session_id": record.ai_session_id,
                 "terminal_id": record.terminal_id,
+                "agent_id": effective_agent_id,
                 "capability_key": capability_key,
                 "decision": match payload.decision {
                     ApprovalDecision::Allow => "allow",
@@ -1965,35 +2009,133 @@ fn sse_json_event(kind: &str, payload: &JsonValue) -> Event {
 
 fn resolve_capability_mode(
     store: &crate::app::ai::config::SirixConfigStore,
-    cwd: &str,
+    cwd: &StdPath,
     agent_id: &str,
     capability_key: &str,
-) -> anyhow::Result<ApprovalMode> {
-    let config = store.effective_for_workspace(Some(cwd))?.config;
+) -> anyhow::Result<ResolvedCapabilityApproval> {
+    let config = store.effective_for_workspace(cwd.to_str())?.config;
     let agent = config
         .agents
         .iter()
         .find(|item| item.id == agent_id)
         .cloned();
     let Some(agent) = agent else {
-        return Ok(ApprovalMode::Allow);
+        return Ok(ResolvedCapabilityApproval {
+            agent_id: agent_id.to_string(),
+            model_id: String::new(),
+            configured_mode: ApprovalMode::Allow,
+        });
     };
 
-    if capability_key == "builtin.shell" {
-        return Ok(agent.approval_mode);
+    let configured_mode = if capability_key == "builtin.shell" {
+        resolve_shell_capability_mode(store, cwd, &agent)?
+    } else if capability_key.starts_with("builtin.") || capability_key.starts_with("mcp.") {
+        resolve_tool_capability_mode(store, cwd, &agent, capability_key)?
+    } else {
+        ApprovalMode::Allow
+    };
+
+    Ok(ResolvedCapabilityApproval {
+        agent_id: agent.id,
+        model_id: agent.model_id,
+        configured_mode,
+    })
+}
+
+struct ResolvedCapabilityApproval {
+    agent_id: String,
+    model_id: String,
+    configured_mode: ApprovalMode,
+}
+
+fn resolve_shell_capability_mode(
+    store: &crate::app::ai::config::SirixConfigStore,
+    cwd: &StdPath,
+    agent: &crate::app::ai::config::AgentConfig,
+) -> anyhow::Result<ApprovalMode> {
+    // Shell commands are evaluated later against prefix rules in the generated
+    // exec-policy file. This API endpoint only needs the merged fallback mode
+    // (`allow / ask / deny`) that applies when no prefix rule matches.
+    Ok(match agent.approval_mode {
+        ApprovalMode::Allow => ApprovalMode::Allow,
+        ApprovalMode::Deny => ApprovalMode::Deny,
+        ApprovalMode::Ask => {
+            store
+                .effective_shell_rules_for_agent(cwd, agent, &ShellRulesConfig::default())?
+                .mode
+        }
+    })
+}
+
+fn resolve_tool_capability_mode(
+    store: &crate::app::ai::config::SirixConfigStore,
+    cwd: &StdPath,
+    agent: &crate::app::ai::config::AgentConfig,
+    capability_key: &str,
+) -> anyhow::Result<ApprovalMode> {
+    let rules = store.effective_tool_rules_for_agent(cwd, agent)?;
+    if rules
+        .deny
+        .iter()
+        .any(|rule| tool_rule_matches(rule, capability_key))
+    {
+        return Ok(ApprovalMode::Deny);
     }
-    Ok(ApprovalMode::Allow)
+    if rules
+        .allow
+        .iter()
+        .any(|rule| tool_rule_matches(rule, capability_key))
+    {
+        return Ok(ApprovalMode::Allow);
+    }
+    Ok(rules.mode)
+}
+
+fn tool_rule_matches(rule: &str, capability_key: &str) -> bool {
+    let normalized_rule = rule.trim();
+    if normalized_rule.is_empty() {
+        return false;
+    }
+
+    // Backward compatibility for existing builtin rules that only stored the
+    // bare builtin tool id (for example `apply_patch`) before MCP capability
+    // keys were added to the same rule set.
+    if let Some(builtin_tool_id) = capability_key.strip_prefix("builtin.") {
+        if normalized_rule.eq_ignore_ascii_case(builtin_tool_id) {
+            return true;
+        }
+    }
+
+    capability_rule_prefix_matches(normalized_rule, capability_key)
+}
+
+fn capability_rule_prefix_matches(rule: &str, capability_key: &str) -> bool {
+    let rule = rule.trim().trim_matches('.');
+    let capability_key = capability_key.trim().trim_matches('.');
+    if rule.is_empty() || capability_key.is_empty() {
+        return false;
+    }
+
+    if rule.eq_ignore_ascii_case(capability_key) {
+        return true;
+    }
+
+    capability_key.len() > rule.len()
+        && capability_key[..rule.len()].eq_ignore_ascii_case(rule)
+        && capability_key.as_bytes()[rule.len()] == b'.'
 }
 
 async fn emit_approval_request_event(
     state: &AppState,
     record: &AiSessionRecord,
+    agent_id: &str,
+    model_id: &str,
     capability_key: &str,
     configured_mode: ApprovalMode,
 ) {
     if !state
         .ai_approval_registry
-        .mark_pending(record.ai_session_id, capability_key)
+        .mark_pending(record.ai_session_id, agent_id, capability_key)
         .await
     {
         return;
@@ -2006,8 +2148,8 @@ async fn emit_approval_request_event(
                 "ai_session_id": record.ai_session_id,
                 "terminal_id": record.terminal_id,
                 "cwd": record.cwd,
-                "agent_id": record.agent_id,
-                "model_id": record.model_id,
+                "agent_id": agent_id,
+                "model_id": model_id,
                 "capability_key": capability_key,
                 "configured_mode": configured_mode,
             }

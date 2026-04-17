@@ -206,6 +206,12 @@ impl Default for ShellRulesConfig {
     }
 }
 
+/// Tool permissions currently use the same `mode / allow / deny` envelope as
+/// shell rules, but they are evaluated against tool capability keys (for
+/// example `builtin.apply_patch` or `mcp.docs.search`) instead of shell
+/// command prefixes.
+pub type ToolRulesConfig = ShellRulesConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionAgentRuntimeConfig {
     pub agent_id: String,
@@ -233,6 +239,8 @@ pub struct AgentConfig {
     pub approval_mode: ApprovalMode,
     #[serde(default)]
     pub shell_rules: ShellRulesConfig,
+    #[serde(default)]
+    pub tool_rules: ToolRulesConfig,
     #[serde(default)]
     pub builtin_tool_ids: Vec<String>,
     #[serde(default)]
@@ -313,6 +321,7 @@ impl Default for SirixConfig {
                 system_prompt: String::new(),
                 approval_mode: ApprovalMode::Ask,
                 shell_rules: ShellRulesConfig::default(),
+                tool_rules: ToolRulesConfig::default(),
                 builtin_tool_ids: default_builtin_tool_ids(),
                 skill_ids: Vec::new(),
                 mcp_server_ids: Vec::new(),
@@ -412,8 +421,16 @@ impl SirixConfigStore {
         self.sirix_home.join("shell-rules.json")
     }
 
+    pub fn global_tool_rules_path(&self) -> PathBuf {
+        self.sirix_home.join("tool-rules.json")
+    }
+
     pub fn workspace_shell_rules_path(&self, cwd: &Path) -> PathBuf {
         cwd.join(".sirix").join("shell-rules.json")
+    }
+
+    pub fn workspace_tool_rules_path(&self, cwd: &Path) -> PathBuf {
+        cwd.join(".sirix").join("tool-rules.json")
     }
 
     fn shared_codex_home(&self) -> PathBuf {
@@ -438,6 +455,14 @@ impl SirixConfigStore {
         self.save_shell_rules_to_path(&self.global_shell_rules_path(), rules)
     }
 
+    pub fn load_global_tool_rules(&self) -> anyhow::Result<ToolRulesConfig> {
+        self.load_rules_from_path(&self.global_tool_rules_path())
+    }
+
+    pub fn save_global_tool_rules(&self, rules: &ToolRulesConfig) -> anyhow::Result<()> {
+        self.save_rules_to_path(&self.global_tool_rules_path(), rules)
+    }
+
     pub fn load_workspace_shell_rules(
         &self,
         cwd: &Path,
@@ -449,6 +474,14 @@ impl SirixConfigStore {
         self.load_shell_rules_from_path(&path).map(Some)
     }
 
+    pub fn load_workspace_tool_rules(&self, cwd: &Path) -> anyhow::Result<Option<ToolRulesConfig>> {
+        let path = self.workspace_tool_rules_path(cwd);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        self.load_rules_from_path(&path).map(Some)
+    }
+
     pub fn save_workspace_shell_rules(
         &self,
         cwd: &Path,
@@ -457,9 +490,25 @@ impl SirixConfigStore {
         self.save_shell_rules_to_path(&self.workspace_shell_rules_path(cwd), rules)
     }
 
+    pub fn save_workspace_tool_rules(
+        &self,
+        cwd: &Path,
+        rules: &ToolRulesConfig,
+    ) -> anyhow::Result<()> {
+        self.save_rules_to_path(&self.workspace_tool_rules_path(cwd), rules)
+    }
+
     pub fn effective_shell_rules(&self, cwd: &Path) -> anyhow::Result<ShellRulesConfig> {
         let global = self.load_global_shell_rules()?;
         let Some(workspace) = self.load_workspace_shell_rules(cwd)? else {
+            return Ok(global);
+        };
+        Ok(merge_shell_rules(global, workspace))
+    }
+
+    pub fn effective_tool_rules(&self, cwd: &Path) -> anyhow::Result<ToolRulesConfig> {
+        let global = self.load_global_tool_rules()?;
+        let Some(workspace) = self.load_workspace_tool_rules(cwd)? else {
             return Ok(global);
         };
         Ok(merge_shell_rules(global, workspace))
@@ -556,15 +605,35 @@ impl SirixConfigStore {
         agent: &AgentConfig,
         session_shell_rules: &ShellRulesConfig,
     ) -> anyhow::Result<ShellRulesConfig> {
-        // Agent-level rules sit between global/workspace defaults and temporary
-        // session decisions so the Edit Agent screen can override shared policy
-        // without breaking the existing runtime "remember this decision" flow.
-        let workspace_rules = self.effective_shell_rules(cwd)?;
-        let agent_rules = merge_shell_rule_prefixes(workspace_rules, agent.shell_rules.clone());
+        // Shell rule precedence is Global -> Agent -> Workspace -> Session.
+        // The workspace layer remains later than Agent so a concrete project can
+        // still override a reusable profile when the two disagree.
+        let global_rules = self.load_global_shell_rules()?;
+        let agent_rules = merge_shell_rule_prefixes(global_rules, agent.shell_rules.clone());
+        let workspace_rules = match self.load_workspace_shell_rules(cwd)? {
+            Some(workspace_rules) => merge_shell_rules(agent_rules, workspace_rules),
+            None => agent_rules,
+        };
         Ok(merge_shell_rule_prefixes(
-            agent_rules,
+            workspace_rules,
             session_shell_rules.clone(),
         ))
+    }
+
+    pub fn effective_tool_rules_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+    ) -> anyhow::Result<ToolRulesConfig> {
+        // Tool rules follow the requested precedence Global -> Agent -> Workspace.
+        // Session-scope decisions are intentionally excluded here because the
+        // approval registry handles them as volatile per-session overrides.
+        let global_rules = self.load_global_tool_rules()?;
+        let agent_rules = merge_shell_rule_prefixes(global_rules, agent.tool_rules.clone());
+        Ok(match self.load_workspace_tool_rules(cwd)? {
+            Some(workspace_rules) => merge_shell_rules(agent_rules, workspace_rules),
+            None => agent_rules,
+        })
     }
 
     pub fn effective_for_workspace(
@@ -849,11 +918,11 @@ impl SirixConfigStore {
         merge_projects_into_config_path(self.shared_codex_config_path().as_path(), projects)
     }
 
-    fn load_shell_rules_from_path(&self, path: &Path) -> anyhow::Result<ShellRulesConfig> {
+    fn load_rules_from_path(&self, path: &Path) -> anyhow::Result<ShellRulesConfig> {
         if !path.exists() {
-            if path == self.global_shell_rules_path() {
+            if path == self.global_shell_rules_path() || path == self.global_tool_rules_path() {
                 let default_rules = ShellRulesConfig::default();
-                self.save_shell_rules_to_path(path, &default_rules)?;
+                self.save_rules_to_path(path, &default_rules)?;
                 return Ok(default_rules);
             }
             return Ok(ShellRulesConfig::default());
@@ -867,11 +936,11 @@ impl SirixConfigStore {
         Ok(rules)
     }
 
-    fn save_shell_rules_to_path(
-        &self,
-        path: &Path,
-        rules: &ShellRulesConfig,
-    ) -> anyhow::Result<()> {
+    fn load_shell_rules_from_path(&self, path: &Path) -> anyhow::Result<ShellRulesConfig> {
+        self.load_rules_from_path(path)
+    }
+
+    fn save_rules_to_path(&self, path: &Path, rules: &ShellRulesConfig) -> anyhow::Result<()> {
         let mut normalized = rules.clone();
         normalize_shell_rules(&mut normalized);
         if let Some(parent) = path.parent() {
@@ -883,6 +952,14 @@ impl SirixConfigStore {
         fs::write(path, serialized)
             .with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
+    }
+
+    fn save_shell_rules_to_path(
+        &self,
+        path: &Path,
+        rules: &ShellRulesConfig,
+    ) -> anyhow::Result<()> {
+        self.save_rules_to_path(path, rules)
     }
 }
 
@@ -1001,6 +1078,21 @@ fn build_codex_bridge_toml(
             TomlValue::String(instructions),
         );
     }
+    // Bake the Sirix profile identity and resolved shell mode into the bridge
+    // config so spawned sub-agents can switch policy with their own role config
+    // instead of inheriting the parent's runtime env file.
+    root.insert(
+        "sirix_agent_id".to_string(),
+        TomlValue::String(launch.agent.id.clone()),
+    );
+    root.insert(
+        "sirix_shell_mode".to_string(),
+        TomlValue::String(shell_mode_override_for_agent(
+            cwd,
+            &launch.agent,
+            &effective,
+        )?),
+    );
 
     let mut model_providers = toml::map::Map::<String, TomlValue>::new();
     let mut provider_value = toml::map::Map::<String, TomlValue>::new();
@@ -1048,7 +1140,7 @@ fn build_codex_bridge_toml(
     );
     let role_dir = launch.session_storage_dir.join(SIRIX_AGENT_ROLES_DIR);
     let role_files =
-        write_sirix_agent_role_files(&effective, &launch.session_providers, &role_dir)?;
+        write_sirix_agent_role_files(&effective, &launch.session_providers, cwd, &role_dir)?;
     root.insert(
         "agents".to_string(),
         build_sirix_agent_role_entries(&effective, &launch.agent, &role_files),
@@ -1066,6 +1158,39 @@ fn build_codex_bridge_toml(
     );
 
     Ok(root)
+}
+
+fn shell_mode_override_for_agent(
+    cwd: &Path,
+    agent: &AgentConfig,
+    _config: &SirixConfig,
+) -> anyhow::Result<String> {
+    // The bridge/role config only needs the final fallback mode for commands
+    // that are not matched by any generated exec-policy prefix rule. Prefix
+    // allow/deny entries are already materialized into the shared exec policy
+    // file, so this helper only resolves the merged `allow / ask / deny` mode.
+    //
+    // We intentionally re-load the persisted shell-rules layers here so
+    // sub-agent role files inherit the same Global -> Agent -> Workspace merge
+    // semantics as the root session runtime.
+    let effective_shell_mode = match agent.approval_mode {
+        ApprovalMode::Allow => ApprovalMode::Allow,
+        ApprovalMode::Deny => ApprovalMode::Deny,
+        ApprovalMode::Ask => {
+            let store = SirixConfigStore::new()?;
+            store
+                .effective_shell_rules_for_agent(cwd, agent, &ShellRulesConfig::default())?
+                .mode
+        }
+    };
+
+    let shell_mode = match effective_shell_mode {
+        ApprovalMode::Allow => "allow",
+        ApprovalMode::Ask => "ask",
+        ApprovalMode::Deny => "deny",
+    };
+
+    Ok(shell_mode.to_string())
 }
 
 fn build_bridge_models_for_session(
@@ -1352,6 +1477,7 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
         }
 
         normalize_shell_rules(&mut agent.shell_rules);
+        normalize_shell_rules(&mut agent.tool_rules);
 
         normalize_builtin_codex_agent(agent, &default_builtin_tools);
     }
@@ -1375,6 +1501,7 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                     system_prompt: String::new(),
                     approval_mode: ApprovalMode::Ask,
                     shell_rules: ShellRulesConfig::default(),
+                    tool_rules: ToolRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tools,
                     skill_ids: Vec::new(),
                     mcp_server_ids: Vec::new(),
@@ -2381,11 +2508,11 @@ fn merge_shell_rules(base: ShellRulesConfig, overlay: ShellRulesConfig) -> Shell
 
     for rule in overlay.allow {
         upsert_shell_rule(&mut merged.allow, &rule);
-        merged.deny.retain(|existing| existing != &rule);
+        prune_opposite_rules(&mut merged.deny, &rule);
     }
     for rule in overlay.deny {
         upsert_shell_rule(&mut merged.deny, &rule);
-        merged.allow.retain(|existing| existing != &rule);
+        prune_opposite_rules(&mut merged.allow, &rule);
     }
 
     normalize_shell_rules(&mut merged);
@@ -2407,11 +2534,11 @@ fn merge_shell_rule_prefixes(
 
     for rule in overlay.allow {
         upsert_shell_rule(&mut merged.allow, &rule);
-        merged.deny.retain(|existing| existing != &rule);
+        prune_opposite_rules(&mut merged.deny, &rule);
     }
     for rule in overlay.deny {
         upsert_shell_rule(&mut merged.deny, &rule);
-        merged.allow.retain(|existing| existing != &rule);
+        prune_opposite_rules(&mut merged.allow, &rule);
     }
 
     normalize_shell_rules(&mut merged);
@@ -2471,6 +2598,20 @@ fn upsert_shell_rule(items: &mut Vec<String>, rule: &str) {
         return;
     }
     items.push(rendered);
+}
+
+fn prune_opposite_rules(items: &mut Vec<String>, rule: &str) {
+    let rule_tokens = tokenize_shell_rule(rule);
+    if rule_tokens.is_empty() {
+        return;
+    }
+    // A higher-precedence rule only deletes lower-precedence opposite entries
+    // that it fully covers. This preserves the narrower-vs-broader distinction
+    // required by the permission merge examples in the design note.
+    items.retain(|existing| {
+        let existing_tokens = tokenize_shell_rule(existing);
+        !is_prefix_tokens(&rule_tokens, &existing_tokens)
+    });
 }
 
 fn tokenize_shell_rule(raw: &str) -> Vec<String> {
@@ -2731,6 +2872,7 @@ fn build_sirix_role_config_value(
     config: &SirixConfig,
     providers: &[ProviderConfig],
     agent: &AgentConfig,
+    workspace_root: &Path,
     role_files: &HashMap<String, PathBuf>,
 ) -> anyhow::Result<TomlValue> {
     let mut root = toml::map::Map::<String, TomlValue>::new();
@@ -2741,6 +2883,18 @@ fn build_sirix_role_config_value(
     root.insert(
         "model".to_string(),
         TomlValue::String(role_model_picker_id(providers, agent)?),
+    );
+    root.insert(
+        "sirix_agent_id".to_string(),
+        TomlValue::String(agent.id.clone()),
+    );
+    root.insert(
+        "sirix_shell_mode".to_string(),
+        TomlValue::String(shell_mode_override_for_agent(
+            workspace_root,
+            agent,
+            config,
+        )?),
     );
     root.insert(
         "skills".to_string(),
@@ -2819,6 +2973,7 @@ fn role_file_stem_for_agent_id(agent_id: &str, used_stems: &mut HashSet<String>)
 fn write_sirix_agent_role_files(
     config: &SirixConfig,
     providers: &[ProviderConfig],
+    workspace_root: &Path,
     role_dir: &Path,
 ) -> anyhow::Result<HashMap<String, PathBuf>> {
     fs::create_dir_all(role_dir)
@@ -2840,7 +2995,8 @@ fn write_sirix_agent_role_files(
         .iter()
         .filter(|item| item.enabled && is_agent_launchable(config, item))
     {
-        let role_value = build_sirix_role_config_value(config, providers, agent, &role_files)?;
+        let role_value =
+            build_sirix_role_config_value(config, providers, agent, workspace_root, &role_files)?;
         let role_path = role_files
             .get(agent.id.as_str())
             .with_context(|| format!("missing role path for {}", agent.id))?;
@@ -3240,6 +3396,7 @@ mod tests {
             system_prompt: prompt.to_string(),
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
+            tool_rules: ToolRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),
@@ -3271,8 +3428,14 @@ mod tests {
         agent.id = "CON".to_string();
         config.agents = vec![agent.clone()];
 
-        let role_files = write_sirix_agent_role_files(&config, &config.providers, &role_dir)
-            .expect("role files should be generated");
+        let workspace_root = PathBuf::from("/tmp/workspace");
+        let role_files = write_sirix_agent_role_files(
+            &config,
+            &config.providers,
+            workspace_root.as_path(),
+            &role_dir,
+        )
+        .expect("role files should be generated");
         let role_path = role_files
             .get(agent.id.as_str())
             .expect("role path should exist for CON agent");
@@ -3304,6 +3467,7 @@ mod tests {
             system_prompt: "legacy override".to_string(),
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
+            tool_rules: ToolRulesConfig::default(),
             builtin_tool_ids: vec!["shell".to_string()],
             skill_ids: vec!["skill-a".to_string()],
             mcp_server_ids: vec!["mcp-a".to_string()],
@@ -3404,6 +3568,7 @@ args = ["serve"]
             system_prompt: "Review carefully".to_string(),
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
+            tool_rules: ToolRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: vec![skill.id.clone()],
             mcp_server_ids: vec![mcp_server.id.clone()],
@@ -3427,6 +3592,7 @@ args = ["serve"]
             system_prompt: String::new(),
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
+            tool_rules: ToolRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),

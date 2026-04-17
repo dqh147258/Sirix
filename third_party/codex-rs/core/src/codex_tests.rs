@@ -5670,6 +5670,7 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
             file_system_sandbox_policy: &turn_context.file_system_sandbox_policy,
             sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
     assert!(matches!(

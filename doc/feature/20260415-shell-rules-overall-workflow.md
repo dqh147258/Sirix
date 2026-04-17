@@ -10,7 +10,7 @@
 - 运行时出现 Shell 授权弹层后，用户的决定如何写回对应作用域
 - 新规则写回后，当前 Session 如何立即生效
 
-这份文档只聚焦 Shell Rules，不再混写 Agent 切换、MCP、Skills、fallback model 等其它能力。
+这份文档只聚焦 Shell Rules，不再混写 Agent 切换、Tool Rules、MCP、Skills、fallback model 等其它能力。
 
 ## 代码位置
 
@@ -122,17 +122,17 @@ Session 级 Shell Rules 不持久化到全局配置文件，也不写入工作�
 当前完整优先级为：
 
 1. 全局规则
-2. 工作区规则
-3. Agent 规则
+2. Agent 规则
+3. 工作区规则
 4. Session 临时规则
 
 冲突时，后者覆盖前者。
 
 具体语义：
 
-- 工作区规则覆盖全局规则
-- Agent 规则覆盖全局和工作区规则
-- Session 规则覆盖前三层
+- Agent 规则先覆盖全局规则
+- 工作区规则再覆盖全局与 Agent 规则
+- Session 规则最后覆盖前三层
 
 其中有一个关键实现细节：
 
@@ -140,11 +140,11 @@ Session 级 Shell Rules 不持久化到全局配置文件，也不写入工作�
   - 会同时合并 `mode / allow / deny`
 - Agent / Session 合并使用 `merge_shell_rule_prefixes`
   - 只合并 `allow / deny`
-  - 不会把全局 / 工作区已确定的 `mode` 被默认 `ask` 意外重置
+  - 不会把已确定的共享 `mode` 被默认 `ask` 意外重置
 
 这样做的原因是：
 
-- 工作区本来就应该能覆盖全局 `mode`
+- 工作区本来就应该能在最后覆盖共享 `mode`
 - Agent 和 Session 只应补充前缀控制，不应无意改变共享默认模式
 
 ## 规则规范化与前缀归并
@@ -166,6 +166,14 @@ Sirix 在保存和加载 Shell Rules 时会统一做规范化：
 
 - 如果后来加入一个更粗前缀
 - 已存在的更细前缀也会被收敛掉
+
+另外还有一个关键冲突规则：
+
+- 如果更高优先级层新增了相反方向的更粗前缀，例如高层 `deny = ["find"]`
+- 低优先级层里被它完整覆盖的反向前缀，例如 `allow = ["find . -name"]`
+- 会在合并时被移除
+
+这样才能满足“高优先级的更粗规则覆盖低优先级的更细规则”的权限语义。
 
 这样可以避免规则文件不断膨胀，也可以让规则语义更稳定。
 
@@ -213,8 +221,8 @@ Sirix 在保存和加载 Shell Rules 时会统一做规范化：
 1. desktop-server 先解析当前工作区的有效 AI 配置
 2. 选中当前 Agent
 3. 读取全局 Shell Rules
-4. 如果当前工作区存在 `.sirix/shell-rules.json`，再叠加工作区规则
-5. 再叠加当前 Agent 的 `shell_rules`
+4. 先叠加当前 Agent 的 `shell_rules`
+5. 如果当前工作区存在 `.sirix/shell-rules.json`，再叠加工作区规则
 6. 再叠加当前 Session 的临时 Shell Rules
 7. 得到最终 `effective_shell_rules`
 

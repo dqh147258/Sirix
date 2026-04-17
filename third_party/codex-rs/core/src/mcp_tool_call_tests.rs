@@ -1263,6 +1263,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Approve,
+        false,
     )
     .await;
 
@@ -1330,6 +1331,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Auto,
+        false,
     )
     .await;
 
@@ -1400,6 +1402,7 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Auto,
+        false,
     )
     .await;
 
@@ -1454,6 +1457,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
                 &invocation,
                 Some(&metadata),
                 AppToolApproval::Prompt,
+                false,
             )
             .await
         })
@@ -1526,6 +1530,7 @@ async fn approve_mode_blocks_when_arc_returns_interrupt_for_model() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Approve,
+        false,
     )
     .await;
 
@@ -1595,6 +1600,7 @@ async fn custom_approve_mode_blocks_when_arc_returns_interrupt_for_model() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Approve,
+        false,
     )
     .await;
 
@@ -1664,6 +1670,7 @@ async fn approve_mode_blocks_when_arc_returns_interrupt_without_annotations() {
         &invocation,
         Some(&metadata),
         AppToolApproval::Approve,
+        false,
     )
     .await;
 
@@ -1746,6 +1753,7 @@ async fn full_access_mode_skips_arc_monitor_for_all_approval_modes() {
             &invocation,
             Some(&metadata),
             approval_mode,
+            false,
         )
         .await;
 
@@ -1842,6 +1850,7 @@ async fn approve_mode_routes_arc_ask_user_to_guardian_when_guardian_reviewer_is_
         &invocation,
         Some(&metadata),
         AppToolApproval::Approve,
+        false,
     )
     .await;
 

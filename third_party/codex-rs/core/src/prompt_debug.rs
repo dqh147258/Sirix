@@ -8,11 +8,11 @@ use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
-use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
@@ -189,11 +189,10 @@ pub(crate) async fn build_responses_request_preview_from_session(
         Vec::new()
     };
     let verbosity = if turn_context.model_info.support_verbosity {
-        turn_context.config.model_verbosity.or(
-            turn_context
-                .model_info
-                .default_verbosity,
-        )
+        turn_context
+            .config
+            .model_verbosity
+            .or(turn_context.model_info.default_verbosity)
     } else {
         None
     };

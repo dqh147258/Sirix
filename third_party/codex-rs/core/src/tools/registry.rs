@@ -9,6 +9,8 @@ use crate::hook_runtime::run_post_tool_use_hooks;
 use crate::hook_runtime::run_pre_tool_use_hooks;
 use crate::memories::usage::emit_metric_for_tool_read;
 use crate::sandbox_tags::sandbox_tag;
+use crate::sirix_tool_approval::SirixToolApprovalDecision;
+use crate::sirix_tool_approval::wait_for_sirix_tool_approval;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -300,6 +302,8 @@ impl ToolRegistry {
             );
             return Err(FunctionCallError::Fatal(message));
         }
+
+        ensure_sirix_builtin_tool_approval(&invocation).await?;
 
         if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
             && let Some(reason) = run_pre_tool_use_hooks(
@@ -650,6 +654,51 @@ async fn dispatch_after_tool_use_hook(
     }
 
     None
+}
+
+fn sirix_builtin_tool_name_for_approval(invocation: &ToolInvocation) -> Option<&str> {
+    if invocation.tool_namespace.is_some() {
+        return None;
+    }
+
+    match &invocation.payload {
+        ToolPayload::Function { .. } | ToolPayload::ToolSearch { .. } => {}
+        ToolPayload::Custom { .. } | ToolPayload::LocalShell { .. } | ToolPayload::Mcp { .. } => {
+            return None;
+        }
+    }
+
+    let tool_name = invocation.tool_name.as_str();
+    if matches!(
+        tool_name,
+        // Shell-capable tools already flow through the dedicated exec approval
+        // pipeline, so this bridge only handles non-shell builtin tools.
+        "shell" | "shell_command" | "exec_command" | "write_stdin"
+    ) {
+        return None;
+    }
+
+    Some(tool_name)
+}
+
+async fn ensure_sirix_builtin_tool_approval(
+    invocation: &ToolInvocation,
+) -> Result<(), FunctionCallError> {
+    let Some(tool_name) = sirix_builtin_tool_name_for_approval(invocation) else {
+        return Ok(());
+    };
+
+    let capability_key = format!("builtin.{tool_name}");
+    let agent_id = invocation.turn.config.sirix_agent_id.as_deref();
+    match wait_for_sirix_tool_approval(capability_key.as_str(), agent_id)
+        .await
+        .map_err(FunctionCallError::Fatal)?
+    {
+        Some(SirixToolApprovalDecision::Allow) | None => Ok(()),
+        Some(SirixToolApprovalDecision::Deny) => Err(FunctionCallError::RespondToModel(format!(
+            "tool `{tool_name}` was denied by the current Sirix approval policy"
+        ))),
+    }
 }
 
 #[cfg(test)]

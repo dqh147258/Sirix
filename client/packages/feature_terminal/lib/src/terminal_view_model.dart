@@ -730,11 +730,16 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
 
   void _handleApprovalResolved(Map<String, dynamic> body) {
     final aiSessionId = body['ai_session_id'] as String? ?? '';
+    final agentId = body['agent_id'] as String? ?? '';
     final capabilityKey = body['capability_key'] as String? ?? '';
     if (aiSessionId.isEmpty || capabilityKey.isEmpty) {
       return;
     }
-    _removeApprovalRequest(aiSessionId: aiSessionId, capabilityKey: capabilityKey);
+    _removeApprovalRequest(
+      aiSessionId: aiSessionId,
+      agentId: agentId,
+      capabilityKey: capabilityKey,
+    );
   }
 
   String? _resolveEventTerminalId(Map<String, dynamic> body) {
@@ -851,11 +856,13 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
       await localClient.resolveAiApproval(
         sessionId: request.aiSessionId,
         capabilityKey: request.capabilityKey,
+        agentId: request.agentId,
         decision: decision,
         scope: scope,
       );
       _removeApprovalRequest(
         aiSessionId: request.aiSessionId,
+        agentId: request.agentId,
         capabilityKey: request.capabilityKey,
       );
       state = state.copyWith(clearError: true);
@@ -868,6 +875,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
 
   void _removeApprovalRequest({
     required String aiSessionId,
+    required String agentId,
     required String capabilityKey,
   }) {
     state = state.copyWith(
@@ -875,6 +883,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
           .where(
             (request) =>
                 !(request.aiSessionId == aiSessionId &&
+                    request.agentId == agentId &&
                     request.capabilityKey == capabilityKey),
           )
           .toList(growable: false),

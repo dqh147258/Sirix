@@ -19,13 +19,18 @@ use codex_protocol::protocol::GranularApprovalConfig;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::env;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use tempfile::TempDir;
 use tempfile::tempdir;
 use toml::Value as TomlValue;
+
+static SIRIX_SHELL_MODE_TEST_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 fn config_stack_for_dot_codex_folder(dot_codex_folder: &Path) -> ConfigLayerStack {
     let dot_codex_folder =
@@ -805,6 +810,7 @@ fn unmatched_granular_policy_still_prompts_for_restricted_sandbox_escalation() {
             &command,
             SandboxPermissions::RequireEscalated,
             /*used_complex_parsing*/ false,
+            None,
         )
     );
 }
@@ -823,6 +829,81 @@ fn unmatched_on_request_uses_split_filesystem_policy_for_escalation_prompts() {
             &command,
             SandboxPermissions::RequireEscalated,
             /*used_complex_parsing*/ false,
+            None,
+        )
+    );
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = env::var(key).ok();
+        // Tests serialize access with a process-wide mutex before mutating the
+        // environment, which satisfies the platform caveat on env mutation.
+        unsafe { env::set_var(key, value) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        match self.previous.as_ref() {
+            Some(previous) => unsafe { env::set_var(self.key, previous) },
+            None => unsafe { env::remove_var(self.key) },
+        }
+    }
+}
+
+#[test]
+fn explicit_sirix_shell_mode_overrides_runtime_env_file() {
+    let _guard = SIRIX_SHELL_MODE_TEST_ENV_LOCK
+        .lock()
+        .expect("lock shell mode env");
+    let temp_dir = tempdir().expect("create temp dir");
+    let runtime_path = temp_dir.path().join("sirix-agent-runtime.json");
+    fs::write(&runtime_path, r#"{ "shell_mode": "ask" }"#).expect("write runtime file");
+    let _env_guard = EnvVarGuard::set(SIRIX_AGENT_RUNTIME_PATH_ENV, &runtime_path);
+    let command = vec!["madeup-cmd".to_string()];
+
+    assert_eq!(
+        Decision::Forbidden,
+        render_decision_for_unmatched_command(
+            AskForApproval::OnRequest,
+            &SandboxPolicy::DangerFullAccess,
+            &unrestricted_file_system_sandbox_policy(),
+            &command,
+            SandboxPermissions::UseDefault,
+            /*used_complex_parsing*/ false,
+            Some("deny"),
+        )
+    );
+}
+
+#[test]
+fn runtime_env_file_still_drives_shell_mode_when_config_override_missing() {
+    let _guard = SIRIX_SHELL_MODE_TEST_ENV_LOCK
+        .lock()
+        .expect("lock shell mode env");
+    let temp_dir = tempdir().expect("create temp dir");
+    let runtime_path = temp_dir.path().join("sirix-agent-runtime.json");
+    fs::write(&runtime_path, r#"{ "shell_mode": "deny" }"#).expect("write runtime file");
+    let _env_guard = EnvVarGuard::set(SIRIX_AGENT_RUNTIME_PATH_ENV, &runtime_path);
+    let command = vec!["madeup-cmd".to_string()];
+
+    assert_eq!(
+        Decision::Forbidden,
+        render_decision_for_unmatched_command(
+            AskForApproval::OnRequest,
+            &SandboxPolicy::DangerFullAccess,
+            &unrestricted_file_system_sandbox_policy(),
+            &command,
+            SandboxPermissions::UseDefault,
+            /*used_complex_parsing*/ false,
+            None,
         )
     );
 }
@@ -908,6 +989,7 @@ async fn mixed_rule_and_sandbox_prompt_prioritizes_rule_for_rejection_decision()
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::RequireEscalated,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -945,6 +1027,7 @@ async fn mixed_rule_and_sandbox_prompt_rejects_when_granular_rules_are_disabled(
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::RequireEscalated,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -969,6 +1052,7 @@ async fn exec_approval_requirement_falls_back_to_heuristics() {
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -994,6 +1078,7 @@ async fn empty_bash_lc_script_falls_back_to_original_command() {
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -1023,6 +1108,7 @@ async fn whitespace_bash_lc_script_falls_back_to_original_command() {
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::UseDefault,
             prefix_rule: None,
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -1052,6 +1138,7 @@ async fn request_rule_uses_prefix_rule() {
             file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::RequireEscalated,
             prefix_rule: Some(vec!["cargo".to_string(), "install".to_string()]),
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -1084,6 +1171,7 @@ async fn request_rule_falls_back_when_prefix_rule_does_not_approve_all_commands(
             file_system_sandbox_policy: &unrestricted_file_system_sandbox_policy(),
             sandbox_permissions: SandboxPermissions::RequireEscalated,
             prefix_rule: Some(vec!["cargo".to_string(), "install".to_string()]),
+            sirix_shell_mode: None,
         })
         .await;
 
@@ -1123,6 +1211,7 @@ async fn heuristics_apply_when_other_commands_match_policy() {
                 file_system_sandbox_policy: &unrestricted_file_system_sandbox_policy(),
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 prefix_rule: None,
+                sirix_shell_mode: None,
             })
             .await,
         ExecApprovalRequirement::NeedsApproval {
@@ -1546,6 +1635,7 @@ async fn verify_approval_requirement_for_unsafe_powershell_command() {
                 file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
                 sandbox_permissions: permissions,
                 prefix_rule: None,
+                sirix_shell_mode: None,
             })
             .await,
         "{pwsh_approval_reason}"
@@ -1570,6 +1660,7 @@ async fn verify_approval_requirement_for_unsafe_powershell_command() {
                 file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
                 sandbox_permissions: permissions,
                 prefix_rule: None,
+                sirix_shell_mode: None,
             })
             .await,
         r#"On all platforms, a forbidden command should require approval
@@ -1590,6 +1681,7 @@ async fn verify_approval_requirement_for_unsafe_powershell_command() {
                 file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
                 sandbox_permissions: permissions,
                 prefix_rule: None,
+                sirix_shell_mode: None,
             })
             .await,
         r#"On all platforms, a forbidden command should require approval
@@ -1688,6 +1780,7 @@ async fn assert_exec_approval_requirement_for_command(
             file_system_sandbox_policy: &file_system_sandbox_policy,
             sandbox_permissions,
             prefix_rule,
+            sirix_shell_mode: None,
         })
         .await;
 

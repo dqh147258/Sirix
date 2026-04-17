@@ -508,6 +508,7 @@ impl ShellHandler {
                     effective_additional_permissions.sandbox_permissions
                 },
                 prefix_rule,
+                sirix_shell_mode: turn.config.sirix_shell_mode.as_deref(),
             })
             .await;
 

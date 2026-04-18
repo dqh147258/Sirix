@@ -13,7 +13,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc::UnboundedSender, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -25,18 +25,57 @@ type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 type SharedReplayBuffer = Arc<Mutex<TerminalReplayBuffer>>;
+type SharedHostedControlSender = Arc<Mutex<Option<UnboundedSender<HostedTerminalCommand>>>>;
 
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
 const TERMINAL_OUTPUT_MAX_BATCH_BYTES: usize = 16 * 1024;
 const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalSessionSource {
+    LocalPty,
+    Hosted,
+}
+
+impl TerminalSessionSource {
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            Self::LocalPty => "local_pty",
+            Self::Hosted => "hosted",
+        }
+    }
+
+    pub fn supports_ai_current_terminal_reuse(self) -> bool {
+        matches!(self, Self::LocalPty)
+    }
+}
+
 struct TerminalSessionHandle {
-    master: SharedMaster,
-    writer: SharedWriter,
-    child: SharedChild,
+    endpoint: TerminalSessionEndpoint,
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
     replay_buffer: SharedReplayBuffer,
     remote_sync: bool,
+}
+
+enum TerminalSessionEndpoint {
+    LocalPty {
+        master: SharedMaster,
+        writer: SharedWriter,
+        child: SharedChild,
+    },
+    Hosted {
+        host_token: String,
+        control_sender: SharedHostedControlSender,
+    },
+}
+
+impl TerminalSessionEndpoint {
+    fn source(&self) -> TerminalSessionSource {
+        match self {
+            Self::LocalPty { .. } => TerminalSessionSource::LocalPty,
+            Self::Hosted { .. } => TerminalSessionSource::Hosted,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +88,22 @@ struct TerminalSessionMetadata {
     rows: u16,
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
+}
+
+enum TerminalCloseReason {
+    Closed,
+    Error(String),
+}
+
+#[derive(Clone)]
+struct TerminalOutputContext {
+    client: reqwest::Client,
+    backend_base_url: String,
+    device_id: String,
+    local_events: broadcast::Sender<String>,
+    terminal_id: Uuid,
+    replay_buffer: SharedReplayBuffer,
+    remote_sync: bool,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +149,7 @@ pub struct LocalTerminalSnapshot {
     pub terminal_id: Uuid,
     pub device_id: String,
     pub title: String,
+    pub source: String,
     pub shell: String,
     pub cwd: String,
     pub state: String,
@@ -101,6 +157,31 @@ pub struct LocalTerminalSnapshot {
     pub rows: i32,
     pub created_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostedTerminalSession {
+    pub terminal_id: Uuid,
+    pub host_token: String,
+    pub remote_sync: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type")]
+pub enum HostedTerminalCommand {
+    #[serde(rename = "terminal.host.input")]
+    Input {
+        terminal_id: Uuid,
+        data_base64: String,
+    },
+    #[serde(rename = "terminal.host.resize")]
+    Resize {
+        terminal_id: Uuid,
+        cols: u16,
+        rows: u16,
+    },
+    #[serde(rename = "terminal.host.close")]
+    Close { terminal_id: Uuid },
 }
 
 pub struct TerminalManager {
@@ -220,11 +301,28 @@ impl TerminalManager {
             .get(&terminal_id)
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
 
-        let mut writer = handle
-            .writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
-        writer.write_all(&bytes)?;
+        match &handle.endpoint {
+            TerminalSessionEndpoint::LocalPty { writer, .. } => {
+                let mut writer = writer
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
+                writer.write_all(&bytes)?;
+            }
+            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
+                let payload = HostedTerminalCommand::Input {
+                    terminal_id,
+                    data_base64: data_base64.to_string(),
+                };
+                let sender = control_sender
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
+                sender
+                    .send(payload)
+                    .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal input"))?;
+            }
+        }
         Ok(())
     }
 
@@ -234,16 +332,34 @@ impl TerminalManager {
             .get(&terminal_id)
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
 
-        let master = handle
-            .master
-            .lock()
-            .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
-        master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        match &handle.endpoint {
+            TerminalSessionEndpoint::LocalPty { master, .. } => {
+                let master = master
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
+                master.resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })?;
+            }
+            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
+                let payload = HostedTerminalCommand::Resize {
+                    terminal_id,
+                    cols,
+                    rows,
+                };
+                let sender = control_sender
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
+                sender
+                    .send(payload)
+                    .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal resize"))?;
+            }
+        }
         if let Ok(mut metadata) = handle.metadata.lock() {
             metadata.cols = cols;
             metadata.rows = rows;
@@ -252,24 +368,168 @@ impl TerminalManager {
     }
 
     pub async fn close(&self, terminal_id: Uuid) -> anyhow::Result<()> {
-        let mut remote_sync = false;
-        if let Some(handle) = self.sessions.write().await.remove(&terminal_id) {
-            remote_sync = handle.remote_sync;
-            if let Ok(mut metadata) = handle.metadata.lock() {
-                metadata.state = "closed".to_string();
-                metadata.closed_at = Some(Utc::now());
-            }
-            if let Ok(mut child) = handle.child.lock() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+        self.close_session(terminal_id, TerminalCloseReason::Closed, true)
+            .await
+    }
+
+    pub async fn create_hosted_terminal(
+        &self,
+        terminal_id: Uuid,
+        shell: String,
+        cwd: String,
+        title: String,
+        cols: u16,
+        rows: u16,
+        remote_sync: bool,
+    ) -> anyhow::Result<HostedTerminalSession> {
+        let host_token = Uuid::new_v4().to_string();
+        let metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
+            title: title.clone(),
+            shell: shell.clone(),
+            cwd: cwd.clone(),
+            state: "opening".to_string(),
+            cols,
+            rows,
+            created_at: Utc::now(),
+            closed_at: None,
+        }));
+        let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
+        self.sessions.write().await.insert(
+            terminal_id,
+            TerminalSessionHandle {
+                endpoint: TerminalSessionEndpoint::Hosted {
+                    host_token: host_token.clone(),
+                    control_sender: Arc::new(Mutex::new(None)),
+                },
+                metadata,
+                replay_buffer,
+                remote_sync,
+            },
+        );
+
+        self.update_state(
+            terminal_id,
+            "opening",
+            Some(title),
+            Some(shell),
+            Some(cwd),
+            Some(cols.into()),
+            Some(rows.into()),
+            None,
+        )
+        .await?;
+        self.publish_local_terminal_ready(terminal_id).await;
+
+        Ok(HostedTerminalSession {
+            terminal_id,
+            host_token,
+            remote_sync,
+        })
+    }
+
+    pub async fn register_hosted_terminal(
+        &self,
+        terminal_id: Uuid,
+        host_token: &str,
+        sender: UnboundedSender<HostedTerminalCommand>,
+    ) -> anyhow::Result<()> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let TerminalSessionEndpoint::Hosted {
+            host_token: expected_token,
+            control_sender,
+        } = &handle.endpoint
+        else {
+            anyhow::bail!("terminal session is not hosted");
+        };
+        if expected_token != host_token.trim() {
+            anyhow::bail!("invalid hosted terminal registration token");
         }
-        if remote_sync {
-            self.update_state(terminal_id, "closed", None, None, None, None, None, None)
-                .await?;
+
+        {
+            let mut guard = control_sender
+                .lock()
+                .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?;
+            if guard.is_some() {
+                anyhow::bail!("hosted terminal already has an active host connection");
+            }
+            *guard = Some(sender);
         }
-        self.publish_local_terminal_event("terminal.closed", json!({ "terminal_id": terminal_id }));
+        if let Ok(mut metadata) = handle.metadata.lock() {
+            metadata.state = "active".to_string();
+        }
+        drop(sessions);
+
+        self.update_state(terminal_id, "active", None, None, None, None, None, None)
+            .await?;
+        self.publish_local_terminal_ready(terminal_id).await;
         Ok(())
+    }
+
+    pub async fn ingest_hosted_output(
+        &self,
+        terminal_id: Uuid,
+        data_base64: &str,
+    ) -> anyhow::Result<()> {
+        let bytes = BASE64.decode(data_base64)?;
+        self.push_terminal_output(terminal_id, &bytes).await?;
+        Ok(())
+    }
+
+    pub async fn update_hosted_terminal_size(
+        &self,
+        terminal_id: Uuid,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<()> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let TerminalSessionEndpoint::Hosted { .. } = &handle.endpoint else {
+            anyhow::bail!("terminal session is not hosted");
+        };
+        if let Ok(mut metadata) = handle.metadata.lock() {
+            metadata.cols = cols;
+            metadata.rows = rows;
+        }
+        drop(sessions);
+
+        self.update_state(
+            terminal_id,
+            "active",
+            None,
+            None,
+            None,
+            Some(cols.into()),
+            Some(rows.into()),
+            None,
+        )
+        .await
+    }
+
+    pub async fn complete_hosted_terminal(
+        &self,
+        terminal_id: Uuid,
+        error_message: Option<String>,
+    ) -> anyhow::Result<()> {
+        let reason = if let Some(message) = error_message {
+            TerminalCloseReason::Error(message)
+        } else {
+            TerminalCloseReason::Closed
+        };
+        self.close_session(terminal_id, reason, false).await
+    }
+
+    pub async fn hosted_terminal_disconnected(&self, terminal_id: Uuid) -> anyhow::Result<()> {
+        self.close_session(
+            terminal_id,
+            TerminalCloseReason::Error("hosted terminal connection dropped".to_string()),
+            false,
+        )
+        .await
     }
 
     pub async fn get_snapshot(&self, terminal_id: Uuid) -> Option<LocalTerminalSnapshot> {
@@ -280,6 +540,7 @@ impl TerminalManager {
             terminal_id,
             device_id: self.device_id.clone(),
             title: metadata.title,
+            source: handle.endpoint.source().as_api_str().to_string(),
             shell: metadata.shell,
             cwd: metadata.cwd,
             state: metadata.state,
@@ -303,6 +564,7 @@ impl TerminalManager {
                     terminal_id: *terminal_id,
                     device_id: self.device_id.clone(),
                     title: metadata.title,
+                    source: handle.endpoint.source().as_api_str().to_string(),
                     shell: metadata.shell,
                     cwd: metadata.cwd,
                     state: metadata.state,
@@ -399,6 +661,10 @@ impl TerminalManager {
         builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
         if let Some(terminal_id) = terminal_id {
             builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
+            builder.env(
+                "SIRIX_TERMINAL_KIND",
+                TerminalSessionSource::LocalPty.as_api_str(),
+            );
         }
         Ok(())
     }
@@ -446,9 +712,11 @@ impl TerminalManager {
         self.sessions.write().await.insert(
             terminal_id,
             TerminalSessionHandle {
-                master: master.clone(),
-                writer: writer.clone(),
-                child: child.clone(),
+                endpoint: TerminalSessionEndpoint::LocalPty {
+                    master: master.clone(),
+                    writer: writer.clone(),
+                    child: child.clone(),
+                },
                 metadata: metadata.clone(),
                 replay_buffer: replay_buffer.clone(),
                 remote_sync,
@@ -467,28 +735,121 @@ impl TerminalManager {
         )
         .await?;
 
-        let client = self.client.clone();
-        let backend_base_url = self.backend_base_url.clone();
-        let device_id = self.device_id.clone();
-        let local_events = self.local_events.clone();
+        let output_context = TerminalOutputContext {
+            client: self.client.clone(),
+            backend_base_url: self.backend_base_url.clone(),
+            device_id: self.device_id.clone(),
+            local_events: self.local_events.clone(),
+            terminal_id,
+            replay_buffer: replay_buffer.clone(),
+            remote_sync,
+        };
         let runtime_handle = tokio::runtime::Handle::current();
         thread::spawn(move || {
-            stream_terminal_output(
-                reader,
-                client,
-                backend_base_url,
-                device_id,
-                local_events,
-                terminal_id,
-                metadata,
-                replay_buffer,
-                runtime_handle,
-                remote_sync,
-            );
+            stream_terminal_output(reader, output_context, metadata, runtime_handle);
         });
 
         self.publish_local_terminal_ready(terminal_id).await;
         Ok(())
+    }
+
+    async fn close_session(
+        &self,
+        terminal_id: Uuid,
+        reason: TerminalCloseReason,
+        notify_host: bool,
+    ) -> anyhow::Result<()> {
+        let Some(handle) = self.sessions.write().await.remove(&terminal_id) else {
+            return Ok(());
+        };
+        let event_type = match &reason {
+            TerminalCloseReason::Closed => "terminal.closed",
+            TerminalCloseReason::Error(_) => "terminal.error",
+        };
+        let error_message = match &reason {
+            TerminalCloseReason::Closed => None,
+            TerminalCloseReason::Error(message) => Some(message.clone()),
+        };
+
+        if let Ok(mut metadata) = handle.metadata.lock() {
+            metadata.state = if error_message.is_some() {
+                "error".to_string()
+            } else {
+                "closed".to_string()
+            };
+            metadata.closed_at = Some(Utc::now());
+        }
+
+        match handle.endpoint {
+            TerminalSessionEndpoint::LocalPty { child, .. } => {
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
+                if notify_host {
+                    if let Ok(guard) = control_sender.lock() {
+                        if let Some(sender) = guard.as_ref() {
+                            let _ = sender.send(HostedTerminalCommand::Close { terminal_id });
+                        }
+                    }
+                }
+            }
+        }
+
+        self.update_state(
+            terminal_id,
+            if error_message.is_some() {
+                "error"
+            } else {
+                "closed"
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            error_message.clone(),
+        )
+        .await?;
+        self.publish_local_terminal_event(
+            event_type,
+            match error_message {
+                Some(message) => json!({
+                    "terminal_id": terminal_id,
+                    "error_message": message,
+                }),
+                None => json!({
+                    "terminal_id": terminal_id,
+                }),
+            },
+        );
+        Ok(())
+    }
+
+    async fn output_context(&self, terminal_id: Uuid) -> Option<TerminalOutputContext> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions.get(&terminal_id)?;
+        Some(TerminalOutputContext {
+            client: self.client.clone(),
+            backend_base_url: self.backend_base_url.clone(),
+            device_id: self.device_id.clone(),
+            local_events: self.local_events.clone(),
+            terminal_id,
+            replay_buffer: handle.replay_buffer.clone(),
+            remote_sync: handle.remote_sync,
+        })
+    }
+
+    async fn push_terminal_output(&self, terminal_id: Uuid, chunk: &[u8]) -> anyhow::Result<()> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let Some(context) = self.output_context(terminal_id).await else {
+            anyhow::bail!("terminal session not found");
+        };
+        push_terminal_output_chunk(&context, chunk).await
     }
 
     async fn is_remote_sync(&self, terminal_id: Uuid) -> bool {
@@ -499,19 +860,21 @@ impl TerminalManager {
             .map(|handle| handle.remote_sync)
             .unwrap_or(false)
     }
+
+    pub async fn session_source(&self, terminal_id: Uuid) -> Option<TerminalSessionSource> {
+        self.sessions
+            .read()
+            .await
+            .get(&terminal_id)
+            .map(|handle| handle.endpoint.source())
+    }
 }
 
 fn stream_terminal_output(
     mut reader: Box<dyn Read + Send>,
-    client: reqwest::Client,
-    backend_base_url: String,
-    device_id: String,
-    local_events: broadcast::Sender<String>,
-    terminal_id: Uuid,
+    context: TerminalOutputContext,
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
-    replay_buffer: SharedReplayBuffer,
     runtime: tokio::runtime::Handle,
-    remote_sync: bool,
 ) {
     let (tx, rx) = mpsc::sync_channel::<std::io::Result<Option<Vec<u8>>>>(32);
 
@@ -537,24 +900,14 @@ fn stream_terminal_output(
             Ok(Ok(Some(chunk))) => {
                 pending.extend_from_slice(&chunk);
                 if pending.len() >= TERMINAL_OUTPUT_MAX_BATCH_BYTES {
-                    if let Err(error) = flush_terminal_output(
-                        &client,
-                        &backend_base_url,
-                        &device_id,
-                        &local_events,
-                        terminal_id,
-                        &replay_buffer,
-                        &mut pending,
-                        &runtime,
-                        remote_sync,
-                    ) {
-                        warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
-                        if remote_sync {
+                    if let Err(error) = flush_terminal_output(&context, &mut pending, &runtime) {
+                        warn!(terminal_id = %context.terminal_id, error = %error, "terminal output upload failed");
+                        if context.remote_sync {
                             let _ = update_terminal_remote_state(
-                                &client,
-                                &backend_base_url,
-                                &device_id,
-                                terminal_id,
+                                &context.client,
+                                &context.backend_base_url,
+                                &context.device_id,
+                                context.terminal_id,
                                 "error",
                                 Some(error.to_string()),
                                 &runtime,
@@ -565,39 +918,29 @@ fn stream_terminal_output(
                 }
             }
             Ok(Ok(None)) => {
-                if let Err(error) = flush_terminal_output(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    &local_events,
-                    terminal_id,
-                    &replay_buffer,
-                    &mut pending,
-                    &runtime,
-                    remote_sync,
-                ) {
-                    warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
+                if let Err(error) = flush_terminal_output(&context, &mut pending, &runtime) {
+                    warn!(terminal_id = %context.terminal_id, error = %error, "terminal output upload failed");
                 }
                 if let Ok(mut metadata) = metadata.lock() {
                     metadata.state = "closed".to_string();
                     metadata.closed_at = Some(Utc::now());
                 }
-                if remote_sync {
+                if context.remote_sync {
                     let _ = update_terminal_remote_state(
-                        &client,
-                        &backend_base_url,
-                        &device_id,
-                        terminal_id,
+                        &context.client,
+                        &context.backend_base_url,
+                        &context.device_id,
+                        context.terminal_id,
                         "closed",
                         None,
                         &runtime,
                     );
                 }
-                let _ = local_events.send(
+                let _ = context.local_events.send(
                     json!({
                         "type": "terminal.closed",
                         "payload": {
-                            "terminal_id": terminal_id,
+                            "terminal_id": context.terminal_id,
                         }
                     })
                     .to_string(),
@@ -605,36 +948,26 @@ fn stream_terminal_output(
                 break;
             }
             Ok(Err(error)) => {
-                let _ = flush_terminal_output(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    &local_events,
-                    terminal_id,
-                    &replay_buffer,
-                    &mut pending,
-                    &runtime,
-                    remote_sync,
-                );
+                let _ = flush_terminal_output(&context, &mut pending, &runtime);
                 if let Ok(mut metadata) = metadata.lock() {
                     metadata.state = "error".to_string();
                 }
-                if remote_sync {
+                if context.remote_sync {
                     let _ = update_terminal_remote_state(
-                        &client,
-                        &backend_base_url,
-                        &device_id,
-                        terminal_id,
+                        &context.client,
+                        &context.backend_base_url,
+                        &context.device_id,
+                        context.terminal_id,
                         "error",
                         Some(error.to_string()),
                         &runtime,
                     );
                 }
-                let _ = local_events.send(
+                let _ = context.local_events.send(
                     json!({
                         "type": "terminal.error",
                         "payload": {
-                            "terminal_id": terminal_id,
+                            "terminal_id": context.terminal_id,
                             "error_message": error.to_string(),
                         }
                     })
@@ -643,24 +976,14 @@ fn stream_terminal_output(
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
-                if let Err(error) = flush_terminal_output(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    &local_events,
-                    terminal_id,
-                    &replay_buffer,
-                    &mut pending,
-                    &runtime,
-                    remote_sync,
-                ) {
-                    warn!(terminal_id = %terminal_id, error = %error, "terminal output upload failed");
-                    if remote_sync {
+                if let Err(error) = flush_terminal_output(&context, &mut pending, &runtime) {
+                    warn!(terminal_id = %context.terminal_id, error = %error, "terminal output upload failed");
+                    if context.remote_sync {
                         let _ = update_terminal_remote_state(
-                            &client,
-                            &backend_base_url,
-                            &device_id,
-                            terminal_id,
+                            &context.client,
+                            &context.backend_base_url,
+                            &context.device_id,
+                            context.terminal_id,
                             "error",
                             Some(error.to_string()),
                             &runtime,
@@ -670,17 +993,7 @@ fn stream_terminal_output(
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                let _ = flush_terminal_output(
-                    &client,
-                    &backend_base_url,
-                    &device_id,
-                    &local_events,
-                    terminal_id,
-                    &replay_buffer,
-                    &mut pending,
-                    &runtime,
-                    remote_sync,
-                );
+                let _ = flush_terminal_output(&context, &mut pending, &runtime);
                 break;
             }
         }
@@ -688,51 +1001,46 @@ fn stream_terminal_output(
 }
 
 fn flush_terminal_output(
-    client: &reqwest::Client,
-    backend_base_url: &str,
-    device_id: &str,
-    local_events: &broadcast::Sender<String>,
-    terminal_id: Uuid,
-    replay_buffer: &SharedReplayBuffer,
+    context: &TerminalOutputContext,
     pending: &mut Vec<u8>,
     runtime: &tokio::runtime::Handle,
-    remote_sync: bool,
 ) -> anyhow::Result<()> {
     if pending.is_empty() {
         return Ok(());
     }
 
     let snapshot = pending.clone();
-    if let Ok(mut replay) = replay_buffer.lock() {
+    if let Ok(mut replay) = context.replay_buffer.lock() {
         replay.append(&snapshot);
     }
 
     let payload = BASE64.encode(&snapshot);
     pending.clear();
-    let _ = local_events.send(
+    let _ = context.local_events.send(
         json!({
             "type": "terminal.output",
             "payload": {
-                "terminal_id": terminal_id,
+                "terminal_id": context.terminal_id,
                 "data_base64": payload.clone(),
             }
         })
         .to_string(),
     );
 
-    if !remote_sync {
+    if !context.remote_sync {
         return Ok(());
     }
 
     runtime.block_on(async {
         let url = format!(
             "{}/api/v1/desktop/terminals/{}/output",
-            backend_base_url, terminal_id
+            context.backend_base_url, context.terminal_id
         );
-        client
+        context
+            .client
             .post(url)
             .json(&json!({
-                "device_id": device_id,
+                "device_id": context.device_id,
                 "data_base64": payload,
                 "timestamp": Utc::now(),
             }))
@@ -741,6 +1049,48 @@ fn flush_terminal_output(
             .error_for_status()?;
         anyhow::Ok(())
     })
+}
+
+async fn push_terminal_output_chunk(
+    context: &TerminalOutputContext,
+    chunk: &[u8],
+) -> anyhow::Result<()> {
+    if let Ok(mut replay) = context.replay_buffer.lock() {
+        replay.append(chunk);
+    }
+
+    let payload = BASE64.encode(chunk);
+    let _ = context.local_events.send(
+        json!({
+            "type": "terminal.output",
+            "payload": {
+                "terminal_id": context.terminal_id,
+                "data_base64": payload.clone(),
+            }
+        })
+        .to_string(),
+    );
+
+    if !context.remote_sync {
+        return Ok(());
+    }
+
+    let url = format!(
+        "{}/api/v1/desktop/terminals/{}/output",
+        context.backend_base_url, context.terminal_id
+    );
+    context
+        .client
+        .post(url)
+        .json(&json!({
+            "device_id": context.device_id,
+            "data_base64": payload,
+            "timestamp": Utc::now(),
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }
 
 fn update_terminal_remote_state(
@@ -872,4 +1222,230 @@ fn executable_in_path(name: &str) -> bool {
         return false;
     };
     env::split_paths(&path).any(|directory| directory.join(name).is_file())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::Value;
+    use tokio::{
+        sync::{broadcast, mpsc::unbounded_channel},
+        time::{timeout, Duration as TokioDuration},
+    };
+
+    fn test_manager(events: broadcast::Sender<String>) -> TerminalManager {
+        TerminalManager::new(
+            "http://127.0.0.1:0".to_string(),
+            Uuid::new_v4().to_string(),
+            events,
+            std::env::temp_dir().join("sirix-terminal-tests"),
+        )
+    }
+
+    async fn next_event(receiver: &mut broadcast::Receiver<String>) -> Value {
+        let payload = timeout(TokioDuration::from_secs(1), receiver.recv())
+            .await
+            .expect("event should arrive before timeout")
+            .expect("broadcast receive should succeed");
+        serde_json::from_str(&payload).expect("event payload should be valid json")
+    }
+
+    #[tokio::test]
+    async fn hosted_terminal_relays_input_resize_and_close() {
+        let (events, _) = broadcast::channel(16);
+        let mut event_receiver = events.subscribe();
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        let session = manager
+            .create_hosted_terminal(
+                terminal_id,
+                "/bin/zsh".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+
+        let opening_event = next_event(&mut event_receiver).await;
+        assert_eq!(opening_event["type"], "terminal.ready");
+        assert_eq!(
+            opening_event["payload"]["terminal_id"],
+            terminal_id.to_string()
+        );
+        assert_eq!(
+            opening_event["payload"]["source"],
+            TerminalSessionSource::Hosted.as_api_str()
+        );
+        assert_eq!(opening_event["payload"]["state"], "opening");
+
+        let snapshot = manager
+            .get_snapshot(terminal_id)
+            .await
+            .expect("opening snapshot should exist");
+        assert_eq!(snapshot.source, TerminalSessionSource::Hosted.as_api_str());
+        assert_eq!(
+            manager.session_source(terminal_id).await,
+            Some(TerminalSessionSource::Hosted)
+        );
+        assert_eq!(snapshot.state, "opening");
+
+        let (command_sender, mut command_receiver) = unbounded_channel();
+        manager
+            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
+            .await
+            .expect("host should register");
+
+        let active_event = next_event(&mut event_receiver).await;
+        assert_eq!(active_event["type"], "terminal.ready");
+        assert_eq!(active_event["payload"]["state"], "active");
+
+        manager
+            .write_input(terminal_id, &BASE64.encode("ls\n"))
+            .await
+            .expect("input should relay to host");
+        let HostedTerminalCommand::Input {
+            terminal_id: input_terminal_id,
+            data_base64,
+        } = command_receiver
+            .recv()
+            .await
+            .expect("input command should exist")
+        else {
+            panic!("expected input command");
+        };
+        assert_eq!(input_terminal_id, terminal_id);
+        assert_eq!(
+            BASE64
+                .decode(data_base64)
+                .expect("input payload should decode"),
+            b"ls\n"
+        );
+
+        manager
+            .resize(terminal_id, 140, 40)
+            .await
+            .expect("resize should relay to host");
+        let HostedTerminalCommand::Resize {
+            terminal_id: resize_terminal_id,
+            cols,
+            rows,
+        } = command_receiver
+            .recv()
+            .await
+            .expect("resize command should exist")
+        else {
+            panic!("expected resize command");
+        };
+        assert_eq!(resize_terminal_id, terminal_id);
+        assert_eq!((cols, rows), (140, 40));
+
+        let resized_snapshot = manager
+            .get_snapshot(terminal_id)
+            .await
+            .expect("resized snapshot should exist");
+        assert_eq!((resized_snapshot.cols, resized_snapshot.rows), (140, 40));
+
+        manager
+            .close(terminal_id)
+            .await
+            .expect("close should succeed");
+        let HostedTerminalCommand::Close {
+            terminal_id: close_terminal_id,
+        } = command_receiver
+            .recv()
+            .await
+            .expect("close command should exist")
+        else {
+            panic!("expected close command");
+        };
+        assert_eq!(close_terminal_id, terminal_id);
+
+        let closed_event = next_event(&mut event_receiver).await;
+        assert_eq!(closed_event["type"], "terminal.closed");
+        assert_eq!(
+            closed_event["payload"]["terminal_id"],
+            terminal_id.to_string()
+        );
+        assert!(manager.get_snapshot(terminal_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn hosted_terminal_rejects_invalid_registration_token() {
+        let (events, _) = broadcast::channel(8);
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        manager
+            .create_hosted_terminal(
+                terminal_id,
+                "shell".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+
+        let (command_sender, _) = unbounded_channel();
+        let error = manager
+            .register_hosted_terminal(terminal_id, "wrong-token", command_sender)
+            .await
+            .expect_err("registration should fail");
+        assert!(error
+            .to_string()
+            .contains("invalid hosted terminal registration token"));
+    }
+
+    #[tokio::test]
+    async fn hosted_terminal_disconnect_emits_error_event() {
+        let (events, _) = broadcast::channel(16);
+        let mut event_receiver = events.subscribe();
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        let session = manager
+            .create_hosted_terminal(
+                terminal_id,
+                "shell".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+        let _ = next_event(&mut event_receiver).await;
+
+        let (command_sender, _) = unbounded_channel();
+        manager
+            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
+            .await
+            .expect("registration should succeed");
+        let _ = next_event(&mut event_receiver).await;
+
+        manager
+            .hosted_terminal_disconnected(terminal_id)
+            .await
+            .expect("disconnect cleanup should succeed");
+
+        let error_event = next_event(&mut event_receiver).await;
+        assert_eq!(error_event["type"], "terminal.error");
+        assert_eq!(
+            error_event["payload"]["terminal_id"],
+            terminal_id.to_string()
+        );
+        assert_eq!(
+            error_event["payload"]["error_message"],
+            "hosted terminal connection dropped"
+        );
+        assert!(manager.get_snapshot(terminal_id).await.is_none());
+    }
 }

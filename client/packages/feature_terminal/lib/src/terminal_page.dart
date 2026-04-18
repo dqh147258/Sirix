@@ -576,6 +576,10 @@ class _TerminalTab extends StatelessWidget {
                 ),
               ),
             ),
+            if (summary.isHostedTerminal) ...[
+              const SizedBox(width: 6),
+              _TerminalSourceBadge(selected: selected),
+            ],
             const SizedBox(width: 4),
             Tooltip(
               message: context.l10n.disconnectSession,
@@ -593,6 +597,39 @@ class _TerminalTab extends StatelessWidget {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TerminalSourceBadge extends StatelessWidget {
+  const _TerminalSourceBadge({
+    required this.selected,
+  });
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: (selected ? palette.primaryBright : palette.textMuted).withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: (selected ? palette.primaryBright : palette.textMuted).withValues(alpha: 0.24),
+        ),
+      ),
+      child: Text(
+        'HOST',
+        style: TextStyle(
+          color: selected ? palette.primaryBright : palette.textSecondary,
+          fontSize: 9,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 1.1,
         ),
       ),
     );

@@ -353,6 +353,7 @@ class HttpBackendApiClient implements BackendApiClient {
       id: json['id'] as String,
       deviceId: json['device_id'] as String,
       title: json['title'] as String? ?? 'Terminal',
+      source: json['source'] as String? ?? 'unknown',
       shell: json['shell'] as String? ?? '',
       cwd: json['cwd'] as String? ?? '',
       state: json['state'] as String? ?? 'opening',

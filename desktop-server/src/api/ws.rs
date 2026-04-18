@@ -10,7 +10,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::app::state::AppState;
+use crate::app::{state::AppState, terminal::manager::HostedTerminalCommand};
 
 const AUTH_MEDIA_TRACE_TAG: &str = "[MEDIA_AUTH_TRACE]";
 
@@ -51,6 +51,29 @@ enum LocalWsInbound {
         cols: u16,
         rows: u16,
     },
+    #[serde(rename = "terminal.host.register", alias = "terminal_host_register")]
+    TerminalHostRegister {
+        terminal_id: String,
+        host_token: String,
+    },
+    #[serde(rename = "terminal.host.output", alias = "terminal_host_output")]
+    TerminalHostOutput {
+        terminal_id: String,
+        data_base64: String,
+    },
+    #[serde(rename = "terminal.host.resized", alias = "terminal_host_resized")]
+    TerminalHostResized {
+        terminal_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    #[serde(rename = "terminal.host.closed", alias = "terminal_host_closed")]
+    TerminalHostClosed { terminal_id: String },
+    #[serde(rename = "terminal.host.error", alias = "terminal_host_error")]
+    TerminalHostError {
+        terminal_id: String,
+        error_message: String,
+    },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -60,12 +83,17 @@ pub async fn local_ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    let mut counts_as_desktop_client = true;
     {
         let mut runtime = state.runtime.write().await;
         runtime.desktop_client_connections += 1;
     }
 
     let mut local_receiver = state.local_events.subscribe();
+    let mut hosted_terminal_id: Option<Uuid> = None;
+    let mut hosted_control_receiver: Option<
+        tokio::sync::mpsc::UnboundedReceiver<HostedTerminalCommand>,
+    > = None;
     info!(
         device_id = %state.config.backend.device_id,
         "desktop flutter client connected to local websocket"
@@ -275,6 +303,140 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                 }
                             }
+                            Ok(LocalWsInbound::TerminalHostRegister { terminal_id, host_token }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                                        match state
+                                            .terminal_manager
+                                            .register_hosted_terminal(terminal_id, &host_token, sender)
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                if counts_as_desktop_client {
+                                                    let mut runtime = state.runtime.write().await;
+                                                    runtime.desktop_client_connections = runtime.desktop_client_connections.saturating_sub(1);
+                                                    counts_as_desktop_client = false;
+                                                }
+                                                hosted_terminal_id = Some(terminal_id);
+                                                hosted_control_receiver = Some(receiver);
+                                                let reply = serde_json::json!({
+                                                    "type": "terminal.host.registered",
+                                                    "payload": {
+                                                        "terminal_id": terminal_id,
+                                                        "ok": true,
+                                                    }
+                                                });
+                                                if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(error) => {
+                                                warn!(terminal_id = %terminal_id, error = %error, "hosted terminal register failed");
+                                                let reply = serde_json::json!({
+                                                    "type": "terminal.host.registered",
+                                                    "payload": {
+                                                        "terminal_id": terminal_id,
+                                                        "ok": false,
+                                                        "error_message": error.to_string(),
+                                                    }
+                                                });
+                                                if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid hosted terminal register id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalHostOutput { terminal_id, data_base64 }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state
+                                            .terminal_manager
+                                            .ingest_hosted_output(terminal_id, &data_base64)
+                                            .await
+                                        {
+                                            warn!(terminal_id = %terminal_id, error = %error, "hosted terminal output ingest failed");
+                                            break;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid hosted terminal output id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalHostResized { terminal_id, cols, rows }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state
+                                            .terminal_manager
+                                            .update_hosted_terminal_size(terminal_id, cols, rows)
+                                            .await
+                                        {
+                                            warn!(terminal_id = %terminal_id, error = %error, "hosted terminal resize update failed");
+                                            break;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid hosted terminal resized id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalHostClosed { terminal_id }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state
+                                            .terminal_manager
+                                            .complete_hosted_terminal(terminal_id, None)
+                                            .await
+                                        {
+                                            warn!(terminal_id = %terminal_id, error = %error, "hosted terminal close failed");
+                                        }
+                                        hosted_terminal_id = None;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid hosted terminal close id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalHostError { terminal_id, error_message }) => {
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        if let Err(error) = state
+                                            .terminal_manager
+                                            .complete_hosted_terminal(terminal_id, Some(error_message))
+                                            .await
+                                        {
+                                            warn!(terminal_id = %terminal_id, error = %error, "hosted terminal error close failed");
+                                        }
+                                        hosted_terminal_id = None;
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid hosted terminal error id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
                             Ok(LocalWsInbound::Ping) => {
                                 if socket
                                     .send(Message::Text(serde_json::json!({ "type": "pong" }).to_string()))
@@ -309,7 +471,35 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                     None => break,
                 }
             }
+            hosted_command = async {
+                match hosted_control_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match hosted_command {
+                    Some(command) => {
+                        match serde_json::to_string(&command) {
+                            Ok(payload) => {
+                                if socket.send(Message::Text(payload)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                warn!(error = %error, "failed to serialize hosted terminal command");
+                                break;
+                            }
+                        }
+                    }
+                    None => {
+                        hosted_control_receiver = None;
+                    }
+                }
+            }
             outbound = local_receiver.recv() => {
+                if hosted_terminal_id.is_some() {
+                    continue;
+                }
                 match outbound {
                     Ok(payload) => {
                         if socket.send(Message::Text(payload)).await.is_err() {
@@ -328,7 +518,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    {
+    if let Some(terminal_id) = hosted_terminal_id {
+        if let Err(error) = state
+            .terminal_manager
+            .hosted_terminal_disconnected(terminal_id)
+            .await
+        {
+            warn!(terminal_id = %terminal_id, error = %error, "hosted terminal disconnect cleanup failed");
+        }
+    }
+
+    if counts_as_desktop_client {
         let mut runtime = state.runtime.write().await;
         runtime.desktop_client_connections = runtime.desktop_client_connections.saturating_sub(1);
     }

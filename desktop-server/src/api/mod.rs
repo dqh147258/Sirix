@@ -7,6 +7,7 @@ pub mod auth;
 pub mod health;
 pub mod settings;
 pub mod status;
+pub mod terminals;
 pub mod ws;
 
 pub fn router(state: AppState) -> Router {
@@ -23,6 +24,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/settings",
             get(settings::get_settings).patch(settings::set_settings),
+        )
+        .route(
+            "/terminals/hosted/sessions",
+            axum::routing::post(terminals::create_hosted_terminal_session),
         )
         .route(
             "/ai/config",

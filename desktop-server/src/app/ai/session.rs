@@ -16,6 +16,7 @@ use crate::app::{
         SIRIX_AGENT_RUNTIME_FILE_NAME,
     },
     state::AppState,
+    terminal::manager::TerminalSessionSource,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -557,11 +558,12 @@ pub async fn launch_ai_session_in_current_terminal(
     cwd: &Path,
     agent_id: Option<&str>,
 ) -> anyhow::Result<AiSessionLaunchResponse> {
-    state
+    let source = state
         .terminal_manager
-        .get_snapshot(terminal_id)
+        .session_source(terminal_id)
         .await
         .with_context(|| format!("terminal session not found for id={terminal_id}"))?;
+    validate_current_terminal_reuse_source(source).map_err(|message| anyhow::anyhow!(message))?;
 
     let ai_session_id = Uuid::new_v4();
     let launch = config_store.build_launch_config(cwd, agent_id, ai_session_id)?;
@@ -632,6 +634,18 @@ pub async fn launch_ai_session_in_current_terminal(
                 .then(|| launch.provider.api_key.clone()),
         }),
     })
+}
+
+pub(crate) fn validate_current_terminal_reuse_source(
+    source: TerminalSessionSource,
+) -> Result<(), &'static str> {
+    if source.supports_ai_current_terminal_reuse() {
+        return Ok(());
+    }
+
+    Err(
+        "`sirix-terminal` hosted shell cannot be reused for `sirix` AI launch; create a separate AI session instead",
+    )
 }
 
 async fn remote_sync_available(state: &AppState) -> bool {
@@ -706,6 +720,17 @@ mod tests {
             shell_mode: ApprovalMode::Ask,
             builtin_tool_ids: vec!["shell".to_string()],
         }
+    }
+
+    #[test]
+    fn rejects_hosted_terminal_for_current_terminal_reuse() {
+        assert!(validate_current_terminal_reuse_source(TerminalSessionSource::LocalPty).is_ok());
+        assert_eq!(
+            validate_current_terminal_reuse_source(TerminalSessionSource::Hosted),
+            Err(
+                "`sirix-terminal` hosted shell cannot be reused for `sirix` AI launch; create a separate AI session instead",
+            )
+        );
     }
 
     #[tokio::test]

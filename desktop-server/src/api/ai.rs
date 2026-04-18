@@ -43,7 +43,7 @@ use crate::app::{
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
             launch_ai_session, launch_ai_session_in_current_terminal, reconfigure_ai_session_agent,
-            AiSessionLaunchResponse, AiSessionRecord,
+            validate_current_terminal_reuse_source, AiSessionLaunchResponse, AiSessionRecord,
         },
     },
     state::AppState,
@@ -361,6 +361,16 @@ pub async fn launch_session(
     {
         let terminal_id = uuid::Uuid::parse_str(reuse_terminal_id)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let source = state
+            .terminal_manager
+            .session_source(terminal_id)
+            .await
+            .ok_or_else(|| {
+                ApiError::bad_request(format!("terminal session not found for id={terminal_id}"))
+            })?;
+        if let Err(message) = validate_current_terminal_reuse_source(source) {
+            return Err(ApiError::bad_request(message.to_string()));
+        }
         launch_ai_session_in_current_terminal(
             &state,
             state.sirix_config_store.as_ref(),
@@ -1601,7 +1611,7 @@ impl ApiError {
         }
     }
 
-    fn internal(error: anyhow::Error) -> Self {
+    pub(crate) fn internal(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),

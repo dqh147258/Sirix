@@ -785,6 +785,19 @@ impl SirixConfigStore {
 
         install_bin_shim(&sirix_binary, &bin_dir.join(sirix_binary_name))?;
 
+        let sirix_terminal_binary_name = if cfg!(windows) {
+            "sirix-terminal.exe"
+        } else {
+            "sirix-terminal"
+        };
+        let sirix_terminal_binary = sibling_dir.join(sirix_terminal_binary_name);
+        if sirix_terminal_binary.exists() {
+            install_bin_shim(
+                &sirix_terminal_binary,
+                &bin_dir.join(sirix_terminal_binary_name),
+            )?;
+        }
+
         let runtime_binary_name = if cfg!(windows) {
             "sirix-runtime.exe"
         } else {

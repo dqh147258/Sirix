@@ -104,6 +104,7 @@ class TerminalSessionSummary {
     required this.id,
     required this.deviceId,
     required this.title,
+    this.source = 'unknown',
     required this.shell,
     required this.cwd,
     required this.state,
@@ -116,6 +117,7 @@ class TerminalSessionSummary {
   final String id;
   final String deviceId;
   final String title;
+  final String source;
   final String shell;
   final String cwd;
   final String state;
@@ -126,6 +128,7 @@ class TerminalSessionSummary {
 
   TerminalSessionSummary copyWith({
     String? title,
+    String? source,
     String? shell,
     String? cwd,
     String? state,
@@ -138,6 +141,7 @@ class TerminalSessionSummary {
       id: id,
       deviceId: deviceId,
       title: title ?? this.title,
+      source: source ?? this.source,
       shell: shell ?? this.shell,
       cwd: cwd ?? this.cwd,
       state: state ?? this.state,
@@ -146,6 +150,12 @@ class TerminalSessionSummary {
       createdAt: createdAt,
       closedAt: clearClosedAt ? null : (closedAt ?? this.closedAt),
     );
+  }
+
+  bool get isHostedTerminal {
+    // Remote/mobile snapshots do not currently emit an explicit source field,
+    // so the dedicated Sirix Terminal title remains the compatibility fallback.
+    return source == 'hosted' || title.trim().toLowerCase() == 'sirix terminal';
   }
 }
 

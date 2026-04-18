@@ -386,6 +386,7 @@ class DesktopLocalClient {
       id: json['terminal_id'] as String? ?? '',
       deviceId: json['device_id'] as String? ?? '',
       title: json['title'] as String? ?? 'Terminal',
+      source: json['source'] as String? ?? 'unknown',
       shell: json['shell'] as String? ?? 'default',
       cwd: json['cwd'] as String? ?? '~',
       state: json['state'] as String? ?? 'active',

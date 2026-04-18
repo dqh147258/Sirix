@@ -454,6 +454,7 @@ async fn snapshot_model_visible_layout_resume_override_matches_rollout_model() -
             effort: None,
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })

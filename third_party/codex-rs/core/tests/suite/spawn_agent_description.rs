@@ -103,7 +103,7 @@ async fn wait_for_model_available(manager: &Arc<ModelsManager>, slug: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() -> Result<()> {
+async fn spawn_agent_description_omits_visible_models_but_keeps_usage_guidance() -> Result<()> {
     let server = start_mock_server().await;
     mount_models_once(
         &server,
@@ -166,20 +166,28 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         spawn_agent_description(&body).expect("spawn_agent description should be present");
 
     assert!(
-        description.contains("- Visible Model (`visible-model`): Fast and capable"),
-        "expected visible model summary in spawn_agent description: {description:?}"
+        !description.contains("Visible Model (`visible-model`)"),
+        "spawn_agent description should not expose visible models: {description:?}"
     );
     assert!(
-        description.contains("Default reasoning effort: medium."),
-        "expected default reasoning effort in spawn_agent description: {description:?}"
+        !description.contains("Fast and capable"),
+        "spawn_agent description should not expose picker descriptions: {description:?}"
     );
     assert!(
-        description.contains("low (Quick scan), high (Deep dive)."),
-        "expected reasoning efforts in spawn_agent description: {description:?}"
+        !description.contains("Default reasoning effort: medium."),
+        "spawn_agent description should not expose model-specific reasoning defaults: {description:?}"
+    );
+    assert!(
+        !description.contains("Quick scan"),
+        "spawn_agent description should not expose model-specific reasoning presets: {description:?}"
     );
     assert!(
         !description.contains("Hidden Model"),
         "hidden picker model should be omitted from spawn_agent description: {description:?}"
+    );
+    assert!(
+        description.contains("Spawn a sub-agent for a well-scoped task."),
+        "expected base spawn_agent description: {description:?}"
     );
     assert!(
         description.contains(

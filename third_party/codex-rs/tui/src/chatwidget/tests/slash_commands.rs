@@ -689,6 +689,7 @@ async fn model_inline_args_open_prefiltered_picker() {
             effort: ReasoningEffortConfig::Medium,
             description: "medium".to_string(),
         }],
+        effective_context_window: None,
         supports_personality: false,
         additional_speed_tiers: Vec::new(),
         is_default: false,

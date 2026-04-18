@@ -4343,6 +4343,7 @@ fn inline_models_load_into_model_catalog() -> std::io::Result<()> {
             description: "Injected by bridge".to_string(),
             default_reasoning_effort: ReasoningEffort::None,
             supported_reasoning_efforts: Vec::new(),
+            effective_context_window: None,
             supports_personality: false,
             additional_speed_tiers: Vec::new(),
             is_default: false,

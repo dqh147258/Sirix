@@ -43,6 +43,7 @@ fn model_from_preset(preset: ModelPreset) -> Model {
         input_modalities: preset.input_modalities,
         supports_personality: preset.supports_personality,
         additional_speed_tiers: preset.additional_speed_tiers,
+        effective_context_window: preset.effective_context_window,
         is_default: preset.is_default,
     }
 }

@@ -31,7 +31,6 @@ const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
 const INHERITED_MODEL: &str = "gpt-5.2-codex";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
-const REQUESTED_MODEL: &str = "gpt-5.1";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 const ROLE_MODEL: &str = "gpt-5.1-codex-max";
 const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
@@ -389,7 +388,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_without_role()
+async fn spawn_agent_requested_reasoning_override_preserves_inherited_model_without_role()
 -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -398,14 +397,13 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
         &server,
         json!({
             "message": CHILD_PROMPT,
-            "model": REQUESTED_MODEL,
             "reasoning_effort": REQUESTED_REASONING_EFFORT,
         }),
         |builder| builder,
     )
     .await?;
 
-    assert_eq!(child_snapshot.model, REQUESTED_MODEL);
+    assert_eq!(child_snapshot.model, INHERITED_MODEL);
     assert_eq!(
         child_snapshot.reasoning_effort,
         Some(REQUESTED_REASONING_EFFORT)
@@ -508,7 +506,7 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> Result<()> {
+async fn spawn_agent_role_applies_its_locked_model_and_reasoning_settings() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -517,8 +515,6 @@ async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> 
         json!({
             "message": CHILD_PROMPT,
             "agent_type": "custom",
-            "model": REQUESTED_MODEL,
-            "reasoning_effort": REQUESTED_REASONING_EFFORT,
         }),
         |builder| {
             builder.with_config(|config| {

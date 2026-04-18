@@ -112,6 +112,36 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
         "expected /status to avoid raw config context window, got: {context_line}"
     );
 }
+
+#[tokio::test]
+async fn model_switch_block_message_uses_effective_runtime_window() {
+    let (mut chat, _rx, _ops) = make_chatwidget_manual(Some("gpt-5")).await;
+
+    chat.handle_codex_event(Event {
+        id: "token-usage".into(),
+        msg: EventMsg::TokenCount(TokenCountEvent {
+            info: Some(make_token_info(52_000, 100_000)),
+            rate_limits: None,
+        }),
+    });
+
+    let message = chat
+        .model_switch_block_message("smaller-model", Some(48_000))
+        .expect("expected switch block message");
+
+    assert!(
+        message.contains("52000"),
+        "expected current token count in block message, got: {message}"
+    );
+    assert!(
+        message.contains("48000"),
+        "expected target effective window in block message, got: {message}"
+    );
+    assert!(
+        message.contains("smaller-model"),
+        "expected target model id in block message, got: {message}"
+    );
+}
 #[tokio::test]
 async fn helpers_are_available_and_do_not_panic() {
     let (tx_raw, _rx) = unbounded_channel::<AppEvent>();

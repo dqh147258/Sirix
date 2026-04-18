@@ -367,6 +367,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
             effort: None,
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -610,6 +611,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
             effort: None,
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })

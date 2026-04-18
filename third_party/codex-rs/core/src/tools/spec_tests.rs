@@ -32,7 +32,6 @@ use codex_tools::ZshForkConfig;
 use codex_tools::mcp_call_tool_result_output_schema;
 use codex_tools::mcp_tool_to_deferred_responses_api_tool;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -645,15 +644,9 @@ fn spawn_agent_description_omits_usage_hint_when_disabled() {
         .with_spawn_agent_usage_hint(/*spawn_agent_usage_hint*/ false);
     let description = multi_agent_v2_spawn_agent_description(&tools_config);
 
-    assert_regex_match(
-        r#"(?sx)
-            ^\s*
-            No\ picker-visible\ models\ are\ currently\ loaded\.
-            \s+Spawn\ a\ sub-agent\ for\ a\ well-scoped\ task\.
-            \s+Returns\ the\ canonical\ task\ name\ for\ the\ spawned\ agent,\ plus\ the\ user-facing\ nickname\ when\ available\.
-            \s*$
-        "#,
-        &description,
+    assert_eq!(
+        description.trim(),
+        "Spawn a sub-agent for a well-scoped task. Returns the canonical task name for the spawned agent, plus the user-facing nickname when available."
     );
 }
 
@@ -664,16 +657,9 @@ fn spawn_agent_description_uses_configured_usage_hint_text() {
     ));
     let description = multi_agent_v2_spawn_agent_description(&tools_config);
 
-    assert_regex_match(
-        r#"(?sx)
-            ^\s*
-            No\ picker-visible\ models\ are\ currently\ loaded\.
-            \s+Spawn\ a\ sub-agent\ for\ a\ well-scoped\ task\.
-            \s+Returns\ the\ canonical\ task\ name\ for\ the\ spawned\ agent,\ plus\ the\ user-facing\ nickname\ when\ available\.
-            \s+Custom\ delegation\ guidance\ only\.
-            \s*$
-        "#,
-        &description,
+    assert_eq!(
+        description.trim(),
+        "Spawn a sub-agent for a well-scoped task. Returns the canonical task name for the spawned agent, plus the user-facing nickname when available.\nCustom delegation guidance only."
     );
 }
 

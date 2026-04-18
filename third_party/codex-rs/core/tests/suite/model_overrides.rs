@@ -35,6 +35,7 @@ async fn override_turn_context_does_not_persist_when_config_exists() {
             effort: Some(Some(ReasoningEffort::High)),
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -73,6 +74,7 @@ async fn override_turn_context_does_not_create_config_file() {
             effort: Some(Some(ReasoningEffort::Medium)),
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })

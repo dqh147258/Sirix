@@ -580,6 +580,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
             effort: None,
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: Some(CollaborationMode {
                 mode: ModeKind::Default,
                 settings: Settings {

@@ -18,6 +18,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
             effort: ReasoningEffort::Medium,
             description: "Balanced".to_string(),
         }],
+        effective_context_window: None,
         supports_personality: false,
         additional_speed_tiers: Vec::new(),
         is_default: false,
@@ -30,7 +31,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
-fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
+fn spawn_agent_tool_v2_requires_task_name_and_omits_model_override() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: &[
             model_preset("visible", /*show_in_picker*/ true),
@@ -59,11 +60,13 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    assert!(description.contains("visible display (`visible-model`)"));
+    assert!(!description.contains("visible display (`visible-model`)"));
     assert!(!description.contains("hidden display (`hidden-model`)"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
     assert!(properties.contains_key("fork_turns"));
+    assert!(!properties.contains_key("model"));
+    assert!(properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
     assert_eq!(

@@ -435,6 +435,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() -> an
             effort: Some(Some(ReasoningEffort::High)),
             summary: Some(ReasoningSummary::Detailed),
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -518,6 +519,7 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
             effort: Some(Some(ReasoningEffort::Low)),
             summary: None,
             service_tier: None,
+            developer_instructions: None,
             collaboration_mode: Some(collaboration_mode),
             personality: None,
         })

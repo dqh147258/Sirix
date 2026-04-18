@@ -35,6 +35,7 @@ use crate::app::{
         config::{
             build_agent_system_prompt, build_agent_system_prompt_preview,
             duplicate_session_text_model_ids, effective_model_context_window,
+            effective_model_runtime_context_window,
             infer_provider_default_context_window, normalized_sirix_config,
             resolve_session_picker_model, session_picker_model_id, validate_sirix_config,
             ApprovalMode, ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig,
@@ -99,6 +100,7 @@ pub struct ProviderModelsResponse {
 #[derive(Debug, Deserialize)]
 pub struct SwitchSessionAgentRequest {
     pub agent_id: String,
+    pub current_tokens_in_context: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +110,7 @@ pub struct SessionAgentSummary {
     pub description: String,
     pub provider_id: String,
     pub model_id: String,
+    pub effective_context_window: u32,
     pub enabled: bool,
 }
 
@@ -123,6 +126,7 @@ pub struct SwitchSessionAgentResponse {
     pub name: String,
     pub provider_id: String,
     pub model_id: String,
+    pub effective_context_window: u32,
     pub developer_instructions: String,
 }
 
@@ -421,13 +425,25 @@ pub async fn list_session_agents(
         .agents
         .iter()
         .filter(|agent| agent.enabled)
-        .map(|agent| SessionAgentSummary {
-            id: agent.id.clone(),
-            name: agent.name.clone(),
-            description: agent.description.clone(),
-            provider_id: agent.provider_id.clone(),
-            model_id: agent.model_id.clone(),
-            enabled: agent.enabled,
+        .filter_map(|agent| {
+            let provider = effective
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == agent.provider_id)?;
+            let model = provider
+                .models
+                .iter()
+                .find(|model| model.id == agent.model_id)?;
+            Some(SessionAgentSummary {
+                id: agent.id.clone(),
+                name: agent.name.clone(),
+                description: agent.description.clone(),
+                provider_id: agent.provider_id.clone(),
+                model_id: agent.model_id.clone(),
+                effective_context_window: effective_model_runtime_context_window(provider, model),
+                enabled: agent.enabled,
+            })
         })
         .collect::<Vec<_>>();
     Ok(Json(SessionAgentsResponse {
@@ -441,11 +457,17 @@ pub async fn switch_session_agent(
     State(state): State<AppState>,
     Json(payload): Json<SwitchSessionAgentRequest>,
 ) -> Result<Json<SwitchSessionAgentResponse>, ApiError> {
+    if payload.current_tokens_in_context.is_none() {
+        return Err(ApiError::bad_request(
+            "current_tokens_in_context is required when switching session agents".to_string(),
+        ));
+    }
     let (launch, _) = reconfigure_ai_session_agent(
         &state,
         state.sirix_config_store.as_ref(),
         ai_session_id,
         payload.agent_id.trim(),
+        payload.current_tokens_in_context,
     )
     .await
     .map_err(ApiError::internal)?;
@@ -454,6 +476,7 @@ pub async fn switch_session_agent(
         name: launch.agent.name.clone(),
         provider_id: launch.provider.id.clone(),
         model_id: launch.model.id.clone(),
+        effective_context_window: effective_model_runtime_context_window(&launch.provider, &launch.model),
         developer_instructions: build_agent_system_prompt(&launch.effective_config, &launch.agent),
     }))
 }
@@ -544,6 +567,7 @@ pub async fn resolve_session_shell_rule(
         state.sirix_config_store.as_ref(),
         ai_session_id,
         runtime.agent_id.as_str(),
+        None,
     )
     .await
     .map_err(ApiError::internal)?;

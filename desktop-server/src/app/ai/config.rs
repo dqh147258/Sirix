@@ -219,6 +219,8 @@ pub struct SessionAgentRuntimeConfig {
     pub shell_mode: ApprovalMode,
     #[serde(default)]
     pub builtin_tool_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_context_window: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -518,6 +520,8 @@ impl SirixConfigStore {
         &self,
         cwd: &Path,
         agent: &AgentConfig,
+        provider: &ProviderConfig,
+        model: &ModelConfig,
         session_shell_rules: &ShellRulesConfig,
     ) -> anyhow::Result<SessionAgentRuntimeConfig> {
         let effective_shell_rules =
@@ -531,6 +535,7 @@ impl SirixConfigStore {
             agent_id: agent.id.clone(),
             shell_mode,
             builtin_tool_ids: agent.builtin_tool_ids.clone(),
+            effective_context_window: Some(effective_model_runtime_context_window(provider, model)),
         })
     }
 
@@ -1720,6 +1725,13 @@ pub fn effective_model_context_window(provider: &ProviderConfig, model: &ModelCo
         .context_window
         .or(provider.default_context_window)
         .unwrap_or_else(|| infer_provider_default_context_window(&provider.kind, &model.id))
+}
+
+pub fn effective_model_runtime_context_window(provider: &ProviderConfig, model: &ModelConfig) -> u32 {
+    // Codex 在运行时会为系统提示词、工具说明和输出留出固定 headroom，
+    // 所以对外暴露给切模预检和状态展示的窗口要与 runtime 真实口径一致，
+    // 不能直接复用“原始配置窗口”。
+    effective_model_context_window(provider, model).saturating_mul(95) / 100
 }
 
 pub fn infer_provider_default_context_window(kind: &ProviderKind, model_id: &str) -> u32 {
@@ -3084,6 +3096,10 @@ pub async fn build_agent_system_prompt_preview(
         agent_id: agent.id.clone(),
         shell_mode: agent.approval_mode.clone(),
         builtin_tool_ids: agent.builtin_tool_ids.clone(),
+        effective_context_window: Some(effective_model_runtime_context_window(
+            &launch.provider,
+            &launch.model,
+        )),
     };
     let serialized_runtime =
         serde_json::to_string_pretty(&runtime).context("failed to serialize preview runtime")?;
@@ -4148,6 +4164,34 @@ model = "gpt-5.4"
         assert_eq!(
             effective_model_context_window(&provider, &provider.models[0]),
             222_000
+        );
+    }
+
+    #[test]
+    fn runtime_context_window_applies_headroom_to_effective_window() {
+        let provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(200_000),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "gpt-5".to_string(),
+                display_name: "GPT-5".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: Some(320_000),
+                supports_images: true,
+                enabled: true,
+            }],
+        };
+
+        assert_eq!(
+            effective_model_runtime_context_window(&provider, &provider.models[0]),
+            304_000
         );
     }
 

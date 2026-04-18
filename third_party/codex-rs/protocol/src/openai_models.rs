@@ -130,6 +130,9 @@ pub struct ModelPreset {
     pub default_reasoning_effort: ReasoningEffort,
     /// Supported reasoning effort options.
     pub supported_reasoning_efforts: Vec<ReasoningEffortPreset>,
+    /// Effective context window after applying the model's headroom policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_context_window: Option<i64>,
     /// Whether this model supports personality-specific instructions.
     #[serde(default)]
     pub supports_personality: bool,
@@ -433,6 +436,9 @@ impl From<ModelInfo> for ModelPreset {
                 .default_reasoning_level
                 .unwrap_or(ReasoningEffort::None),
             supported_reasoning_efforts: info.supported_reasoning_levels.clone(),
+            effective_context_window: info.context_window.map(|context_window| {
+                context_window.saturating_mul(info.effective_context_window_percent) / 100
+            }),
             supports_personality,
             additional_speed_tiers: info.additional_speed_tiers,
             is_default: false, // default is the highest priority available model

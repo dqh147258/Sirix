@@ -7,7 +7,6 @@ use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use codex_features::Feature;
-use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -271,77 +270,51 @@ pub(crate) fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32)
     }
 }
 
-pub(crate) async fn apply_requested_spawn_agent_model_overrides(
+pub(crate) async fn apply_requested_spawn_agent_reasoning_override(
     session: &Session,
     turn: &TurnContext,
     config: &mut Config,
-    requested_model: Option<&str>,
     requested_reasoning_effort: Option<ReasoningEffort>,
+    role_locks_reasoning_effort: bool,
 ) -> Result<(), FunctionCallError> {
-    if requested_model.is_none() && requested_reasoning_effort.is_none() {
-        return Ok(());
-    }
-
-    if let Some(requested_model) = requested_model {
-        let available_models = session
-            .services
-            .models_manager
-            .list_models(RefreshStrategy::Offline)
-            .await;
-        let selected_model_name = find_spawn_agent_model_name(&available_models, requested_model)?;
-        let selected_model_info = session
-            .services
-            .models_manager
-            .get_model_info(&selected_model_name, &config.to_models_manager_config())
-            .await;
-
-        config.model = Some(selected_model_name.clone());
-        if let Some(reasoning_effort) = requested_reasoning_effort {
-            validate_spawn_agent_reasoning_effort(
-                &selected_model_name,
-                &selected_model_info.supported_reasoning_levels,
-                reasoning_effort,
-            )?;
-            config.model_reasoning_effort = Some(reasoning_effort);
-        } else {
-            config.model_reasoning_effort = selected_model_info.default_reasoning_level;
-        }
-
-        return Ok(());
-    }
+    let effective_model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| turn.model_info.slug.clone());
+    let effective_model_info = session
+        .services
+        .models_manager
+        .get_model_info(
+            effective_model.as_str(),
+            &config.to_models_manager_config(),
+        )
+        .await;
 
     if let Some(reasoning_effort) = requested_reasoning_effort {
+        if role_locks_reasoning_effort && config.model_reasoning_effort != Some(reasoning_effort) {
+            return Err(FunctionCallError::RespondToModel(
+                "The selected agent_type locks reasoning_effort and cannot be overridden."
+                    .to_string(),
+            ));
+        }
         validate_spawn_agent_reasoning_effort(
-            &turn.model_info.slug,
-            &turn.model_info.supported_reasoning_levels,
+            effective_model.as_str(),
+            &effective_model_info.supported_reasoning_levels,
             reasoning_effort,
         )?;
         config.model_reasoning_effort = Some(reasoning_effort);
     }
 
+    if let Some(effective_reasoning_effort) = config.model_reasoning_effort {
+        validate_spawn_agent_reasoning_effort(
+            effective_model.as_str(),
+            &effective_model_info.supported_reasoning_levels,
+            effective_reasoning_effort,
+        )?;
+    }
+
     Ok(())
 }
-
-fn find_spawn_agent_model_name(
-    available_models: &[codex_protocol::openai_models::ModelPreset],
-    requested_model: &str,
-) -> Result<String, FunctionCallError> {
-    available_models
-        .iter()
-        .find(|model| model.model == requested_model)
-        .map(|model| model.model.clone())
-        .ok_or_else(|| {
-            let available = available_models
-                .iter()
-                .map(|model| model.model.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            FunctionCallError::RespondToModel(format!(
-                "Unknown model `{requested_model}` for spawn_agent. Available models: {available}"
-            ))
-        })
-}
-
 fn validate_spawn_agent_reasoning_effort(
     model: &str,
     supported_reasoning_levels: &[ReasoningEffortPreset],

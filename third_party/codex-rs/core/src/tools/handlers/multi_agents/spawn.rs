@@ -4,6 +4,7 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::agent::role::role_locks_reasoning_effort;
 
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
@@ -46,6 +47,24 @@ impl ToolHandler for Handler {
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
             ));
         }
+        let mut config =
+            build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
+        let role_locks_reasoning_effort = role_locks_reasoning_effort(&config, role_name)
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
+        apply_role_to_config(&mut config, role_name)
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
+        apply_requested_spawn_agent_reasoning_override(
+            session.as_ref(),
+            turn.as_ref(),
+            &mut config,
+            args.reasoning_effort,
+            role_locks_reasoning_effort,
+        )
+        .await?;
+        apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
+        apply_spawn_agent_overrides(&mut config, child_depth);
         session
             .send_event(
                 &turn,
@@ -53,28 +72,15 @@ impl ToolHandler for Handler {
                     call_id: call_id.clone(),
                     sender_thread_id: session.conversation_id,
                     prompt: prompt.clone(),
-                    model: args.model.clone().unwrap_or_default(),
-                    reasoning_effort: args.reasoning_effort.unwrap_or_default(),
+                    model: config.model.clone().unwrap_or_default(),
+                    reasoning_effort: config.model_reasoning_effort.unwrap_or_default(),
                 }
                 .into(),
             )
             .await;
-        let mut config =
-            build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort,
-        )
-        .await?;
-        apply_role_to_config(&mut config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-        apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
-        apply_spawn_agent_overrides(&mut config, child_depth);
 
+        let requested_model = config.model.clone().unwrap_or_default();
+        let requested_reasoning_effort = config.model_reasoning_effort.unwrap_or_default();
         let result = session
             .services
             .agent_control
@@ -130,11 +136,11 @@ impl ToolHandler for Handler {
         let effective_model = agent_snapshot
             .as_ref()
             .map(|snapshot| snapshot.model.clone())
-            .unwrap_or_else(|| args.model.clone().unwrap_or_default());
+            .unwrap_or(requested_model);
         let effective_reasoning_effort = agent_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.reasoning_effort)
-            .unwrap_or(args.reasoning_effort.unwrap_or_default());
+            .unwrap_or(requested_reasoning_effort);
         let nickname = new_agent_nickname.clone();
         session
             .send_event(
@@ -173,7 +179,6 @@ struct SpawnAgentArgs {
     message: Option<String>,
     items: Option<Vec<UserInput>>,
     agent_type: Option<String>,
-    model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     fork_context: bool,

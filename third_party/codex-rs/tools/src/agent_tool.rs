@@ -23,8 +23,6 @@ pub struct WaitAgentTimeoutOptions {
 }
 
 pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpec {
-    let available_models_description = (!options.hide_agent_type_model_reasoning)
-        .then(|| spawn_agent_models_description(options.available_models));
     let return_value_description =
         "Returns the spawned agent id plus the user-facing nickname when available.";
     let mut properties = spawn_agent_common_properties_v1(&options.agent_type_description);
@@ -35,7 +33,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpe
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
         description: spawn_agent_tool_description(
-            available_models_description.as_deref(),
+            !options.hide_agent_type_model_reasoning,
             return_value_description,
             options.include_usage_hint,
             options.usage_hint_text,
@@ -48,8 +46,6 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions<'_>) -> ToolSpe
 }
 
 pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpec {
-    let available_models_description = (!options.hide_agent_type_model_reasoning)
-        .then(|| spawn_agent_models_description(options.available_models));
     let return_value_description = if options.hide_agent_type_model_reasoning {
         "Returns the canonical task name for the spawned agent."
     } else {
@@ -70,7 +66,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions<'_>) -> ToolSpe
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
         description: spawn_agent_tool_description(
-            available_models_description.as_deref(),
+            !options.hide_agent_type_model_reasoning,
             return_value_description,
             options.include_usage_hint,
             options.usage_hint_text,
@@ -527,13 +523,6 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
-            "model".to_string(),
-            JsonSchema::string(Some(
-                "Optional model override for the new agent. Replaces the inherited model."
-                    .to_string(),
-            )),
-        ),
-        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
@@ -561,13 +550,6 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
-            "model".to_string(),
-            JsonSchema::string(Some(
-                "Optional model override for the new agent. Replaces the inherited model."
-                    .to_string(),
-            )),
-        ),
-        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
@@ -579,22 +561,24 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
 
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
-    properties.remove("model");
     properties.remove("reasoning_effort");
 }
 
 fn spawn_agent_tool_description(
-    available_models_description: Option<&str>,
+    include_agent_role_guidance: bool,
     return_value_description: &str,
     include_usage_hint: bool,
     usage_hint_text: Option<String>,
 ) -> String {
-    let agent_role_guidance = available_models_description.unwrap_or_default();
+    let agent_role_guidance = if include_agent_role_guidance {
+        "Spawn a sub-agent for a well-scoped task."
+    } else {
+        "Spawn a sub-agent for a well-scoped task."
+    };
 
     let tool_description = format!(
         r#"
-        {agent_role_guidance}
-        Spawn a sub-agent for a well-scoped task. {return_value_description}"#
+        {agent_role_guidance} {return_value_description}"#
     );
 
     if !include_usage_hint {
@@ -607,10 +591,10 @@ fn spawn_agent_tool_description(
 {usage_hint_text}"#
         );
     }
-    let agent_role_usage_hint = available_models_description
-        .map(|_| {
+    let agent_role_usage_hint = include_agent_role_guidance
+        .then_some(
             "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
-        })
+        )
         .unwrap_or_default();
     format!(
         r#"
@@ -650,35 +634,6 @@ Requests for depth, thoroughness, research, investigation, or detailed codebase 
 - Delegate verification only when it can run in parallel with ongoing implementation and is likely to catch a concrete risk before final integration.
 - The key is to find opportunities to spawn multiple independent subtasks in parallel within the same round, while ensuring each subtask is well-defined, self-contained, and materially advances the main task."#
     )
-}
-
-fn spawn_agent_models_description(models: &[ModelPreset]) -> String {
-    let visible_models: Vec<&ModelPreset> =
-        models.iter().filter(|model| model.show_in_picker).collect();
-    if visible_models.is_empty() {
-        return "No picker-visible models are currently loaded.".to_string();
-    }
-
-    visible_models
-        .into_iter()
-        .map(|model| {
-            let efforts = model
-                .supported_reasoning_efforts
-                .iter()
-                .map(|preset| format!("{} ({})", preset.effort, preset.description))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!(
-                "- {} (`{}`): {} Default reasoning effort: {}. Supported reasoning efforts: {}.",
-                model.display_name,
-                model.model,
-                model.description,
-                model.default_reasoning_effort,
-                efforts
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema {

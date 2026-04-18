@@ -51,6 +51,7 @@ fn model_from_preset(preset: &ModelPreset) -> Model {
         // todo(sayan): fix, maybe make roundtrip use ModelInfo only
         supports_personality: false,
         additional_speed_tiers: preset.additional_speed_tiers.clone(),
+        effective_context_window: preset.effective_context_window,
         is_default: preset.is_default,
     }
 }

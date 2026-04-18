@@ -2918,6 +2918,7 @@ impl App {
         }
 
         let mut initial_selected_idx = None;
+        let current_tokens_in_context = self.chat_widget.current_tokens_in_context_if_known();
         let items = response
             .agents
             .iter()
@@ -2931,6 +2932,24 @@ impl App {
                     agent.name, agent.id, agent.provider_id, agent.model_id
                 );
                 let agent_id = agent.id.clone();
+                let block_message = match current_tokens_in_context {
+                    Some(current_tokens_in_context)
+                        if current_tokens_in_context > i64::from(agent.effective_context_window) =>
+                    {
+                        format!(
+                            "Current context usage {} exceeds target model `{}` context window {}; switch not applied",
+                            current_tokens_in_context,
+                            agent.model_id,
+                            agent.effective_context_window
+                        )
+                    }
+                    .into(),
+                    None => Some(
+                        "Current context usage is unavailable; wait for token usage before switching Sirix agents."
+                            .to_string(),
+                    ),
+                    _ => None,
+                };
                 SelectionItem {
                     name: agent.name.clone(),
                     description: Some(format!("{} · {}", agent.provider_id, agent.model_id)),
@@ -2938,6 +2957,10 @@ impl App {
                         .then_some(agent.description.clone()),
                     is_current: agent.id == response.current_agent_id,
                     actions: vec![Box::new(move |tx| {
+                        if let Some(message) = block_message.clone() {
+                            tx.send(AppEvent::AddErrorMessage(message));
+                            return;
+                        }
                         tx.send(AppEvent::SwitchSirixAgent(agent_id.clone()));
                     })],
                     dismiss_on_select: true,
@@ -4646,11 +4669,17 @@ impl App {
             AppEvent::ConnectorsLoaded { result, is_final } => {
                 self.chat_widget.on_connectors_loaded(result, is_final);
             }
+            AppEvent::AddErrorMessage(message) => {
+                self.chat_widget.add_error_message(message);
+            }
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.on_update_reasoning_effort(effort);
             }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
+            }
+            AppEvent::UpdateModelContextWindow(window) => {
+                self.chat_widget.set_runtime_context_window(window);
             }
             AppEvent::UpdateCollaborationMode(mask) => {
                 self.chat_widget.set_collaboration_mask(mask);
@@ -5470,7 +5499,14 @@ impl App {
                 self.open_sirix_agent_picker().await;
             }
             AppEvent::SwitchSirixAgent(agent_id) => {
-                match sirix_local_api::switch_session_agent(&agent_id).await {
+                let current_tokens_in_context =
+                    self.chat_widget.current_tokens_in_context_if_known();
+                match sirix_local_api::switch_session_agent(
+                    &agent_id,
+                    current_tokens_in_context,
+                )
+                .await
+                {
                     Ok(response) => {
                         if let Err(err) = app_server.reload_user_config().await {
                             self.chat_widget.add_error_message(format!(
@@ -5485,7 +5521,7 @@ impl App {
                                 /*sandbox_policy*/ None,
                                 /*windows_sandbox_level*/ None,
                                 Some(response.model_id.clone()),
-                                /*effort*/ None,
+                                /*effort*/ Some(None),
                                 /*summary*/ None,
                                 /*service_tier*/ None,
                                 Some(Some(response.developer_instructions.clone())),
@@ -5493,6 +5529,10 @@ impl App {
                                 /*personality*/ None,
                             ));
                         self.chat_widget.set_model(response.model_id.as_str());
+                        self.chat_widget.set_reasoning_effort(None);
+                        self.chat_widget.set_runtime_context_window(Some(i64::from(
+                            response.effective_context_window,
+                        )));
                         self.chat_widget.add_info_message(
                             format!(
                                 "Switched Sirix agent to {} ({})",

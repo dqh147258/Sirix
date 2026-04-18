@@ -12,8 +12,7 @@ use uuid::Uuid;
 use crate::app::{
     ai::config::{
         resolve_session_picker_model, AiLaunchConfig, ApprovalMode, ProviderConfig,
-        SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore,
-        SIRIX_AGENT_RUNTIME_FILE_NAME,
+        SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore, SIRIX_AGENT_RUNTIME_FILE_NAME,
     },
     state::AppState,
     terminal::manager::TerminalSessionSource,
@@ -74,6 +73,7 @@ struct SessionProviderRouting {
     current_model_id: String,
     current_shell_mode: ApprovalMode,
     builtin_tool_ids: Vec<String>,
+    current_effective_context_window: Option<u32>,
     session_shell_rules: ShellRulesConfig,
     fallback: SessionFallbackState,
 }
@@ -89,6 +89,7 @@ pub struct SessionRuntimeSnapshot {
     pub workspace_root: PathBuf,
     pub shell_mode: ApprovalMode,
     pub builtin_tool_ids: Vec<String>,
+    pub effective_context_window: Option<u32>,
     pub session_shell_rules: ShellRulesConfig,
     pub fallback: SessionFallbackState,
 }
@@ -134,6 +135,7 @@ impl AiSessionRegistry {
                 current_model_id: launch.model.id.clone(),
                 current_shell_mode: runtime.shell_mode,
                 builtin_tool_ids: runtime.builtin_tool_ids,
+                current_effective_context_window: runtime.effective_context_window,
                 session_shell_rules: ShellRulesConfig {
                     version: 1,
                     mode: ApprovalMode::Ask,
@@ -193,6 +195,7 @@ impl AiSessionRegistry {
             workspace_root: routing.workspace_root,
             shell_mode: routing.current_shell_mode,
             builtin_tool_ids: routing.builtin_tool_ids,
+            effective_context_window: routing.current_effective_context_window,
             session_shell_rules: routing.session_shell_rules,
             fallback: routing.fallback,
         })
@@ -217,6 +220,7 @@ impl AiSessionRegistry {
         routing.current_model_id = launch.model.id.clone();
         routing.current_shell_mode = runtime.shell_mode;
         routing.builtin_tool_ids = runtime.builtin_tool_ids;
+        routing.current_effective_context_window = runtime.effective_context_window;
         routing.fallback = SessionFallbackState {
             primary_provider_id: launch.agent.provider_id.clone(),
             primary_model_id: launch.agent.model_id.clone(),
@@ -312,6 +316,7 @@ pub async fn reconfigure_ai_session_agent(
     config_store: &SirixConfigStore,
     ai_session_id: Uuid,
     agent_id: &str,
+    current_tokens_in_context: Option<i64>,
 ) -> anyhow::Result<(AiLaunchConfig, SessionAgentRuntimeConfig)> {
     let runtime = state
         .ai_session_registry
@@ -326,7 +331,14 @@ pub async fn reconfigure_ai_session_agent(
     let session_runtime = config_store.build_session_agent_runtime(
         runtime.workspace_root.as_path(),
         &launch.agent,
+        &launch.provider,
+        &launch.model,
         &runtime.session_shell_rules,
+    )?;
+    validate_agent_context_window_switch(
+        current_tokens_in_context,
+        launch.model.id.as_str(),
+        session_runtime.effective_context_window,
     )?;
     let runtime_state = state.runtime.read().await;
     let local_ws_port = runtime_state.local_ws_port;
@@ -346,6 +358,28 @@ pub async fn reconfigure_ai_session_agent(
         .await
         .with_context(|| format!("failed to update ai session runtime for {ai_session_id}"))?;
     Ok((launch, session_runtime))
+}
+
+pub fn validate_agent_context_window_switch(
+    current_tokens_in_context: Option<i64>,
+    target_model_id: &str,
+    target_effective_context_window: Option<u32>,
+) -> anyhow::Result<()> {
+    let Some(current_tokens_in_context) = current_tokens_in_context else {
+        return Ok(());
+    };
+    let Some(target_effective_context_window) = target_effective_context_window.map(i64::from) else {
+        return Ok(());
+    };
+    if current_tokens_in_context <= target_effective_context_window {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "Current context usage {} exceeds target model `{}` context window {}; switch not applied",
+        current_tokens_in_context,
+        target_model_id,
+        target_effective_context_window
+    );
 }
 
 fn resolve_provider_for_model(
@@ -481,6 +515,8 @@ pub async fn launch_ai_session(
     let launch_runtime = config_store.build_session_agent_runtime(
         cwd,
         &launch.agent,
+        &launch.provider,
+        &launch.model,
         &ShellRulesConfig {
             version: 1,
             mode: ApprovalMode::Ask,
@@ -572,6 +608,8 @@ pub async fn launch_ai_session_in_current_terminal(
     let launch_runtime = config_store.build_session_agent_runtime(
         cwd,
         &launch.agent,
+        &launch.provider,
+        &launch.model,
         &ShellRulesConfig {
             version: 1,
             mode: ApprovalMode::Ask,
@@ -719,6 +757,7 @@ mod tests {
             agent_id: agent_id.to_string(),
             shell_mode: ApprovalMode::Ask,
             builtin_tool_ids: vec!["shell".to_string()],
+            effective_context_window: Some(30_400),
         }
     }
 
@@ -731,6 +770,35 @@ mod tests {
                 "`sirix-terminal` hosted shell cannot be reused for `sirix` AI launch; create a separate AI session instead",
             )
         );
+    }
+
+    #[test]
+    fn validate_agent_context_window_switch_rejects_when_usage_exceeds_target_window() {
+        let error = validate_agent_context_window_switch(Some(35_000), "gpt-5-mini", Some(30_400))
+            .expect_err("expected switch guard to reject overflow");
+        let message = error.to_string();
+        assert!(
+            message.contains("35,000") || message.contains("35000"),
+            "expected current token usage in error: {message}"
+        );
+        assert!(
+            message.contains("30,400") || message.contains("30400"),
+            "expected target context window in error: {message}"
+        );
+        assert!(
+            message.contains("gpt-5-mini"),
+            "expected target model id in error: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_agent_context_window_switch_allows_when_usage_fits_target_window() {
+        validate_agent_context_window_switch(Some(30_400), "gpt-5-mini", Some(30_400))
+            .expect("equal usage should still allow switching");
+        validate_agent_context_window_switch(Some(12_000), "gpt-5-mini", Some(30_400))
+            .expect("smaller usage should allow switching");
+        validate_agent_context_window_switch(None, "gpt-5-mini", Some(30_400))
+            .expect("missing runtime token count should not block switching");
     }
 
     #[tokio::test]

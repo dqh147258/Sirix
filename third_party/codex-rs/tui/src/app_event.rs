@@ -98,10 +98,13 @@ pub(crate) enum RateLimitRefreshOrigin {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
+    AddErrorMessage(String),
     /// Open the Sirix Agent picker for switching the current Agent profile.
     OpenSirixAgentPicker,
     /// Switch the current Sirix Agent profile.
     SwitchSirixAgent(String),
+    /// Update runtime context-window metadata before the next token usage event arrives.
+    UpdateModelContextWindow(Option<i64>),
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.

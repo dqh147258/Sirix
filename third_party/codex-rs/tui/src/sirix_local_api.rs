@@ -12,6 +12,7 @@ pub(crate) struct SessionAgentSummary {
     pub(crate) description: String,
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
+    pub(crate) effective_context_window: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -24,14 +25,16 @@ pub(crate) struct SessionAgentsResponse {
 pub(crate) struct SwitchSessionAgentResponse {
     pub(crate) agent_id: String,
     pub(crate) name: String,
-    pub(crate) provider_id: String,
     pub(crate) model_id: String,
+    pub(crate) effective_context_window: u32,
     pub(crate) developer_instructions: String,
 }
 
 #[derive(Debug, Serialize)]
 struct SwitchSessionAgentRequest<'a> {
     agent_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_tokens_in_context: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,10 +72,14 @@ pub(crate) async fn list_session_agents() -> anyhow::Result<SessionAgentsRespons
 
 pub(crate) async fn switch_session_agent(
     agent_id: &str,
+    current_tokens_in_context: Option<i64>,
 ) -> anyhow::Result<SwitchSessionAgentResponse> {
     let response = reqwest::Client::new()
         .post(session_url("agent")?)
-        .json(&SwitchSessionAgentRequest { agent_id })
+        .json(&SwitchSessionAgentRequest {
+            agent_id,
+            current_tokens_in_context,
+        })
         .send()
         .await
         .context("failed to switch Sirix agent")?

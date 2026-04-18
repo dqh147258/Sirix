@@ -5,3 +5,4 @@ backend-server/deploy/runtime-logs
 /third_party/crossterm/.git
 /doc/todo
 /doc/development
+.omx/

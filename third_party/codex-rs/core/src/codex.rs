@@ -285,6 +285,7 @@ use crate::plugins::PluginsManager;
 use crate::plugins::build_plugin_injections;
 use crate::plugins::render_plugins_section;
 use crate::project_doc::get_user_instructions;
+use crate::filter_skills_by_sirix_approval;
 use crate::resolve_skill_dependencies_for_turn;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
@@ -6022,6 +6023,8 @@ pub(crate) async fn run_turn(
             &connector_slug_counts,
         )
     });
+    let mentioned_skills =
+        filter_skills_by_sirix_approval(&sess, &turn_context, mentioned_skills).await;
     let config = turn_context.config.clone();
     if config
         .features

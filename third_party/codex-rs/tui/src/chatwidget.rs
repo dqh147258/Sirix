@@ -4372,6 +4372,8 @@ impl ChatWidget {
             available_decisions,
             network_approval_context: ev.network_approval_context,
             additional_permissions: ev.additional_permissions,
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         };
         self.bottom_pane
             .push_approval_request(request, &self.config.features);

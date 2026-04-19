@@ -12,7 +12,8 @@ use uuid::Uuid;
 use crate::app::{
     ai::config::{
         resolve_session_picker_model, AiLaunchConfig, ApprovalMode, ProviderConfig,
-        SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore, SIRIX_AGENT_RUNTIME_FILE_NAME,
+        SessionAgentRuntimeConfig, ShellRulesConfig, SirixConfigStore,
+        SIRIX_AGENT_RUNTIME_FILE_NAME,
     },
     state::AppState,
     terminal::manager::TerminalSessionSource,
@@ -368,7 +369,8 @@ pub fn validate_agent_context_window_switch(
     let Some(current_tokens_in_context) = current_tokens_in_context else {
         return Ok(());
     };
-    let Some(target_effective_context_window) = target_effective_context_window.map(i64::from) else {
+    let Some(target_effective_context_window) = target_effective_context_window.map(i64::from)
+    else {
         return Ok(());
     };
     if current_tokens_in_context <= target_effective_context_window {

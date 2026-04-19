@@ -15,7 +15,13 @@ use codex_protocol::protocol::SkillScope;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::WarningEvent;
+use tracing::info;
 use tracing::warn;
+
+use crate::sirix_tool_approval::SirixToolApprovalDecision;
+use crate::sirix_tool_approval::wait_for_sirix_tool_approval;
 
 pub use codex_core_skills::SkillDependencyInfo;
 pub use codex_core_skills::SkillError;
@@ -93,6 +99,68 @@ pub(crate) async fn resolve_skill_dependencies_for_turn(
     if !missing.is_empty() {
         request_skill_dependencies(sess, turn_context, &missing).await;
     }
+}
+
+pub(crate) async fn filter_skills_by_sirix_approval(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    skills: Vec<SkillMetadata>,
+) -> Vec<SkillMetadata> {
+    let mut approved = Vec::with_capacity(skills.len());
+    for skill in skills {
+        let Some(capability_key) = sirix_skill_capability_key(&turn_context.config, &skill) else {
+            approved.push(skill);
+            continue;
+        };
+        match wait_for_sirix_tool_approval(
+            capability_key.as_str(),
+            turn_context.config.sirix_agent_id.as_deref(),
+        )
+        .await
+        {
+            Ok(Some(SirixToolApprovalDecision::Allow)) | Ok(None) => approved.push(skill),
+            Ok(Some(SirixToolApprovalDecision::Deny)) => {
+                let message = format!(
+                    "skill `{}` was denied by the current Sirix approval policy",
+                    skill.name
+                );
+                sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
+                    .await;
+            }
+            Err(error) => {
+                let message = format!("skill approval error for `{}`: {error}", skill.name);
+                warn!("{message}");
+                sess.send_event(turn_context, EventMsg::Warning(WarningEvent { message }))
+                    .await;
+            }
+        }
+    }
+    approved
+}
+
+fn sirix_skill_capability_key(config: &Config, skill: &SkillMetadata) -> Option<String> {
+    let configured_skill_dir = skill.path_to_skills_md.parent()?.to_string_lossy().to_string();
+    let effective_config = config.config_layer_stack.effective_config();
+    let table = effective_config.as_table()?;
+    let skills_table = table.get("skills")?.as_table()?;
+    let config_entries = skills_table.get("config")?.as_array()?;
+    for entry in config_entries {
+        let entry_table = entry.as_table()?;
+        let path = entry_table.get("path")?.as_str()?;
+        if path != configured_skill_dir {
+            continue;
+        }
+        let skill_id = entry_table
+            .get("sirix_skill_id")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| skill.name.trim().to_ascii_lowercase().replace(' ', "-"));
+        info!("resolved Sirix skill approval key for {} -> skill.{skill_id}", skill.name);
+        return Some(format!("skill.{skill_id}"));
+    }
+    None
 }
 
 async fn request_skill_dependencies(

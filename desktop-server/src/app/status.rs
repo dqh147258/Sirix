@@ -1,6 +1,13 @@
-use std::{process::Stdio, time::Duration};
+use std::{collections::BTreeMap, ffi::OsString, process::Stdio, time::Duration};
 
 use chrono::{DateTime, Utc};
+use codex_config::types::OAuthCredentialsStoreMode;
+use codex_rmcp_client::{ElicitationAction, ElicitationResponse, RmcpClient};
+use futures_util::FutureExt;
+use rmcp::model::{
+    ClientCapabilities, ElicitationCapability, FormElicitationCapability, Implementation,
+    InitializeRequestParams, ProtocolVersion,
+};
 use serde::Serialize;
 use tokio::process::Command;
 
@@ -53,6 +60,13 @@ pub struct McpStatusSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct McpServerToolRuntimeStatus {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct McpServerRuntimeStatus {
     pub id: String,
     pub title: String,
@@ -61,6 +75,7 @@ pub struct McpServerRuntimeStatus {
     pub active: bool,
     pub healthy: bool,
     pub error: Option<String>,
+    pub discovered_tools: Vec<McpServerToolRuntimeStatus>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -89,6 +104,7 @@ pub async fn refresh_mcp_statuses(state: &AppState) {
                 active: false,
                 healthy: false,
                 error: Some(error.to_string()),
+                discovered_tools: Vec::new(),
                 updated_at: now,
             }]
         }
@@ -166,6 +182,11 @@ async fn probe_mcp_server(
                             || code.as_u16() == 401
                             || code.as_u16() == 403
                             || code.as_u16() == 405;
+                        let discovered_tools = if healthy {
+                            discover_http_mcp_tools(id, &url).await.unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
                         McpServerRuntimeStatus {
                             id: id.to_string(),
                             title: title.to_string(),
@@ -174,6 +195,7 @@ async fn probe_mcp_server(
                             active: healthy,
                             healthy,
                             error: (!healthy).then(|| format!("http status {code}")),
+                            discovered_tools,
                             updated_at,
                         }
                     }
@@ -185,6 +207,7 @@ async fn probe_mcp_server(
                         active: false,
                         healthy: false,
                         error: Some(error.to_string()),
+                        discovered_tools: Vec::new(),
                         updated_at,
                     },
                 },
@@ -196,11 +219,15 @@ async fn probe_mcp_server(
                     active: false,
                     healthy: false,
                     error: Some(error.to_string()),
+                    discovered_tools: Vec::new(),
                     updated_at,
                 },
             }
         }
         Ok(McpProbeTarget::Stdio { command, args, env }) => {
+            let discovered_tools = discover_stdio_mcp_tools(command.as_str(), &args, &env)
+                .await
+                .unwrap_or_default();
             let mut child = match {
                 let mut cmd = Command::new(&command);
                 cmd.args(&args)
@@ -223,6 +250,7 @@ async fn probe_mcp_server(
                         active: false,
                         healthy: false,
                         error: Some(error.to_string()),
+                        discovered_tools: Vec::new(),
                         updated_at,
                     }
                 }
@@ -240,6 +268,7 @@ async fn probe_mcp_server(
                         active: true,
                         healthy: true,
                         error: None,
+                        discovered_tools,
                         updated_at,
                     }
                 }
@@ -251,6 +280,7 @@ async fn probe_mcp_server(
                     active: true,
                     healthy: true,
                     error: None,
+                    discovered_tools,
                     updated_at,
                 },
                 Ok(Ok(status)) => McpServerRuntimeStatus {
@@ -261,6 +291,7 @@ async fn probe_mcp_server(
                     active: false,
                     healthy: false,
                     error: Some(format!("process exited with status {status}")),
+                    discovered_tools,
                     updated_at,
                 },
                 Ok(Err(error)) => McpServerRuntimeStatus {
@@ -271,6 +302,7 @@ async fn probe_mcp_server(
                     active: false,
                     healthy: false,
                     error: Some(error.to_string()),
+                    discovered_tools,
                     updated_at,
                 },
             }
@@ -283,7 +315,113 @@ async fn probe_mcp_server(
             active: false,
             healthy: false,
             error: Some(error.to_string()),
+            discovered_tools: Vec::new(),
             updated_at,
         },
     }
+}
+
+async fn discover_stdio_mcp_tools(
+    command: &str,
+    args: &[String],
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<Vec<McpServerToolRuntimeStatus>> {
+    let client = RmcpClient::new_stdio_client(
+        OsString::from(command),
+        args.iter().cloned().map(OsString::from).collect(),
+        Some(
+            env.iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect(),
+        ),
+        &[],
+        None,
+    )
+    .await?;
+    initialize_mcp_client(&client).await?;
+    let result = client
+        .list_tools(None, Some(Duration::from_secs(2)))
+        .await?;
+    Ok(result
+        .tools
+        .into_iter()
+        .map(|tool| McpServerToolRuntimeStatus {
+            id: tool.name.to_string(),
+            title: tool.title.unwrap_or_else(|| tool.name.to_string()),
+            description: tool.description.map(|value| value.into_owned()),
+        })
+        .collect())
+}
+
+async fn initialize_mcp_client(client: &RmcpClient) -> anyhow::Result<()> {
+    let init = InitializeRequestParams {
+        meta: None,
+        capabilities: ClientCapabilities {
+            elicitation: Some(ElicitationCapability {
+                form: Some(FormElicitationCapability {
+                    schema_validation: None,
+                }),
+                url: None,
+            }),
+            experimental: None,
+            extensions: None,
+            roots: None,
+            sampling: None,
+            tasks: None,
+        },
+        client_info: Implementation {
+            name: "sirix-desktop-server".into(),
+            title: Some("Sirix Desktop Server".into()),
+            version: env!("CARGO_PKG_VERSION").into(),
+            description: None,
+            icons: None,
+            website_url: None,
+        },
+        protocol_version: ProtocolVersion::V_2025_03_26,
+    };
+    client
+        .initialize(
+            init,
+            Some(Duration::from_secs(2)),
+            Box::new(|_, _| {
+                async move {
+                    Ok(ElicitationResponse {
+                        action: ElicitationAction::Decline,
+                        content: None,
+                        meta: None,
+                    })
+                }
+                .boxed()
+            }),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn discover_http_mcp_tools(
+    server_name: &str,
+    url: &str,
+) -> anyhow::Result<Vec<McpServerToolRuntimeStatus>> {
+    let client = RmcpClient::new_streamable_http_client(
+        server_name,
+        url,
+        None,
+        None,
+        None,
+        OAuthCredentialsStoreMode::Auto,
+    )
+    .await?;
+    initialize_mcp_client(&client).await?;
+    let result = client
+        .list_tools(None, Some(Duration::from_secs(2)))
+        .await?;
+    Ok(result
+        .tools
+        .into_iter()
+        .map(|tool| McpServerToolRuntimeStatus {
+            id: tool.name.to_string(),
+            title: tool.title.unwrap_or_else(|| tool.name.to_string()),
+            description: tool.description.map(|value| value.into_owned()),
+        })
+        .collect())
 }

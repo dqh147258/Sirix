@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -23,7 +23,8 @@ pub enum ApprovalDecision {
 pub enum ApprovalScope {
     Once,
     Session,
-    Deny,
+    Workspace,
+    Global,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -32,12 +33,34 @@ pub struct ApprovalRecord {
     pub scope: ApprovalScope,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ShellApprovalRequestRecord {
+    pub request_id: String,
+    pub command: Vec<String>,
+    pub supported_scopes: Vec<String>,
+    pub prefix_candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ShellApprovalResolutionRecord {
+    pub decision: ApprovalDecision,
+    pub scope: ApprovalScope,
+    pub prefix: Option<String>,
+}
+
 #[derive(Default)]
 pub struct AiApprovalRegistry {
     storage_dir: PathBuf,
     // ai_session_id -> (agent_id + capability_key) -> decision
     records: Arc<RwLock<HashMap<Uuid, HashMap<String, ApprovalRecord>>>>,
-    pending_requests: Arc<RwLock<HashSet<(Uuid, String)>>>,
+    // ai_session_id + (agent_id + capability_key) -> current request_id
+    pending_requests: Arc<RwLock<HashMap<(Uuid, String), String>>>,
+}
+
+#[derive(Default)]
+pub struct ShellApprovalRegistry {
+    pending_requests: Arc<RwLock<HashMap<(Uuid, String), ShellApprovalRequestRecord>>>,
+    resolved_requests: Arc<RwLock<HashMap<(Uuid, String), ShellApprovalResolutionRecord>>>,
 }
 
 impl AiApprovalRegistry {
@@ -49,7 +72,7 @@ impl AiApprovalRegistry {
         Ok(Self {
             storage_dir,
             records: Arc::new(RwLock::new(records)),
-            pending_requests: Arc::new(RwLock::new(HashSet::new())),
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -86,7 +109,9 @@ impl AiApprovalRegistry {
                 }
                 Some(record)
             }
-            ApprovalScope::Session | ApprovalScope::Deny => Some(record),
+            ApprovalScope::Session | ApprovalScope::Workspace | ApprovalScope::Global => {
+                Some(record)
+            }
         }
     }
 
@@ -122,9 +147,19 @@ impl AiApprovalRegistry {
         ai_session_id: Uuid,
         agent_id: &str,
         capability_key: &str,
+        request_id: &str,
     ) -> bool {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return false;
+        }
         let mut guard = self.pending_requests.write().await;
-        guard.insert((ai_session_id, approval_record_key(agent_id, capability_key)))
+        let key = (ai_session_id, approval_record_key(agent_id, capability_key));
+        if guard.contains_key(&key) {
+            return false;
+        }
+        guard.insert(key, request_id.to_string());
+        true
     }
 
     pub async fn clear_pending(&self, ai_session_id: Uuid, agent_id: &str, capability_key: &str) {
@@ -132,6 +167,85 @@ impl AiApprovalRegistry {
             .write()
             .await
             .remove(&(ai_session_id, approval_record_key(agent_id, capability_key)));
+    }
+
+    pub async fn take_pending(
+        &self,
+        ai_session_id: Uuid,
+        agent_id: &str,
+        capability_key: &str,
+        request_id: Option<&str>,
+    ) -> Option<String> {
+        let key = (ai_session_id, approval_record_key(agent_id, capability_key));
+        let mut guard = self.pending_requests.write().await;
+        let existing_request_id = guard.get(&key)?.clone();
+        if let Some(request_id) = request_id.map(str::trim).filter(|value| !value.is_empty()) {
+            if existing_request_id != request_id {
+                return None;
+            }
+        }
+        guard.remove(&key);
+        Some(existing_request_id)
+    }
+
+    pub async fn restore_pending(
+        &self,
+        ai_session_id: Uuid,
+        agent_id: &str,
+        capability_key: &str,
+        request_id: &str,
+    ) {
+        let request_id = request_id.trim();
+        if request_id.is_empty() {
+            return;
+        }
+        self.pending_requests.write().await.insert(
+            (ai_session_id, approval_record_key(agent_id, capability_key)),
+            request_id.to_string(),
+        );
+    }
+}
+
+impl ShellApprovalRegistry {
+    pub async fn upsert_pending(&self, ai_session_id: Uuid, request: ShellApprovalRequestRecord) {
+        let key = (ai_session_id, request.request_id.clone());
+        self.resolved_requests.write().await.remove(&key);
+        self.pending_requests.write().await.insert(key, request);
+    }
+
+    pub async fn pending_request(
+        &self,
+        ai_session_id: Uuid,
+        request_id: &str,
+    ) -> Option<ShellApprovalRequestRecord> {
+        self.pending_requests
+            .read()
+            .await
+            .get(&(ai_session_id, request_id.trim().to_string()))
+            .cloned()
+    }
+
+    pub async fn resolve(
+        &self,
+        ai_session_id: Uuid,
+        request_id: &str,
+        resolution: ShellApprovalResolutionRecord,
+    ) {
+        let key = (ai_session_id, request_id.trim().to_string());
+        self.pending_requests.write().await.remove(&key);
+        self.resolved_requests.write().await.insert(key, resolution);
+    }
+
+    pub async fn resolution(
+        &self,
+        ai_session_id: Uuid,
+        request_id: &str,
+    ) -> Option<ShellApprovalResolutionRecord> {
+        self.resolved_requests
+            .read()
+            .await
+            .get(&(ai_session_id, request_id.trim().to_string()))
+            .cloned()
     }
 }
 
@@ -269,17 +383,17 @@ mod tests {
 
         assert!(
             registry
-                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch", "req-a")
                 .await
         );
         assert!(
             registry
-                .mark_pending(session_id, "agent-b", "builtin.apply_patch")
+                .mark_pending(session_id, "agent-b", "builtin.apply_patch", "req-b")
                 .await
         );
         assert!(
             !registry
-                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch", "req-c")
                 .await
         );
 
@@ -288,15 +402,86 @@ mod tests {
             .await;
         assert!(
             registry
-                .mark_pending(session_id, "agent-a", "builtin.apply_patch")
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch", "req-d")
                 .await
         );
         assert!(
             !registry
-                .mark_pending(session_id, "agent-b", "builtin.apply_patch")
+                .mark_pending(session_id, "agent-b", "builtin.apply_patch", "req-e")
                 .await
         );
 
         fs::remove_dir_all(storage_dir).expect("remove temp approval dir");
+    }
+
+    #[tokio::test]
+    async fn take_pending_requires_matching_request_id_when_provided() {
+        let storage_dir = temp_storage_dir("pending-request-id");
+        let registry = AiApprovalRegistry::new(&storage_dir).expect("registry");
+        let session_id = Uuid::new_v4();
+
+        assert!(
+            registry
+                .mark_pending(session_id, "agent-a", "builtin.apply_patch", "req-1")
+                .await
+        );
+        assert!(registry
+            .take_pending(
+                session_id,
+                "agent-a",
+                "builtin.apply_patch",
+                Some("req-mismatch"),
+            )
+            .await
+            .is_none());
+        assert_eq!(
+            registry
+                .take_pending(session_id, "agent-a", "builtin.apply_patch", Some("req-1"))
+                .await,
+            Some("req-1".to_string())
+        );
+        assert!(registry
+            .take_pending(session_id, "agent-a", "builtin.apply_patch", Some("req-1"))
+            .await
+            .is_none());
+
+        fs::remove_dir_all(storage_dir).expect("remove temp approval dir");
+    }
+
+    #[tokio::test]
+    async fn shell_registry_replaces_stale_resolution_on_new_request() {
+        let registry = ShellApprovalRegistry::default();
+        let session_id = Uuid::new_v4();
+        let request_id = "req-1";
+
+        registry
+            .resolve(
+                session_id,
+                request_id,
+                ShellApprovalResolutionRecord {
+                    decision: ApprovalDecision::Allow,
+                    scope: ApprovalScope::Once,
+                    prefix: None,
+                },
+            )
+            .await;
+
+        registry
+            .upsert_pending(
+                session_id,
+                ShellApprovalRequestRecord {
+                    request_id: request_id.to_string(),
+                    command: vec!["bash".to_string(), "-lc".to_string(), "ls".to_string()],
+                    supported_scopes: vec!["once".to_string(), "session".to_string()],
+                    prefix_candidates: vec!["ls".to_string()],
+                },
+            )
+            .await;
+
+        assert!(registry.resolution(session_id, request_id).await.is_none());
+        assert!(registry
+            .pending_request(session_id, request_id)
+            .await
+            .is_some());
     }
 }

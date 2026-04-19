@@ -7,22 +7,35 @@ class TerminalApprovalRequest {
   const TerminalApprovalRequest({
     required this.aiSessionId,
     required this.terminalId,
+    this.requestId,
     required this.capabilityKey,
     required this.agentId,
     required this.modelId,
     required this.cwd,
     required this.configuredMode,
+    this.supportedScopes = const ['once', 'session'],
+    this.approvalKind,
+    this.shellCommand,
+    this.shellPrefixCandidates = const [],
   });
 
   final String aiSessionId;
   final String terminalId;
+  final String? requestId;
   final String capabilityKey;
   final String agentId;
   final String modelId;
   final String cwd;
   final ApprovalMode configuredMode;
+  final List<String> supportedScopes;
+  final String? approvalKind;
+  final String? shellCommand;
+  final List<String> shellPrefixCandidates;
 
-  String get dedupeKey => '$aiSessionId::$agentId::$capabilityKey';
+  String get dedupeKey =>
+      requestId == null || requestId!.trim().isEmpty
+          ? '$aiSessionId::$agentId::$capabilityKey'
+          : requestId!;
 }
 
 @immutable

@@ -26,11 +26,13 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
       final config = await _localClient.getAiConfig();
       final shellRules = await _localClient.getShellRules();
       final effective = await _localClient.getEffectiveAiConfig();
+      final statusOverview = await _localClient.getStatusOverview();
       state = state.copyWith(
         loading: false,
         config: config,
         shellRules: shellRules,
         effective: effective,
+        statusOverview: statusOverview,
         openAiAuthStatuses: await _loadOpenAiAuthStatuses(config.providers),
         clearError: true,
       );
@@ -55,11 +57,13 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
       final saved = await _localClient.saveAiConfig(state.config);
       final shellRules = await _localClient.saveShellRules(state.shellRules);
       final effective = await _localClient.getEffectiveAiConfig();
+      final statusOverview = await _localClient.getStatusOverview();
       state = state.copyWith(
         saving: false,
         config: saved,
         shellRules: shellRules,
         effective: effective,
+        statusOverview: statusOverview,
         noticeMessage: 'AI settings saved.',
         clearError: true,
       );
@@ -449,6 +453,30 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
   void updateShellRules(ShellRulesConfigModel shellRules) {
     state = state.copyWith(
       shellRules: shellRules,
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateBuiltinApprovals(CapabilityRulesConfigModel approvals) {
+    state = state.copyWith(
+      config: state.config.copyWith(builtinApprovals: approvals),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateSkillApprovals(CapabilityRulesConfigModel approvals) {
+    state = state.copyWith(
+      config: state.config.copyWith(skillApprovals: approvals),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void updateMcpApprovals(CapabilityRulesConfigModel approvals) {
+    state = state.copyWith(
+      config: state.config.copyWith(mcpApprovals: approvals),
       clearError: true,
       clearNotice: true,
     );

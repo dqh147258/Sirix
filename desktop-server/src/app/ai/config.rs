@@ -177,6 +177,33 @@ impl Default for McpGlobalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityApprovalRule {
+    pub key: String,
+    #[serde(default)]
+    pub mode: ApprovalMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityRulesConfig {
+    #[serde(default = "default_capability_rules_version")]
+    pub version: u32,
+    #[serde(default = "default_capability_rules_mode")]
+    pub mode: ApprovalMode,
+    #[serde(default)]
+    pub rules: Vec<CapabilityApprovalRule>,
+}
+
+impl Default for CapabilityRulesConfig {
+    fn default() -> Self {
+        Self {
+            version: default_capability_rules_version(),
+            mode: default_capability_rules_mode(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentCapabilityRule {
     pub key: String,
     #[serde(default)]
@@ -244,6 +271,12 @@ pub struct AgentConfig {
     #[serde(default)]
     pub tool_rules: ToolRulesConfig,
     #[serde(default)]
+    pub builtin_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub skill_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub mcp_approvals: CapabilityRulesConfig,
+    #[serde(default)]
     pub builtin_tool_ids: Vec<String>,
     #[serde(default)]
     pub skill_ids: Vec<String>,
@@ -280,6 +313,12 @@ pub struct SirixConfig {
     #[serde(default)]
     pub mcp: McpGlobalConfig,
     #[serde(default)]
+    pub builtin_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub skill_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub mcp_approvals: CapabilityRulesConfig,
+    #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
@@ -311,6 +350,9 @@ impl Default for SirixConfig {
             }],
             skills: Vec::new(),
             mcp: McpGlobalConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
             mcp_servers: Vec::new(),
             agents: vec![AgentConfig {
                 id: DEFAULT_AGENT_ID.to_string(),
@@ -324,6 +366,9 @@ impl Default for SirixConfig {
                 approval_mode: ApprovalMode::Ask,
                 shell_rules: ShellRulesConfig::default(),
                 tool_rules: ToolRulesConfig::default(),
+                builtin_approvals: CapabilityRulesConfig::default(),
+                skill_approvals: CapabilityRulesConfig::default(),
+                mcp_approvals: CapabilityRulesConfig::default(),
                 builtin_tool_ids: default_builtin_tool_ids(),
                 skill_ids: Vec::new(),
                 mcp_server_ids: Vec::new(),
@@ -435,6 +480,10 @@ impl SirixConfigStore {
         cwd.join(".sirix").join("tool-rules.json")
     }
 
+    pub fn workspace_config_path(&self, cwd: &Path) -> PathBuf {
+        cwd.join(".sirix").join("config.toml")
+    }
+
     fn shared_codex_home(&self) -> PathBuf {
         self.sirix_home.join(SIRIX_SHARED_CODEX_HOME_DIR_NAME)
     }
@@ -498,6 +547,31 @@ impl SirixConfigStore {
         rules: &ToolRulesConfig,
     ) -> anyhow::Result<()> {
         self.save_rules_to_path(&self.workspace_tool_rules_path(cwd), rules)
+    }
+
+    pub fn load_workspace_config(&self, cwd: &Path) -> anyhow::Result<Option<SirixConfig>> {
+        let path = self.workspace_config_path(cwd);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        parse_config_with_compat(&raw, &path).map(Some)
+    }
+
+    pub fn save_workspace_config(&self, cwd: &Path, config: &SirixConfig) -> anyhow::Result<()> {
+        let mut normalized = config.clone();
+        normalize_sirix_config(&mut normalized);
+        let path = self.workspace_config_path(cwd);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let serialized = toml::to_string_pretty(&normalized)
+            .context("failed to serialize sirix workspace config")?;
+        fs::write(&path, serialized)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
     }
 
     pub fn effective_shell_rules(&self, cwd: &Path) -> anyhow::Result<ShellRulesConfig> {
@@ -637,6 +711,45 @@ impl SirixConfigStore {
         let agent_rules = merge_shell_rule_prefixes(global_rules, agent.tool_rules.clone());
         Ok(match self.load_workspace_tool_rules(cwd)? {
             Some(workspace_rules) => merge_shell_rules(agent_rules, workspace_rules),
+            None => agent_rules,
+        })
+    }
+
+    pub fn effective_builtin_approvals_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+    ) -> anyhow::Result<CapabilityRulesConfig> {
+        let global = self.load_global()?.builtin_approvals;
+        let agent_rules = merge_capability_rules(global, agent.builtin_approvals.clone());
+        Ok(match self.load_workspace_config(cwd)? {
+            Some(workspace) => merge_capability_rules(agent_rules, workspace.builtin_approvals),
+            None => agent_rules,
+        })
+    }
+
+    pub fn effective_skill_approvals_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+    ) -> anyhow::Result<CapabilityRulesConfig> {
+        let global = self.load_global()?.skill_approvals;
+        let agent_rules = merge_capability_rules(global, agent.skill_approvals.clone());
+        Ok(match self.load_workspace_config(cwd)? {
+            Some(workspace) => merge_capability_rules(agent_rules, workspace.skill_approvals),
+            None => agent_rules,
+        })
+    }
+
+    pub fn effective_mcp_approvals_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+    ) -> anyhow::Result<CapabilityRulesConfig> {
+        let global = self.load_global()?.mcp_approvals;
+        let agent_rules = merge_capability_rules(global, agent.mcp_approvals.clone());
+        Ok(match self.load_workspace_config(cwd)? {
+            Some(workspace) => merge_capability_rules(agent_rules, workspace.mcp_approvals),
             None => agent_rules,
         })
     }
@@ -1156,12 +1269,29 @@ fn build_codex_bridge_toml(
         "mcp_servers".to_string(),
         build_sirix_mcp_servers_table(&effective, &launch.agent)?,
     );
+    // Only the launch agent and the sub-agents it can actually delegate to
+    // need role files in the embedded Codex bridge config. Exporting every
+    // enabled Sirix agent here can fail when the current session only exposes
+    // a narrowed provider catalog (for example the session proxy view used by
+    // tests and provider failover flows).
+    let mut role_scoped_config = effective.clone();
+    role_scoped_config.agents = std::iter::once(launch.agent.clone())
+        .chain(
+            selected_agent_sub_agents(&effective, &launch.agent)
+                .into_iter()
+                .cloned(),
+        )
+        .collect();
     let role_dir = launch.session_storage_dir.join(SIRIX_AGENT_ROLES_DIR);
-    let role_files =
-        write_sirix_agent_role_files(&effective, &launch.session_providers, cwd, &role_dir)?;
+    let role_files = write_sirix_agent_role_files(
+        &role_scoped_config,
+        &launch.session_providers,
+        cwd,
+        &role_dir,
+    )?;
     root.insert(
         "agents".to_string(),
-        build_sirix_agent_role_entries(&effective, &launch.agent, &role_files),
+        build_sirix_agent_role_entries(&role_scoped_config, &launch.agent, &role_files),
     );
 
     let mut sandbox_workspace_write = toml::map::Map::<String, TomlValue>::new();
@@ -1496,9 +1626,16 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
 
         normalize_shell_rules(&mut agent.shell_rules);
         normalize_shell_rules(&mut agent.tool_rules);
+        normalize_capability_rules(&mut agent.builtin_approvals);
+        normalize_capability_rules(&mut agent.skill_approvals);
+        normalize_capability_rules(&mut agent.mcp_approvals);
 
         normalize_builtin_codex_agent(agent, &default_builtin_tools);
     }
+
+    normalize_capability_rules(&mut config.builtin_approvals);
+    normalize_capability_rules(&mut config.skill_approvals);
+    normalize_capability_rules(&mut config.mcp_approvals);
 
     if !config
         .agents
@@ -1520,6 +1657,9 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                     approval_mode: ApprovalMode::Ask,
                     shell_rules: ShellRulesConfig::default(),
                     tool_rules: ToolRulesConfig::default(),
+                    builtin_approvals: CapabilityRulesConfig::default(),
+                    skill_approvals: CapabilityRulesConfig::default(),
+                    mcp_approvals: CapabilityRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tools,
                     skill_ids: Vec::new(),
                     mcp_server_ids: Vec::new(),
@@ -1727,7 +1867,10 @@ pub fn effective_model_context_window(provider: &ProviderConfig, model: &ModelCo
         .unwrap_or_else(|| infer_provider_default_context_window(&provider.kind, &model.id))
 }
 
-pub fn effective_model_runtime_context_window(provider: &ProviderConfig, model: &ModelConfig) -> u32 {
+pub fn effective_model_runtime_context_window(
+    provider: &ProviderConfig,
+    model: &ModelConfig,
+) -> u32 {
     // Codex 在运行时会为系统提示词、工具说明和输出留出固定 headroom，
     // 所以对外暴露给切模预检和状态展示的窗口要与 runtime 真实口径一致，
     // 不能直接复用“原始配置窗口”。
@@ -2510,6 +2653,21 @@ fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
         } else {
             overlay.mcp
         },
+        builtin_approvals: if overlay.builtin_approvals == CapabilityRulesConfig::default() {
+            base.builtin_approvals
+        } else {
+            merge_capability_rules(base.builtin_approvals, overlay.builtin_approvals)
+        },
+        skill_approvals: if overlay.skill_approvals == CapabilityRulesConfig::default() {
+            base.skill_approvals
+        } else {
+            merge_capability_rules(base.skill_approvals, overlay.skill_approvals)
+        },
+        mcp_approvals: if overlay.mcp_approvals == CapabilityRulesConfig::default() {
+            base.mcp_approvals
+        } else {
+            merge_capability_rules(base.mcp_approvals, overlay.mcp_approvals)
+        },
         mcp_servers: if overlay.mcp_servers.is_empty() {
             base.mcp_servers
         } else {
@@ -2585,6 +2743,63 @@ fn merge_cli_settings(base: CliSettings, overlay: CliSettings) -> CliSettings {
 fn normalize_shell_rules(rules: &mut ShellRulesConfig) {
     rules.allow = normalize_shell_rule_list(std::mem::take(&mut rules.allow));
     rules.deny = normalize_shell_rule_list(std::mem::take(&mut rules.deny));
+}
+
+fn normalize_capability_rules(rules: &mut CapabilityRulesConfig) {
+    let mut deduped = BTreeMap::<String, CapabilityApprovalRule>::new();
+    for rule in std::mem::take(&mut rules.rules) {
+        let normalized_key = normalize_capability_rule_key(&rule.key);
+        if normalized_key.is_empty() {
+            continue;
+        }
+        deduped.insert(
+            normalized_key.clone(),
+            CapabilityApprovalRule {
+                key: normalized_key,
+                mode: rule.mode,
+            },
+        );
+    }
+    rules.rules = deduped.into_values().collect();
+}
+
+fn normalize_capability_rule_key(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('.')
+        .split('.')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+        .to_ascii_lowercase()
+}
+
+fn merge_capability_rules(
+    base: CapabilityRulesConfig,
+    overlay: CapabilityRulesConfig,
+) -> CapabilityRulesConfig {
+    let mut merged = CapabilityRulesConfig {
+        version: overlay.version.max(base.version),
+        mode: overlay.mode,
+        rules: base.rules,
+    };
+    for rule in overlay.rules {
+        upsert_capability_rule(&mut merged.rules, rule);
+    }
+    normalize_capability_rules(&mut merged);
+    merged
+}
+
+fn upsert_capability_rule(items: &mut Vec<CapabilityApprovalRule>, rule: CapabilityApprovalRule) {
+    let normalized_key = normalize_capability_rule_key(&rule.key);
+    if normalized_key.is_empty() {
+        return;
+    }
+    items.retain(|existing| normalize_capability_rule_key(&existing.key) != normalized_key);
+    items.push(CapabilityApprovalRule {
+        key: normalized_key,
+        mode: rule.mode,
+    });
 }
 
 fn normalize_shell_rule_list(items: Vec<String>) -> Vec<String> {
@@ -2759,6 +2974,14 @@ fn build_sirix_skill_config(config: &SirixConfig, agent: &AgentConfig) -> TomlVa
         .map(|skill| {
             let mut entry = toml::map::Map::<String, TomlValue>::new();
             entry.insert("path".to_string(), TomlValue::String(skill.path.clone()));
+            // Keep the Sirix skill id in the raw config stack so the vendored
+            // Codex runtime can map an injected skill back to a stable
+            // approval capability key (`skill.<id>`) without guessing from the
+            // display name.
+            entry.insert(
+                "sirix_skill_id".to_string(),
+                TomlValue::String(skill.id.clone()),
+            );
             entry.insert(
                 "enabled".to_string(),
                 TomlValue::Boolean(agent.skill_ids.contains(&skill.id)),
@@ -3189,6 +3412,14 @@ fn default_shell_rules_mode() -> ApprovalMode {
     ApprovalMode::Ask
 }
 
+fn default_capability_rules_version() -> u32 {
+    1
+}
+
+fn default_capability_rules_mode() -> ApprovalMode {
+    ApprovalMode::Ask
+}
+
 fn default_shell_rules_deny_list() -> Vec<String> {
     vec![
         "rm -rf".to_string(),
@@ -3426,6 +3657,9 @@ mod tests {
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
             tool_rules: ToolRulesConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),
@@ -3497,6 +3731,9 @@ mod tests {
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
             tool_rules: ToolRulesConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: vec!["shell".to_string()],
             skill_ids: vec!["skill-a".to_string()],
             mcp_server_ids: vec!["mcp-a".to_string()],
@@ -3598,6 +3835,9 @@ args = ["serve"]
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
             tool_rules: ToolRulesConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: vec![skill.id.clone()],
             mcp_server_ids: vec![mcp_server.id.clone()],
@@ -3622,6 +3862,9 @@ args = ["serve"]
             approval_mode: ApprovalMode::Ask,
             shell_rules: ShellRulesConfig::default(),
             tool_rules: ToolRulesConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
             skill_ids: Vec::new(),
             mcp_server_ids: Vec::new(),
@@ -4007,15 +4250,15 @@ args = ["serve"]
             .expect("bridge models should exist");
         assert_eq!(
             models.len(),
-            2,
-            "expected unique text models from both providers"
+            3,
+            "expected all enabled text models, with provider-scoped aliases for duplicate slugs"
         );
         assert_eq!(
             models[0]
                 .as_table()
                 .and_then(|item| item.get("model"))
                 .and_then(TomlValue::as_str),
-            Some("glm-5"),
+            Some("glm-5 @ glm"),
             "active-provider duplicate should stay first in the picker catalog"
         );
         assert_eq!(
@@ -4024,6 +4267,13 @@ args = ["serve"]
                 .and_then(|item| item.get("model"))
                 .and_then(TomlValue::as_str),
             Some("gpt-5")
+        );
+        assert_eq!(
+            models[2]
+                .as_table()
+                .and_then(|item| item.get("model"))
+                .and_then(TomlValue::as_str),
+            Some("glm-5 @ openai")
         );
     }
 

@@ -2735,6 +2735,7 @@ dependencies = [
  "codex-core",
  "codex-login",
  "codex-protocol",
+ "codex-rmcp-client",
  "crossterm",
  "dirs 5.0.1",
  "dotenvy",

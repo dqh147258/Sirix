@@ -25,6 +25,85 @@ enum ApprovalMode {
   deny,
 }
 
+@immutable
+class CapabilityApprovalRuleModel {
+  const CapabilityApprovalRuleModel({
+    required this.key,
+    required this.mode,
+  });
+
+  final String key;
+  final ApprovalMode mode;
+
+  factory CapabilityApprovalRuleModel.fromJson(Map<String, dynamic> json) {
+    return CapabilityApprovalRuleModel(
+      key: json['key'] as String? ?? '',
+      mode: approvalModeFromJson(json['mode'] as String?),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'key': key,
+      'mode': _approvalModeJson(mode),
+    };
+  }
+
+  CapabilityApprovalRuleModel copyWith({
+    String? key,
+    ApprovalMode? mode,
+  }) {
+    return CapabilityApprovalRuleModel(
+      key: key ?? this.key,
+      mode: mode ?? this.mode,
+    );
+  }
+}
+
+@immutable
+class CapabilityRulesConfigModel {
+  const CapabilityRulesConfigModel({
+    this.version = 1,
+    this.mode = ApprovalMode.ask,
+    this.rules = const [],
+  });
+
+  final int version;
+  final ApprovalMode mode;
+  final List<CapabilityApprovalRuleModel> rules;
+
+  factory CapabilityRulesConfigModel.fromJson(Map<String, dynamic> json) {
+    return CapabilityRulesConfigModel(
+      version: (json['version'] as num?)?.toInt() ?? 1,
+      mode: approvalModeFromJson(json['mode'] as String?),
+      rules: (json['rules'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(CapabilityApprovalRuleModel.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'version': version,
+      'mode': _approvalModeJson(mode),
+      'rules': rules.map((item) => item.toJson()).toList(growable: false),
+    };
+  }
+
+  CapabilityRulesConfigModel copyWith({
+    int? version,
+    ApprovalMode? mode,
+    List<CapabilityApprovalRuleModel>? rules,
+  }) {
+    return CapabilityRulesConfigModel(
+      version: version ?? this.version,
+      mode: mode ?? this.mode,
+      rules: rules ?? this.rules,
+    );
+  }
+}
+
 String _providerKindJson(ProviderKind value) {
   return switch (value) {
     ProviderKind.openAiCompatible => 'open_ai_compatible',
@@ -562,6 +641,9 @@ class AgentConfigModel {
     this.approvalMode = ApprovalMode.ask,
     this.shellRules = const ShellRulesConfigModel(),
     this.toolRules = const ShellRulesConfigModel(),
+    this.builtinApprovals = const CapabilityRulesConfigModel(),
+    this.skillApprovals = const CapabilityRulesConfigModel(),
+    this.mcpApprovals = const CapabilityRulesConfigModel(),
     this.builtinToolIds = kBuiltinToolCatalog,
     this.skillIds = const [],
     this.mcpServerIds = const [],
@@ -580,6 +662,9 @@ class AgentConfigModel {
   final ApprovalMode approvalMode;
   final ShellRulesConfigModel shellRules;
   final ShellRulesConfigModel toolRules;
+  final CapabilityRulesConfigModel builtinApprovals;
+  final CapabilityRulesConfigModel skillApprovals;
+  final CapabilityRulesConfigModel mcpApprovals;
   final List<String> builtinToolIds;
   final List<String> skillIds;
   final List<String> mcpServerIds;
@@ -616,6 +701,15 @@ class AgentConfigModel {
       toolRules: ShellRulesConfigModel.fromJson(
         (json['tool_rules'] as Map<Object?, Object?>? ?? const {}).cast<String, dynamic>(),
       ),
+      builtinApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['builtin_approvals'] as Map<Object?, Object?>? ?? const {}).cast<String, dynamic>(),
+      ),
+      skillApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['skill_approvals'] as Map<Object?, Object?>? ?? const {}).cast<String, dynamic>(),
+      ),
+      mcpApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['mcp_approvals'] as Map<Object?, Object?>? ?? const {}).cast<String, dynamic>(),
+      ),
       builtinToolIds: builtinToolIds.isEmpty
           ? (json['builtin_tools_enabled'] as bool? ?? true)
               ? kBuiltinToolCatalog
@@ -643,6 +737,9 @@ class AgentConfigModel {
       'approval_mode': _approvalModeJson(approvalMode),
       'shell_rules': shellRules.toJson(),
       'tool_rules': toolRules.toJson(),
+      'builtin_approvals': builtinApprovals.toJson(),
+      'skill_approvals': skillApprovals.toJson(),
+      'mcp_approvals': mcpApprovals.toJson(),
       'builtin_tool_ids': builtinToolIds,
       'skill_ids': skillIds,
       'mcp_server_ids': mcpServerIds,
@@ -663,6 +760,9 @@ class AgentConfigModel {
     ApprovalMode? approvalMode,
     ShellRulesConfigModel? shellRules,
     ShellRulesConfigModel? toolRules,
+    CapabilityRulesConfigModel? builtinApprovals,
+    CapabilityRulesConfigModel? skillApprovals,
+    CapabilityRulesConfigModel? mcpApprovals,
     List<String>? builtinToolIds,
     List<String>? skillIds,
     List<String>? mcpServerIds,
@@ -681,6 +781,9 @@ class AgentConfigModel {
       approvalMode: approvalMode ?? this.approvalMode,
       shellRules: shellRules ?? this.shellRules,
       toolRules: toolRules ?? this.toolRules,
+      builtinApprovals: builtinApprovals ?? this.builtinApprovals,
+      skillApprovals: skillApprovals ?? this.skillApprovals,
+      mcpApprovals: mcpApprovals ?? this.mcpApprovals,
       builtinToolIds: builtinToolIds ?? this.builtinToolIds,
       skillIds: skillIds ?? this.skillIds,
       mcpServerIds: mcpServerIds ?? this.mcpServerIds,
@@ -698,6 +801,9 @@ class SirixAiConfig {
     this.providers = const [],
     this.skills = const [],
     this.mcp = const McpGlobalConfigModel(),
+    this.builtinApprovals = const CapabilityRulesConfigModel(),
+    this.skillApprovals = const CapabilityRulesConfigModel(),
+    this.mcpApprovals = const CapabilityRulesConfigModel(),
     this.mcpServers = const [],
     this.agents = const [],
   });
@@ -707,6 +813,9 @@ class SirixAiConfig {
   final List<AiProviderConfig> providers;
   final List<SkillConfigModel> skills;
   final McpGlobalConfigModel mcp;
+  final CapabilityRulesConfigModel builtinApprovals;
+  final CapabilityRulesConfigModel skillApprovals;
+  final CapabilityRulesConfigModel mcpApprovals;
   final List<McpServerConfigModel> mcpServers;
   final List<AgentConfigModel> agents;
 
@@ -727,6 +836,15 @@ class SirixAiConfig {
       mcp: McpGlobalConfigModel.fromJson(
         (json['mcp'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
       ),
+      builtinApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['builtin_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      skillApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['skill_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      mcpApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['mcp_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
       mcpServers: (json['mcp_servers'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(McpServerConfigModel.fromJson)
@@ -745,6 +863,9 @@ class SirixAiConfig {
       'providers': providers.map((item) => item.toJson()).toList(growable: false),
       'skills': skills.map((item) => item.toJson()).toList(growable: false),
       'mcp': mcp.toJson(),
+      'builtin_approvals': builtinApprovals.toJson(),
+      'skill_approvals': skillApprovals.toJson(),
+      'mcp_approvals': mcpApprovals.toJson(),
       'mcp_servers': mcpServers.map((item) => item.toJson()).toList(growable: false),
       'agents': agents.map((item) => item.toJson()).toList(growable: false),
     };
@@ -756,6 +877,9 @@ class SirixAiConfig {
     List<AiProviderConfig>? providers,
     List<SkillConfigModel>? skills,
     McpGlobalConfigModel? mcp,
+    CapabilityRulesConfigModel? builtinApprovals,
+    CapabilityRulesConfigModel? skillApprovals,
+    CapabilityRulesConfigModel? mcpApprovals,
     List<McpServerConfigModel>? mcpServers,
     List<AgentConfigModel>? agents,
   }) {
@@ -765,6 +889,9 @@ class SirixAiConfig {
       providers: providers ?? this.providers,
       skills: skills ?? this.skills,
       mcp: mcp ?? this.mcp,
+      builtinApprovals: builtinApprovals ?? this.builtinApprovals,
+      skillApprovals: skillApprovals ?? this.skillApprovals,
+      mcpApprovals: mcpApprovals ?? this.mcpApprovals,
       mcpServers: mcpServers ?? this.mcpServers,
       agents: agents ?? this.agents,
     );

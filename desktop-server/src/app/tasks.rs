@@ -9,6 +9,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::app::ai::approval::{ApprovalDecision, ApprovalRecord, ApprovalScope};
 use crate::app::state::AppState;
 use crate::app::status::refresh_mcp_statuses;
 
@@ -318,6 +319,17 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
             let _ = state.local_events.send(raw.to_string());
             debug!(event_type = %event.event_type, "forwarded backend event to desktop client");
         }
+        "ai.approval.request" => {
+            sync_backend_shell_approval_request(state, &event.payload).await;
+            let _ = state.local_events.send(raw.to_string());
+            debug!(event_type = %event.event_type, "forwarded backend event to desktop client");
+        }
+        "ai.approval.resolved" => {
+            sync_backend_shell_approval_resolution(state, &event.payload).await;
+            sync_backend_capability_approval_resolution(state, &event.payload).await;
+            let _ = state.local_events.send(raw.to_string());
+            debug!(event_type = %event.event_type, "forwarded backend event to desktop client");
+        }
         "terminal.create" => {
             handle_terminal_create(state, event.payload).await;
         }
@@ -333,6 +345,288 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         _ => {
             debug!(event_type = %event.event_type, payload = %event.payload, "received backend event");
         }
+    }
+}
+
+async fn sync_backend_shell_approval_request(state: &AppState, payload: &serde_json::Value) {
+    let capability_key = payload
+        .get("capability_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if capability_key != "builtin.shell" {
+        return;
+    }
+    let Some(ai_session_id) = payload
+        .get("ai_session_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let request_id = payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if request_id.is_empty() {
+        return;
+    }
+
+    let supported_scopes = payload
+        .get("supported_scopes")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["once".to_string(), "session".to_string()]);
+    let shell_command = payload
+        .get("shell_command")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let prefix_candidates = payload
+        .get("shell_prefix_candidates")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| {
+            if shell_command.is_empty() {
+                Vec::new()
+            } else {
+                vec![shell_command.clone()]
+            }
+        });
+
+    state
+        .shell_approval_registry
+        .upsert_pending(
+            ai_session_id,
+            crate::app::ai::approval::ShellApprovalRequestRecord {
+                request_id,
+                command: if shell_command.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![shell_command]
+                },
+                supported_scopes,
+                prefix_candidates,
+            },
+        )
+        .await;
+}
+
+async fn sync_backend_shell_approval_resolution(state: &AppState, payload: &serde_json::Value) {
+    let capability_key = payload
+        .get("capability_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if capability_key != "builtin.shell" {
+        return;
+    }
+    let Some(ai_session_id) = payload
+        .get("ai_session_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let request_id = payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if request_id.is_empty() {
+        return;
+    }
+
+    let decision = match payload
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "allow" => crate::app::ai::approval::ApprovalDecision::Allow,
+        "deny" => crate::app::ai::approval::ApprovalDecision::Deny,
+        _ => return,
+    };
+    let scope = match payload
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "once" => crate::app::ai::approval::ApprovalScope::Once,
+        "session" => crate::app::ai::approval::ApprovalScope::Session,
+        "workspace" => crate::app::ai::approval::ApprovalScope::Workspace,
+        "global" => crate::app::ai::approval::ApprovalScope::Global,
+        _ => return,
+    };
+    let prefix = payload
+        .get("prefix")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+
+    state
+        .shell_approval_registry
+        .resolve(
+            ai_session_id,
+            request_id.as_str(),
+            crate::app::ai::approval::ShellApprovalResolutionRecord {
+                decision,
+                scope,
+                prefix,
+            },
+        )
+        .await;
+}
+
+async fn sync_backend_capability_approval_resolution(
+    state: &AppState,
+    payload: &serde_json::Value,
+) {
+    let capability_key = payload
+        .get("capability_key")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if capability_key.is_empty() || capability_key == "builtin.shell" {
+        return;
+    }
+
+    let Some(ai_session_id) = payload
+        .get("ai_session_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return;
+    };
+    let request_id = payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if request_id.is_empty() {
+        return;
+    }
+
+    let Some(record) = state.ai_session_registry.resolve(ai_session_id).await else {
+        return;
+    };
+    let effective_agent_id = payload
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(record.agent_id.as_str())
+        .to_string();
+
+    let decision = match payload
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "allow" => ApprovalDecision::Allow,
+        "deny" => ApprovalDecision::Deny,
+        _ => return,
+    };
+    let scope = match payload
+        .get("scope")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "once" => ApprovalScope::Once,
+        "session" => ApprovalScope::Session,
+        "workspace" => ApprovalScope::Workspace,
+        "global" => ApprovalScope::Global,
+        _ => return,
+    };
+
+    let Some(claimed_request_id) = state
+        .ai_approval_registry
+        .take_pending(
+            record.ai_session_id,
+            effective_agent_id.as_str(),
+            capability_key.as_str(),
+            Some(request_id.as_str()),
+        )
+        .await
+    else {
+        return;
+    };
+
+    let apply_result = match scope {
+        ApprovalScope::Once | ApprovalScope::Session => {
+            state
+                .ai_approval_registry
+                .set(
+                    record.ai_session_id,
+                    effective_agent_id.as_str(),
+                    capability_key.as_str(),
+                    ApprovalRecord { decision, scope },
+                )
+                .await;
+            Ok(())
+        }
+        ApprovalScope::Workspace => crate::api::ai::persist_capability_approval(
+            state.sirix_config_store.as_ref(),
+            std::path::Path::new(&record.cwd),
+            effective_agent_id.as_str(),
+            capability_key.as_str(),
+            decision,
+            true,
+        ),
+        ApprovalScope::Global => crate::api::ai::persist_capability_approval(
+            state.sirix_config_store.as_ref(),
+            std::path::Path::new(&record.cwd),
+            effective_agent_id.as_str(),
+            capability_key.as_str(),
+            decision,
+            false,
+        ),
+    };
+
+    if let Err(error) = apply_result {
+        state
+            .ai_approval_registry
+            .restore_pending(
+                record.ai_session_id,
+                effective_agent_id.as_str(),
+                capability_key.as_str(),
+                &claimed_request_id,
+            )
+            .await;
+        warn!(
+            ai_session_id = %record.ai_session_id,
+            request_id = %claimed_request_id,
+            agent_id = %effective_agent_id,
+            capability_key = %capability_key,
+            error = %error,
+            "failed to apply backend capability approval resolution locally"
+        );
     }
 }
 

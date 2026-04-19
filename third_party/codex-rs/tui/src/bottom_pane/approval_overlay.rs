@@ -53,6 +53,8 @@ pub(crate) enum ApprovalRequest {
         available_decisions: Vec<ReviewDecision>,
         network_approval_context: Option<NetworkApprovalContext>,
         additional_permissions: Option<PermissionProfile>,
+        sirix_supported_scopes: Option<Vec<String>>,
+        sirix_prefix_candidates: Option<Vec<String>>,
     },
     Permissions {
         thread_id: ThreadId,
@@ -152,12 +154,14 @@ impl ApprovalOverlay {
                 available_decisions,
                 network_approval_context,
                 additional_permissions,
+                sirix_supported_scopes,
                 ..
             } => (
                 exec_options(
                     available_decisions,
                     network_approval_context.as_ref(),
                     additional_permissions.as_ref(),
+                    sirix_supported_scopes.as_deref(),
                 ),
                 network_approval_context.as_ref().map_or_else(
                     || "Would you like to run the following command?".to_string(),
@@ -221,8 +225,30 @@ impl ApprovalOverlay {
         };
         if let Some(request) = self.current_request.clone() {
             match (&request, option_decision) {
-                (ApprovalRequest::Exec { id, command, .. }, ApprovalDecision::Review(decision)) => {
-                    self.handle_exec_decision(id, command, decision);
+                (
+                    ApprovalRequest::Exec {
+                        thread_id,
+                        id,
+                        command,
+                        sirix_supported_scopes,
+                        ..
+                    },
+                    ApprovalDecision::Review(decision),
+                ) => {
+                    if sirix_supported_scopes.is_some() {
+                        self.app_event_tx.send(AppEvent::SubmitSirixExecApproval {
+                            thread_id: *thread_id,
+                            id: id.clone(),
+                            command: command.clone(),
+                            decision,
+                            sync_resolution: true,
+                            persistence_scope: None,
+                            persistence_decision: None,
+                            prefix: None,
+                        });
+                    } else {
+                        self.handle_exec_decision(id, command, decision);
+                    }
                 }
                 (
                     ApprovalRequest::Permissions {
@@ -246,7 +272,11 @@ impl ApprovalOverlay {
                     self.handle_elicitation_decision(server_name, request_id, decision);
                 }
                 (
-                    ApprovalRequest::Exec { command, .. },
+                    ApprovalRequest::Exec {
+                        command,
+                        sirix_prefix_candidates,
+                        ..
+                    },
                     ApprovalDecision::SirixPersistedExec {
                         review_decision,
                         persistence_decision,
@@ -255,6 +285,7 @@ impl ApprovalOverlay {
                 ) => {
                     self.open_exec_prefix_selection(
                         command,
+                        sirix_prefix_candidates.as_deref(),
                         review_decision,
                         persistence_decision,
                         persistence_scope,
@@ -277,6 +308,7 @@ impl ApprovalOverlay {
                         id: id.clone(),
                         command: command.clone(),
                         decision: review_decision,
+                        sync_resolution: true,
                         persistence_scope: Some(persistence_scope),
                         persistence_decision: Some(persistence_decision),
                         prefix: Some(prefix),
@@ -293,18 +325,22 @@ impl ApprovalOverlay {
     fn open_exec_prefix_selection(
         &mut self,
         command: &[String],
+        preferred_prefixes: Option<&[String]>,
         review_decision: ReviewDecision,
-        persistence_decision: &'static str,
-        persistence_scope: &'static str,
+        persistence_decision: String,
+        persistence_scope: String,
     ) {
-        let prefixes = exec_prefix_candidates(command);
+        let prefixes = preferred_prefixes
+            .map(|items| items.to_vec())
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| exec_prefix_candidates(command));
         if prefixes.is_empty() {
             return;
         }
         self.pending_exec_prefix_selection = Some(PendingExecPrefixSelection {
             review_decision,
-            persistence_decision: persistence_decision.to_string(),
-            persistence_scope: persistence_scope.to_string(),
+            persistence_decision,
+            persistence_scope,
         });
         self.options = prefixes
             .iter()
@@ -735,8 +771,8 @@ enum ApprovalDecision {
     McpElicitation(ElicitationAction),
     SirixPersistedExec {
         review_decision: ReviewDecision,
-        persistence_decision: &'static str,
-        persistence_scope: &'static str,
+        persistence_decision: String,
+        persistence_scope: String,
     },
     SirixPersistedExecPrefix {
         review_decision: ReviewDecision,
@@ -773,82 +809,61 @@ fn exec_options(
     available_decisions: &[ReviewDecision],
     network_approval_context: Option<&NetworkApprovalContext>,
     additional_permissions: Option<&PermissionProfile>,
+    sirix_supported_scopes: Option<&[String]>,
 ) -> Vec<ApprovalOption> {
-    if network_approval_context.is_none() && additional_permissions.is_none() {
-        return vec![
-            ApprovalOption {
-                label: "Allow once".to_string(),
-                decision: ApprovalDecision::Review(ReviewDecision::Approved),
-                display_shortcut: Some(numeric_shortcut(0)),
-                additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
-            },
-            ApprovalOption {
-                label: "Allow session".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
+    if network_approval_context.is_none()
+        && additional_permissions.is_none()
+        && let Some(scopes) = sirix_supported_scopes
+    {
+        let mut options = Vec::new();
+        let mut option_index = 0usize;
+        for scope in scopes {
+            let label = scope.trim().to_ascii_lowercase();
+            let decision = if label == "once" {
+                ApprovalDecision::Review(ReviewDecision::Approved)
+            } else {
+                ApprovalDecision::SirixPersistedExec {
                     review_decision: ReviewDecision::Approved,
-                    persistence_decision: "allow",
-                    persistence_scope: "session",
+                    persistence_decision: "allow".to_string(),
+                    persistence_scope: label.clone(),
+                }
+            };
+            options.push(ApprovalOption {
+                label: format!("Allow {label}"),
+                decision,
+                display_shortcut: Some(numeric_shortcut(option_index)),
+                additional_shortcuts: if label == "once" {
+                    vec![key_hint::plain(KeyCode::Char('y'))]
+                } else {
+                    Vec::new()
                 },
-                display_shortcut: Some(numeric_shortcut(1)),
-                additional_shortcuts: Vec::new(),
-            },
-            ApprovalOption {
-                label: "Allow workspace".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
-                    review_decision: ReviewDecision::Approved,
-                    persistence_decision: "allow",
-                    persistence_scope: "workspace",
-                },
-                display_shortcut: Some(numeric_shortcut(2)),
-                additional_shortcuts: Vec::new(),
-            },
-            ApprovalOption {
-                label: "Allow global".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
-                    review_decision: ReviewDecision::Approved,
-                    persistence_decision: "allow",
-                    persistence_scope: "global",
-                },
-                display_shortcut: Some(numeric_shortcut(3)),
-                additional_shortcuts: Vec::new(),
-            },
-            ApprovalOption {
-                label: "Deny once".to_string(),
-                decision: ApprovalDecision::Review(ReviewDecision::Denied),
-                display_shortcut: Some(numeric_shortcut(4)),
-                additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
-            },
-            ApprovalOption {
-                label: "Deny session".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
+            });
+            option_index += 1;
+        }
+        for scope in scopes {
+            let label = scope.trim().to_ascii_lowercase();
+            let decision = if label == "once" {
+                ApprovalDecision::Review(ReviewDecision::Denied)
+            } else {
+                ApprovalDecision::SirixPersistedExec {
                     review_decision: ReviewDecision::Denied,
-                    persistence_decision: "deny",
-                    persistence_scope: "session",
+                    persistence_decision: "deny".to_string(),
+                    persistence_scope: label.clone(),
+                }
+            };
+            options.push(ApprovalOption {
+                label: format!("Deny {label}"),
+                decision,
+                display_shortcut: Some(numeric_shortcut(option_index)),
+                additional_shortcuts: if label == "once" {
+                    vec![key_hint::plain(KeyCode::Char('n'))]
+                } else {
+                    Vec::new()
                 },
-                display_shortcut: Some(numeric_shortcut(5)),
-                additional_shortcuts: Vec::new(),
-            },
-            ApprovalOption {
-                label: "Deny workspace".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
-                    review_decision: ReviewDecision::Denied,
-                    persistence_decision: "deny",
-                    persistence_scope: "workspace",
-                },
-                display_shortcut: Some(numeric_shortcut(6)),
-                additional_shortcuts: Vec::new(),
-            },
-            ApprovalOption {
-                label: "Deny global".to_string(),
-                decision: ApprovalDecision::SirixPersistedExec {
-                    review_decision: ReviewDecision::Denied,
-                    persistence_decision: "deny",
-                    persistence_scope: "global",
-                },
-                display_shortcut: Some(numeric_shortcut(7)),
-                additional_shortcuts: Vec::new(),
-            },
-        ];
+            });
+            option_index += 1;
+        }
+        return options;
     }
 
     available_decisions
@@ -1122,6 +1137,8 @@ mod tests {
             available_decisions: vec![ReviewDecision::Approved, ReviewDecision::Abort],
             network_approval_context: None,
             additional_permissions: None,
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         }
     }
 
@@ -1187,6 +1204,8 @@ mod tests {
                 available_decisions: vec![ReviewDecision::Approved, ReviewDecision::Abort],
                 network_approval_context: None,
                 additional_permissions: None,
+                sirix_supported_scopes: None,
+                sirix_prefix_candidates: None,
             },
             tx,
             Features::with_defaults(),
@@ -1215,6 +1234,8 @@ mod tests {
                 available_decisions: vec![ReviewDecision::Approved, ReviewDecision::Abort],
                 network_approval_context: None,
                 additional_permissions: None,
+                sirix_supported_scopes: None,
+                sirix_prefix_candidates: None,
             },
             tx,
             Features::with_defaults(),
@@ -1248,6 +1269,8 @@ mod tests {
                 ],
                 network_approval_context: None,
                 additional_permissions: None,
+                sirix_supported_scopes: None,
+                sirix_prefix_candidates: None,
             },
             tx,
             Features::with_defaults(),
@@ -1305,6 +1328,8 @@ mod tests {
                     protocol: NetworkApprovalProtocol::Https,
                 }),
                 additional_permissions: None,
+                sirix_supported_scopes: None,
+                sirix_prefix_candidates: None,
             },
             tx,
             Features::with_defaults(),
@@ -1331,6 +1356,8 @@ mod tests {
             available_decisions: vec![ReviewDecision::Approved, ReviewDecision::Abort],
             network_approval_context: None,
             additional_permissions: None,
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         };
 
         let view = ApprovalOverlay::new(exec_request, tx, Features::with_defaults());
@@ -1501,6 +1528,8 @@ mod tests {
                     write: Some(vec![absolute_path("/tmp/out.txt")]),
                 }),
             }),
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         };
 
         let view = ApprovalOverlay::new(exec_request, tx, Features::with_defaults());
@@ -1551,6 +1580,8 @@ mod tests {
                     write: Some(vec![absolute_path("/tmp/out.txt")]),
                 }),
             }),
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         };
 
         let view = ApprovalOverlay::new(exec_request, tx, Features::with_defaults());
@@ -1597,6 +1628,8 @@ mod tests {
                 protocol: NetworkApprovalProtocol::Https,
             }),
             additional_permissions: None,
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         };
 
         let view = ApprovalOverlay::new(exec_request, tx, Features::with_defaults());

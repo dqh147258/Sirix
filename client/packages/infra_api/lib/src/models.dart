@@ -329,6 +329,7 @@ class LocalMcpServerStatus {
     required this.active,
     required this.healthy,
     this.error,
+    this.discoveredTools = const [],
     this.updatedAt,
   });
 
@@ -339,6 +340,7 @@ class LocalMcpServerStatus {
   final bool active;
   final bool healthy;
   final String? error;
+  final List<LocalMcpServerToolStatus> discoveredTools;
   final DateTime? updatedAt;
 
   factory LocalMcpServerStatus.fromJson(Map<String, dynamic> json) {
@@ -350,7 +352,32 @@ class LocalMcpServerStatus {
       active: json['active'] as bool? ?? false,
       healthy: json['healthy'] as bool? ?? false,
       error: json['error'] as String?,
+      discoveredTools: (json['discovered_tools'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(LocalMcpServerToolStatus.fromJson)
+          .toList(growable: false),
       updatedAt: DateTime.tryParse(json['updated_at'] as String? ?? ''),
+    );
+  }
+}
+
+@immutable
+class LocalMcpServerToolStatus {
+  const LocalMcpServerToolStatus({
+    required this.id,
+    required this.title,
+    this.description,
+  });
+
+  final String id;
+  final String title;
+  final String? description;
+
+  factory LocalMcpServerToolStatus.fromJson(Map<String, dynamic> json) {
+    return LocalMcpServerToolStatus(
+      id: json['id'] as String? ?? '',
+      title: json['title'] as String? ?? '',
+      description: json['description'] as String?,
     );
   }
 }

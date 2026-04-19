@@ -254,7 +254,12 @@ class _NavPane extends StatelessWidget {
       (AiSettingsSection.skills, 'Skills', 'Imported folders and sandbox reach', Icons.auto_awesome_rounded),
       (AiSettingsSection.mcp, 'MCP', 'External tools, transports, and gating', Icons.extension_rounded),
       (AiSettingsSection.agents, 'Agents', 'Profiles, approvals, and tool routing', Icons.smart_toy_rounded),
-      (AiSettingsSection.shellRules, 'Shell Rules', 'Global command authorization policy', Icons.rule_folder_rounded),
+      (
+        AiSettingsSection.permissions,
+        'Permissions',
+        'Approval defaults and shell authorization policy',
+        Icons.rule_folder_rounded,
+      ),
     ];
 
     return Container(
@@ -326,7 +331,7 @@ class _SectionBody extends ConsumerWidget {
       AiSettingsSection.skills => SkillsSettingsSection(state: state, vm: vm),
       AiSettingsSection.mcp => McpSettingsSection(state: state, vm: vm),
       AiSettingsSection.agents => AgentSettingsSection(state: state, vm: vm),
-      AiSettingsSection.shellRules => ShellRulesSettingsSection(state: state, vm: vm),
+      AiSettingsSection.permissions => ShellRulesSettingsSection(state: state, vm: vm),
     };
   }
 }

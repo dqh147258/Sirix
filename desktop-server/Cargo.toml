@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 codex-config = { path = "../third_party/codex-rs/config" }
 codex-core = { path = "../third_party/codex-rs/core" }
 codex-login = { path = "../third_party/codex-rs/login" }
+codex-rmcp-client = { path = "../third_party/codex-rs/rmcp-client" }
 codex-protocol = { path = "../third_party/codex-rs/protocol" }
 
 [target.'cfg(target_os = "linux")'.dependencies]

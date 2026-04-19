@@ -8,7 +8,7 @@ enum AiSettingsSection {
   skills,
   mcp,
   agents,
-  shellRules,
+  permissions,
 }
 
 @immutable
@@ -25,6 +25,7 @@ class AiSettingsState {
     this.config = const SirixAiConfig(),
     this.shellRules = const ShellRulesConfigModel(),
     this.effective,
+    this.statusOverview,
   });
 
   final bool loading;
@@ -38,6 +39,7 @@ class AiSettingsState {
   final SirixAiConfig config;
   final ShellRulesConfigModel shellRules;
   final EffectiveSirixAiConfig? effective;
+  final LocalStatusOverview? statusOverview;
 
   AiSettingsState copyWith({
     bool? loading,
@@ -51,6 +53,7 @@ class AiSettingsState {
     SirixAiConfig? config,
     ShellRulesConfigModel? shellRules,
     EffectiveSirixAiConfig? effective,
+    LocalStatusOverview? statusOverview,
     bool clearError = false,
     bool clearNotice = false,
   }) {
@@ -66,6 +69,7 @@ class AiSettingsState {
       config: config ?? this.config,
       shellRules: shellRules ?? this.shellRules,
       effective: effective ?? this.effective,
+      statusOverview: statusOverview ?? this.statusOverview,
     );
   }
 }

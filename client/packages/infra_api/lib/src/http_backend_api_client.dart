@@ -277,6 +277,31 @@ class HttpBackendApiClient implements BackendApiClient {
     await _post('/api/v1/terminals/$terminalId/close', accessToken: accessToken);
   }
 
+  @override
+  Future<void> resolveAiApproval({
+    required String accessToken,
+    required String sessionId,
+    String? requestId,
+    required String capabilityKey,
+    required String agentId,
+    required String decision,
+    required String scope,
+    String? prefix,
+  }) async {
+    await _post(
+      '/api/v1/ai-sessions/$sessionId/approvals/resolve',
+      accessToken: accessToken,
+      body: {
+        if (requestId != null && requestId.trim().isNotEmpty) 'request_id': requestId,
+        'capability_key': capabilityKey,
+        'agent_id': agentId,
+        'decision': decision,
+        'scope': scope,
+        if (prefix != null && prefix.trim().isNotEmpty) 'prefix': prefix,
+      },
+    );
+  }
+
   Future<dynamic> _get(
     String path, {
     String? accessToken,

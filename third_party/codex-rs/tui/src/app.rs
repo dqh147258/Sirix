@@ -120,6 +120,7 @@ use codex_protocol::protocol::ListSkillsResponseEvent;
 use codex_protocol::protocol::McpAuthStatus;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SkillErrorInfo;
@@ -137,6 +138,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -255,6 +257,76 @@ fn default_exec_approval_decisions(
         proposed_network_policy_amendments,
         additional_permissions,
     )
+}
+
+fn render_sirix_shell_command(command: &[String]) -> String {
+    if command.len() == 3
+        && command[1] == "-lc"
+        && command[0]
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| matches!(name, "bash" | "sh" | "zsh"))
+    {
+        return command[2].trim().to_string();
+    }
+    command
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sirix_shell_supported_scopes(
+    proposed_execpolicy_amendment: Option<&codex_protocol::approvals::ExecPolicyAmendment>,
+    network_approval_context: Option<&codex_protocol::protocol::NetworkApprovalContext>,
+    additional_permissions: Option<&codex_protocol::models::PermissionProfile>,
+) -> Option<Vec<String>> {
+    if !sirix_local_api::is_available()
+        || network_approval_context.is_some()
+        || additional_permissions.is_some()
+    {
+        return None;
+    }
+
+    Some(if proposed_execpolicy_amendment.is_some() {
+        vec![
+            "once".to_string(),
+            "session".to_string(),
+            "workspace".to_string(),
+            "global".to_string(),
+        ]
+    } else {
+        vec!["once".to_string(), "session".to_string()]
+    })
+}
+
+fn sirix_shell_prefix_candidates(command: &[String], supported_scopes: &[String]) -> Vec<String> {
+    let rendered = render_sirix_shell_command(command);
+    if rendered.is_empty() {
+        return Vec::new();
+    }
+    let allows_persistent_prefixes = supported_scopes
+        .iter()
+        .any(|scope| matches!(scope.as_str(), "workspace" | "global"));
+    if !allows_persistent_prefixes {
+        return vec![rendered];
+    }
+
+    let tokens = rendered
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mut prefixes = Vec::new();
+    for length in (1..=tokens.len()).rev() {
+        prefixes.push(tokens[..length].join(" "));
+    }
+    if prefixes.is_empty() {
+        vec![rendered]
+    } else {
+        prefixes
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1009,6 +1081,7 @@ pub(crate) struct App {
     primary_session_configured: Option<ThreadSessionState>,
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
+    locally_resolved_sirix_shell_approvals: HashSet<String>,
 }
 
 #[derive(Default)]
@@ -1799,6 +1872,16 @@ impl App {
                             .map(codex_app_server_protocol::NetworkPolicyAmendment::into_core)
                             .collect::<Vec<_>>()
                     });
+                let command = params
+                    .command
+                    .as_deref()
+                    .map(split_command_string)
+                    .unwrap_or_default();
+                let sirix_supported_scopes = sirix_shell_supported_scopes(
+                    proposed_execpolicy_amendment.as_ref(),
+                    network_approval_context.as_ref(),
+                    additional_permissions.as_ref(),
+                );
                 Some(ThreadInteractiveRequest::Approval(ApprovalRequest::Exec {
                     thread_id,
                     thread_label,
@@ -1806,11 +1889,7 @@ impl App {
                         .approval_id
                         .clone()
                         .unwrap_or_else(|| params.item_id.clone()),
-                    command: params
-                        .command
-                        .as_deref()
-                        .map(split_command_string)
-                        .unwrap_or_default(),
+                    command: command.clone(),
                     reason: params.reason.clone(),
                     available_decisions: params
                         .available_decisions
@@ -1831,6 +1910,10 @@ impl App {
                         }),
                     network_approval_context,
                     additional_permissions,
+                    sirix_prefix_candidates: sirix_supported_scopes
+                        .as_deref()
+                        .map(|scopes| sirix_shell_prefix_candidates(&command, scopes)),
+                    sirix_supported_scopes,
                 }))
             }
             ServerRequest::FileChangeRequestApproval { params, .. } => Some(
@@ -1885,6 +1968,87 @@ impl App {
             ),
             _ => None,
         }
+    }
+
+    fn maybe_mirror_sirix_shell_approval_request(
+        &self,
+        thread_id: ThreadId,
+        request: &ServerRequest,
+    ) {
+        let ServerRequest::CommandExecutionRequestApproval { params, .. } = request else {
+            return;
+        };
+        let network_approval_context = params
+            .network_approval_context
+            .clone()
+            .map(network_approval_context_to_core);
+        let additional_permissions = params.additional_permissions.clone().map(Into::into);
+        let proposed_execpolicy_amendment = params
+            .proposed_execpolicy_amendment
+            .clone()
+            .map(codex_app_server_protocol::ExecPolicyAmendment::into_core);
+        let Some(supported_scopes) = sirix_shell_supported_scopes(
+            proposed_execpolicy_amendment.as_ref(),
+            network_approval_context.as_ref(),
+            additional_permissions.as_ref(),
+        ) else {
+            return;
+        };
+
+        let id = params
+            .approval_id
+            .clone()
+            .unwrap_or_else(|| params.item_id.clone());
+        let command = params
+            .command
+            .as_deref()
+            .map(split_command_string)
+            .unwrap_or_default();
+        let prefix_candidates = sirix_shell_prefix_candidates(&command, &supported_scopes);
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            if let Err(error) = sirix_local_api::create_session_shell_approval_request(
+                id.as_str(),
+                &command,
+                &supported_scopes,
+                &prefix_candidates,
+            )
+            .await
+            {
+                tracing::warn!(request_id = %id, error = %error, "failed to mirror Sirix shell approval request");
+                return;
+            }
+
+            match sirix_local_api::wait_for_session_shell_approval(id.as_str()).await {
+                Ok(resolution) => {
+                    let decision = match resolution
+                        .decision
+                        .as_deref()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "allow" => ReviewDecision::Approved,
+                        "deny" => ReviewDecision::Denied,
+                        _ => return,
+                    };
+                    app_event_tx.send(AppEvent::SubmitSirixExecApproval {
+                        thread_id,
+                        id,
+                        command,
+                        decision,
+                        sync_resolution: false,
+                        persistence_scope: resolution.scope,
+                        persistence_decision: resolution.decision,
+                        prefix: resolution.prefix,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(request_id = %id, error = %error, "failed to await mirrored Sirix shell approval");
+                }
+            }
+        });
     }
 
     async fn submit_active_thread_op(
@@ -2689,6 +2853,7 @@ impl App {
         thread_id: ThreadId,
         request: ServerRequest,
     ) -> Result<()> {
+        self.maybe_mirror_sirix_shell_approval_request(thread_id, &request);
         let inactive_interactive_request = if self.active_thread_id != Some(thread_id) {
             self.interactive_request_for_thread_request(thread_id, &request)
                 .await
@@ -3959,6 +4124,7 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            locally_resolved_sirix_shell_approvals: HashSet::new(),
         };
         if let Some(started) = initial_started_thread {
             app.enqueue_primary_thread_session(started.session, started.turns)
@@ -4461,18 +4627,39 @@ impl App {
                 id,
                 command: _command,
                 decision,
+                sync_resolution,
                 persistence_scope,
-                persistence_decision,
+                persistence_decision: _persistence_decision,
                 prefix,
             } => {
-                if let (Some(scope), Some(persist_decision), Some(prefix)) = (
-                    persistence_scope.as_deref(),
-                    persistence_decision.as_deref(),
-                    prefix.as_deref(),
-                ) {
-                    sirix_local_api::resolve_session_shell_rule(persist_decision, scope, prefix)
+                if !sync_resolution
+                    && self
+                        .locally_resolved_sirix_shell_approvals
+                        .remove(id.as_str())
+                {
+                    return Ok(AppRunControl::Continue);
+                }
+                if sync_resolution {
+                    self.locally_resolved_sirix_shell_approvals.insert(id.clone());
+                    let decision_text = match decision {
+                        ReviewDecision::Approved => "allow",
+                        ReviewDecision::Denied => "deny",
+                        _ => "",
+                    };
+                    if !decision_text.is_empty() {
+                        sirix_local_api::resolve_session_shell_approval(
+                            id.as_str(),
+                            decision_text,
+                            persistence_scope.as_deref().unwrap_or("once"),
+                            prefix.as_deref(),
+                        )
                         .await
                         .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+                    }
+                }
+                if let Some(scope) = persistence_scope.as_deref()
+                    && matches!(scope, "session" | "workspace" | "global")
+                {
                     app_server.reload_user_config().await?;
                 }
                 self.submit_thread_op(
@@ -9448,6 +9635,7 @@ guardian_approval = true
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
+            locally_resolved_sirix_shell_approvals: HashSet::new(),
         }
     }
 
@@ -9505,6 +9693,7 @@ guardian_approval = true
                 primary_session_configured: None,
                 pending_primary_events: VecDeque::new(),
                 pending_app_server_requests: PendingAppServerRequests::default(),
+                locally_resolved_sirix_shell_approvals: HashSet::new(),
             },
             rx,
             op_rx,

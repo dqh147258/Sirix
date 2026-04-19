@@ -84,6 +84,18 @@ pub fn router(state: AppState) -> Router {
             axum::routing::post(ai::resolve_session_shell_rule),
         )
         .route(
+            "/ai/sessions/:ai_session_id/shell-approvals/request",
+            axum::routing::post(ai::create_session_shell_approval_request),
+        )
+        .route(
+            "/ai/sessions/:ai_session_id/shell-approvals/check",
+            axum::routing::post(ai::check_session_shell_approval),
+        )
+        .route(
+            "/ai/sessions/:ai_session_id/shell-approvals/resolve",
+            axum::routing::post(ai::resolve_session_shell_approval),
+        )
+        .route(
             "/ai/sessions/approvals/check",
             axum::routing::post(ai::check_approval),
         )

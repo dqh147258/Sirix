@@ -712,11 +712,21 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     final request = TerminalApprovalRequest(
       aiSessionId: aiSessionId,
       terminalId: terminalId,
+      requestId: body['request_id'] as String?,
       capabilityKey: capabilityKey,
       agentId: body['agent_id'] as String? ?? '',
       modelId: body['model_id'] as String? ?? '',
       cwd: body['cwd'] as String? ?? '',
       configuredMode: approvalModeFromJson(body['configured_mode'] as String?),
+      supportedScopes: (body['supported_scopes'] as List<dynamic>? ?? const ['once', 'session'])
+          .whereType<String>()
+          .toList(growable: false),
+      approvalKind: body['approval_kind'] as String?,
+      shellCommand: body['shell_command'] as String?,
+      shellPrefixCandidates:
+          (body['shell_prefix_candidates'] as List<dynamic>? ?? const [])
+              .whereType<String>()
+              .toList(growable: false),
     );
     if (state.pendingApprovalRequests.any((item) => item.dedupeKey == request.dedupeKey)) {
       return;
@@ -729,13 +739,15 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   void _handleApprovalResolved(Map<String, dynamic> body) {
+    final requestId = body['request_id'] as String? ?? '';
     final aiSessionId = body['ai_session_id'] as String? ?? '';
     final agentId = body['agent_id'] as String? ?? '';
     final capabilityKey = body['capability_key'] as String? ?? '';
-    if (aiSessionId.isEmpty || capabilityKey.isEmpty) {
+    if ((requestId.isEmpty && aiSessionId.isEmpty) || capabilityKey.isEmpty) {
       return;
     }
     _removeApprovalRequest(
+      requestId: requestId,
       aiSessionId: aiSessionId,
       agentId: agentId,
       capabilityKey: capabilityKey,
@@ -843,24 +855,34 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     required TerminalApprovalRequest request,
     required String decision,
     required String scope,
+    String? prefix,
   }) async {
     final localClient = _desktopLocalClient;
-    if (localClient == null) {
-      state = state.copyWith(
-        errorMessage: 'Desktop local approval channel unavailable.',
-      );
-      return;
-    }
-
     try {
-      await localClient.resolveAiApproval(
-        sessionId: request.aiSessionId,
-        capabilityKey: request.capabilityKey,
-        agentId: request.agentId,
-        decision: decision,
-        scope: scope,
-      );
+      if (localClient != null) {
+        await localClient.resolveAiApproval(
+          sessionId: request.aiSessionId,
+          requestId: request.requestId,
+          capabilityKey: request.capabilityKey,
+          agentId: request.agentId,
+          decision: decision,
+          scope: scope,
+          prefix: prefix,
+        );
+      } else {
+        await _apiClient.resolveAiApproval(
+          accessToken: _config.accessToken,
+          sessionId: request.aiSessionId,
+          requestId: request.requestId,
+          capabilityKey: request.capabilityKey,
+          agentId: request.agentId,
+          decision: decision,
+          scope: scope,
+          prefix: prefix,
+        );
+      }
       _removeApprovalRequest(
+        requestId: request.requestId ?? '',
         aiSessionId: request.aiSessionId,
         agentId: request.agentId,
         capabilityKey: request.capabilityKey,
@@ -874,6 +896,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   }
 
   void _removeApprovalRequest({
+    required String requestId,
     required String aiSessionId,
     required String agentId,
     required String capabilityKey,
@@ -881,10 +904,16 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     state = state.copyWith(
       pendingApprovalRequests: state.pendingApprovalRequests
           .where(
-            (request) =>
-                !(request.aiSessionId == aiSessionId &&
-                    request.agentId == agentId &&
-                    request.capabilityKey == capabilityKey),
+            (request) {
+              if (requestId.trim().isNotEmpty &&
+                  request.requestId != null &&
+                  request.requestId == requestId) {
+                return false;
+              }
+              return !(request.aiSessionId == aiSessionId &&
+                  request.agentId == agentId &&
+                  request.capabilityKey == capabilityKey);
+            },
           )
           .toList(growable: false),
     );

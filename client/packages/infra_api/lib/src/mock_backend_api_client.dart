@@ -237,4 +237,16 @@ class MockBackendApiClient implements BackendApiClient {
     required String accessToken,
     required String terminalId,
   }) async {}
+
+  @override
+  Future<void> resolveAiApproval({
+    required String accessToken,
+    required String sessionId,
+    String? requestId,
+    required String capabilityKey,
+    required String agentId,
+    required String decision,
+    required String scope,
+    String? prefix,
+  }) async {}
 }

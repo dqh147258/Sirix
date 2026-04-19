@@ -297,25 +297,12 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                             left: 14,
                             child: _ApprovalRequestCard(
                               request: approvalRequest,
-                              onAllowOnce: () => unawaited(
+                              onResolve: (decision, scope, prefix) => unawaited(
                                 viewModel.resolveApprovalRequest(
                                   request: approvalRequest,
-                                  decision: 'allow',
-                                  scope: 'once',
-                                ),
-                              ),
-                              onAllowSession: () => unawaited(
-                                viewModel.resolveApprovalRequest(
-                                  request: approvalRequest,
-                                  decision: 'allow',
-                                  scope: 'session',
-                                ),
-                              ),
-                              onDeny: () => unawaited(
-                                viewModel.resolveApprovalRequest(
-                                  request: approvalRequest,
-                                  decision: 'deny',
-                                  scope: 'deny',
+                                  decision: decision,
+                                  scope: scope,
+                                  prefix: prefix,
                                 ),
                               ),
                             ),
@@ -393,22 +380,45 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   }
 }
 
-class _ApprovalRequestCard extends StatelessWidget {
+class _ApprovalRequestCard extends StatefulWidget {
   const _ApprovalRequestCard({
     required this.request,
-    required this.onAllowOnce,
-    required this.onAllowSession,
-    required this.onDeny,
+    required this.onResolve,
   });
 
   final TerminalApprovalRequest request;
-  final VoidCallback onAllowOnce;
-  final VoidCallback onAllowSession;
-  final VoidCallback onDeny;
+  final void Function(String decision, String scope, String? prefix) onResolve;
+
+  @override
+  State<_ApprovalRequestCard> createState() => _ApprovalRequestCardState();
+}
+
+class _ApprovalRequestCardState extends State<_ApprovalRequestCard> {
+  String? _selectedPrefix;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedPrefix = widget.request.shellPrefixCandidates.isNotEmpty
+        ? widget.request.shellPrefixCandidates.first
+        : null;
+  }
+
+  @override
+  void didUpdateWidget(covariant _ApprovalRequestCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.request.requestId != widget.request.requestId ||
+        oldWidget.request.shellPrefixCandidates != widget.request.shellPrefixCandidates) {
+      _selectedPrefix = widget.request.shellPrefixCandidates.isNotEmpty
+          ? widget.request.shellPrefixCandidates.first
+          : null;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
+    final isShellRequest = widget.request.approvalKind == 'shell';
 
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: 380),
@@ -437,7 +447,7 @@ class _ApprovalRequestCard extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                request.capabilityKey,
+                widget.request.capabilityKey,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       fontFamily: 'JetBrains Mono',
                       color: palette.warning,
@@ -445,16 +455,16 @@ class _ApprovalRequestCard extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                '${request.agentId} · ${request.modelId}',
+                '${widget.request.agentId} · ${widget.request.modelId}',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: palette.textMuted,
                       fontFamily: 'JetBrains Mono',
                     ),
               ),
-              if (request.cwd.trim().isNotEmpty) ...[
+              if (widget.request.cwd.trim().isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Text(
-                  request.cwd,
+                  widget.request.cwd,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -462,23 +472,74 @@ class _ApprovalRequestCard extends StatelessWidget {
                       ),
                 ),
               ],
+              if (isShellRequest &&
+                  (widget.request.shellCommand?.trim().isNotEmpty ?? false)) ...[
+                const SizedBox(height: 10),
+                Text(
+                  widget.request.shellCommand!,
+                  maxLines: 4,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontFamily: 'JetBrains Mono',
+                        color: palette.textPrimary,
+                      ),
+                ),
+              ],
+              if (isShellRequest &&
+                  widget.request.shellPrefixCandidates.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Shell Prefix',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: palette.textMuted,
+                      ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (final prefix in widget.request.shellPrefixCandidates)
+                      ChoiceChip(
+                        label: SizedBox(
+                          width: 300,
+                          child: Text(
+                            prefix,
+                            overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
+                          ),
+                        ),
+                        selected: _selectedPrefix == prefix,
+                        onSelected: (_) => setState(() {
+                          _selectedPrefix = prefix;
+                        }),
+                      ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 12),
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
                 children: [
-                  FilledButton(
-                    onPressed: onAllowOnce,
-                    child: const Text('Allow Once'),
-                  ),
-                  OutlinedButton(
-                    onPressed: onAllowSession,
-                    child: const Text('Allow Session'),
-                  ),
-                  TextButton(
-                    onPressed: onDeny,
-                    child: const Text('Deny'),
-                  ),
+                  for (final scope in widget.request.supportedScopes)
+                    FilledButton(
+                      onPressed: () => widget.onResolve(
+                        'allow',
+                        scope,
+                        _prefixForScope(scope),
+                      ),
+                      child: Text(_approvalActionLabel('allow', scope)),
+                    ),
+                  for (final scope in widget.request.supportedScopes)
+                    OutlinedButton(
+                      onPressed: () => widget.onResolve(
+                        'deny',
+                        scope,
+                        _prefixForScope(scope),
+                      ),
+                      child: Text(_approvalActionLabel('deny', scope)),
+                    ),
                 ],
               ),
             ],
@@ -487,6 +548,34 @@ class _ApprovalRequestCard extends StatelessWidget {
       ),
     );
   }
+
+  String? _prefixForScope(String scope) {
+    if (widget.request.approvalKind != 'shell') {
+      return null;
+    }
+    switch (scope.trim().toLowerCase()) {
+      case 'once':
+        return null;
+      case 'session':
+      case 'workspace':
+      case 'global':
+        return _selectedPrefix;
+      default:
+        return null;
+    }
+  }
+}
+
+String _approvalActionLabel(String decision, String scope) {
+  final normalizedScope = scope.trim().toLowerCase();
+  final scopeLabel = switch (normalizedScope) {
+    'once' => 'Once',
+    'session' => 'Session',
+    'workspace' => 'Workspace',
+    'global' => 'Global',
+    _ => normalizedScope,
+  };
+  return '${decision == 'allow' ? 'Allow' : 'Deny'} $scopeLabel';
 }
 
 class _ActionIconButton extends StatelessWidget {

@@ -31,15 +31,18 @@ use serde_json::Value as JsonValue;
 
 use crate::app::{
     ai::{
-        approval::{ApprovalDecision, ApprovalRecord, ApprovalScope},
+        approval::{
+            ApprovalDecision, ApprovalRecord, ApprovalScope, ShellApprovalRequestRecord,
+            ShellApprovalResolutionRecord,
+        },
         config::{
             build_agent_system_prompt, build_agent_system_prompt_preview,
             duplicate_session_text_model_ids, effective_model_context_window,
-            effective_model_runtime_context_window,
-            infer_provider_default_context_window, normalized_sirix_config,
-            resolve_session_picker_model, session_picker_model_id, validate_sirix_config,
-            ApprovalMode, ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig,
-            SirixConfig, ToolRulesConfig,
+            effective_model_runtime_context_window, infer_provider_default_context_window,
+            normalized_sirix_config, resolve_session_picker_model, session_picker_model_id,
+            validate_sirix_config, ApprovalMode, CapabilityApprovalRule, CapabilityRulesConfig,
+            ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig, SirixConfig,
+            ToolRulesConfig,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -79,10 +82,43 @@ pub struct CheckApprovalRequest {
 #[derive(Debug, Deserialize)]
 pub struct ResolveApprovalRequest {
     pub session_id: String,
+    pub request_id: Option<String>,
     pub capability_key: String,
     pub agent_id: Option<String>,
     pub decision: ApprovalDecision,
     pub scope: ApprovalScope,
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSessionShellApprovalRequest {
+    pub request_id: String,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub supported_scopes: Vec<String>,
+    #[serde(default)]
+    pub prefix_candidates: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckSessionShellApprovalRequest {
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResolveSessionShellApprovalRequest {
+    pub request_id: String,
+    pub decision: ApprovalDecision,
+    pub scope: ApprovalScope,
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckSessionShellApprovalResponse {
+    pub outcome: String,
+    pub decision: Option<ApprovalDecision>,
+    pub scope: Option<ApprovalScope>,
+    pub prefix: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -90,6 +126,8 @@ pub struct CheckApprovalResponse {
     pub outcome: String,
     pub configured_mode: ApprovalMode,
     pub cached: bool,
+    #[serde(default)]
+    pub supported_scopes: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -476,7 +514,10 @@ pub async fn switch_session_agent(
         name: launch.agent.name.clone(),
         provider_id: launch.provider.id.clone(),
         model_id: launch.model.id.clone(),
-        effective_context_window: effective_model_runtime_context_window(&launch.provider, &launch.model),
+        effective_context_window: effective_model_runtime_context_window(
+            &launch.provider,
+            &launch.model,
+        ),
         developer_instructions: build_agent_system_prompt(&launch.effective_config, &launch.agent),
     }))
 }
@@ -629,6 +670,7 @@ pub async fn check_approval(
             outcome: outcome.to_string(),
             configured_mode: ApprovalMode::Allow,
             cached: true,
+            supported_scopes: supported_approval_scopes(capability_key),
         }));
     }
 
@@ -659,6 +701,7 @@ pub async fn check_approval(
         outcome: outcome.to_string(),
         configured_mode: resolved.configured_mode,
         cached: false,
+        supported_scopes: supported_approval_scopes(capability_key),
     }))
 }
 
@@ -687,30 +730,411 @@ pub async fn resolve_approval(
         .filter(|value| !value.is_empty())
         .unwrap_or(record.agent_id.as_str());
 
-    state
+    if capability_key == "builtin.shell" {
+        let request_id = payload
+            .request_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "request_id is required when resolving shell approvals".to_string(),
+                )
+            })?;
+        resolve_shell_approval_inner(
+            &state,
+            &record,
+            request_id,
+            payload.decision,
+            payload.scope,
+            payload.prefix.as_deref(),
+        )
+        .await?;
+        return Ok(Json(serde_json::json!({"ok": true})));
+    }
+
+    // Non-shell approvals must still resolve against the exact pending request
+    // that triggered the prompt so only the first accepted decision wins across
+    // terminal / desktop / mobile surfaces. Without this guard, stale dialogs
+    // can race and overwrite each other after another client has already
+    // approved or denied the same capability request.
+    let claimed_request_id = state
         .ai_approval_registry
-        .set(
+        .take_pending(
             record.ai_session_id,
             effective_agent_id,
             &capability_key,
-            ApprovalRecord {
-                decision: payload.decision,
-                scope: payload.scope,
-            },
+            payload.request_id.as_deref(),
         )
-        .await;
-    state
-        .ai_approval_registry
-        .clear_pending(record.ai_session_id, effective_agent_id, &capability_key)
-        .await;
+        .await
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "approval request is no longer pending for agent `{effective_agent_id}` capability `{capability_key}`"
+            ))
+        })?;
+
+    let persist_result = match payload.scope {
+        ApprovalScope::Once | ApprovalScope::Session => {
+            state
+                .ai_approval_registry
+                .set(
+                    record.ai_session_id,
+                    effective_agent_id,
+                    &capability_key,
+                    ApprovalRecord {
+                        decision: payload.decision,
+                        scope: payload.scope,
+                    },
+                )
+                .await;
+            Ok(())
+        }
+        ApprovalScope::Workspace => {
+            persist_capability_approval(
+                state.sirix_config_store.as_ref(),
+                StdPath::new(&record.cwd),
+                effective_agent_id,
+                &capability_key,
+                payload.decision,
+                /*workspace*/ true,
+            )
+            .map_err(ApiError::internal)
+        }
+        ApprovalScope::Global => {
+            persist_capability_approval(
+                state.sirix_config_store.as_ref(),
+                StdPath::new(&record.cwd),
+                effective_agent_id,
+                &capability_key,
+                payload.decision,
+                /*workspace*/ false,
+            )
+            .map_err(ApiError::internal)
+        }
+    };
+    if let Err(error) = persist_result {
+        state
+            .ai_approval_registry
+            .restore_pending(
+                record.ai_session_id,
+                effective_agent_id,
+                &capability_key,
+                &claimed_request_id,
+            )
+            .await;
+        return Err(error);
+    }
 
     if record.mirrored_to_backend {
-        sync_approval_to_backend(
+        if let Err(error) = sync_approval_to_backend(
             &state,
             record.ai_session_id,
+            Some(claimed_request_id.as_str()),
+            effective_agent_id,
             &capability_key,
             payload.decision,
             payload.scope,
+        )
+        .await
+        .map_err(ApiError::internal)
+        {
+            state
+                .ai_approval_registry
+                .restore_pending(
+                    record.ai_session_id,
+                    effective_agent_id,
+                    &capability_key,
+                    &claimed_request_id,
+                )
+                .await;
+            return Err(error);
+        }
+    }
+
+    let _ = state.local_events.send(
+        serde_json::json!({
+            "type": "ai.approval.resolved",
+            "payload": {
+                "ai_session_id": record.ai_session_id,
+                "terminal_id": record.terminal_id,
+                "request_id": claimed_request_id,
+                "agent_id": effective_agent_id,
+                "capability_key": capability_key,
+                "decision": match payload.decision {
+                    ApprovalDecision::Allow => "allow",
+                    ApprovalDecision::Deny => "deny",
+                },
+                "scope": match payload.scope {
+                    ApprovalScope::Once => "once",
+                    ApprovalScope::Session => "session",
+                    ApprovalScope::Workspace => "workspace",
+                    ApprovalScope::Global => "global",
+                },
+            }
+        })
+        .to_string(),
+    );
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn create_session_shell_approval_request(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateSessionShellApprovalRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(record) = state.ai_session_registry.resolve(ai_session_id).await else {
+        return Err(ApiError::not_found(format!(
+            "ai session not found for id={ai_session_id}"
+        )));
+    };
+
+    let request_id = payload.request_id.trim().to_string();
+    if request_id.is_empty() {
+        return Err(ApiError::bad_request(
+            "request_id cannot be empty".to_string(),
+        ));
+    }
+
+    let supported_scopes = normalize_supported_scopes(payload.supported_scopes);
+    let prefix_candidates = normalize_shell_prefix_candidates(payload.prefix_candidates);
+    state
+        .shell_approval_registry
+        .upsert_pending(
+            ai_session_id,
+            ShellApprovalRequestRecord {
+                request_id: request_id.clone(),
+                command: payload.command.clone(),
+                supported_scopes: supported_scopes.clone(),
+                prefix_candidates: prefix_candidates.clone(),
+            },
+        )
+        .await;
+
+    emit_shell_approval_request_event(
+        &state,
+        &record,
+        request_id.as_str(),
+        supported_scopes,
+        &payload.command,
+        prefix_candidates,
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn check_session_shell_approval(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+    Json(payload): Json<CheckSessionShellApprovalRequest>,
+) -> Result<Json<CheckSessionShellApprovalResponse>, ApiError> {
+    let request_id = payload.request_id.trim();
+    if request_id.is_empty() {
+        return Err(ApiError::bad_request(
+            "request_id cannot be empty".to_string(),
+        ));
+    }
+
+    let resolution = state
+        .shell_approval_registry
+        .resolution(ai_session_id, request_id)
+        .await;
+    let response = match resolution {
+        Some(resolution) => CheckSessionShellApprovalResponse {
+            outcome: match resolution.decision {
+                ApprovalDecision::Allow => "allow".to_string(),
+                ApprovalDecision::Deny => "deny".to_string(),
+            },
+            decision: Some(resolution.decision),
+            scope: Some(resolution.scope),
+            prefix: resolution.prefix,
+        },
+        None => CheckSessionShellApprovalResponse {
+            outcome: "ask".to_string(),
+            decision: None,
+            scope: None,
+            prefix: None,
+        },
+    };
+    Ok(Json(response))
+}
+
+pub async fn resolve_session_shell_approval(
+    Path(ai_session_id): Path<uuid::Uuid>,
+    State(state): State<AppState>,
+    Json(payload): Json<ResolveSessionShellApprovalRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let Some(record) = state.ai_session_registry.resolve(ai_session_id).await else {
+        return Err(ApiError::not_found(format!(
+            "ai session not found for id={ai_session_id}"
+        )));
+    };
+    let request_id = payload.request_id.trim().to_string();
+    if request_id.is_empty() {
+        return Err(ApiError::bad_request(
+            "request_id cannot be empty".to_string(),
+        ));
+    }
+
+    resolve_shell_approval_inner(
+        &state,
+        &record,
+        request_id.as_str(),
+        payload.decision,
+        payload.scope,
+        payload.prefix.as_deref(),
+    )
+    .await?;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+fn normalize_supported_scopes(scopes: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for scope in scopes {
+        let candidate = scope.trim().to_ascii_lowercase();
+        if !matches!(
+            candidate.as_str(),
+            "once" | "session" | "workspace" | "global"
+        ) {
+            continue;
+        }
+        if !normalized.iter().any(|item| item == &candidate) {
+            normalized.push(candidate);
+        }
+    }
+    if normalized.is_empty() {
+        vec!["once".to_string(), "session".to_string()]
+    } else {
+        normalized
+    }
+}
+
+fn normalize_shell_prefix_candidates(items: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for item in items {
+        let candidate = item.trim().to_string();
+        if candidate.is_empty() || normalized.iter().any(|existing| existing == &candidate) {
+            continue;
+        }
+        normalized.push(candidate);
+    }
+    normalized
+}
+
+fn shell_scope_key(scope: ApprovalScope) -> &'static str {
+    match scope {
+        ApprovalScope::Once => "once",
+        ApprovalScope::Session => "session",
+        ApprovalScope::Workspace => "workspace",
+        ApprovalScope::Global => "global",
+    }
+}
+
+fn shell_scope_supported(supported_scopes: &[String], scope: ApprovalScope) -> bool {
+    supported_scopes
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(shell_scope_key(scope)))
+}
+
+fn render_shell_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_shell_prefix_for_resolution(
+    request: &ShellApprovalRequestRecord,
+    scope: ApprovalScope,
+    prefix: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    match scope {
+        ApprovalScope::Once => Ok(None),
+        ApprovalScope::Session | ApprovalScope::Workspace | ApprovalScope::Global => {
+            let candidate = prefix
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .or_else(|| request.prefix_candidates.first().cloned())
+                .ok_or_else(|| anyhow::anyhow!("persistent shell approvals require a prefix"))?;
+
+            if !request.prefix_candidates.is_empty()
+                && !request
+                    .prefix_candidates
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(candidate.as_str()))
+            {
+                anyhow::bail!("shell prefix must match one of the advertised candidates");
+            }
+            Ok(Some(candidate))
+        }
+    }
+}
+
+async fn resolve_shell_approval_inner(
+    state: &AppState,
+    record: &AiSessionRecord,
+    request_id: &str,
+    decision: ApprovalDecision,
+    scope: ApprovalScope,
+    prefix: Option<&str>,
+) -> Result<(), ApiError> {
+    let pending = state
+        .shell_approval_registry
+        .pending_request(record.ai_session_id, request_id)
+        .await
+        .ok_or_else(|| {
+            ApiError::not_found(format!("shell approval request not found: {request_id}"))
+        })?;
+
+    if !shell_scope_supported(&pending.supported_scopes, scope) {
+        return Err(ApiError::bad_request(format!(
+            "scope `{}` is not allowed for this shell approval request",
+            shell_scope_key(scope)
+        )));
+    }
+
+    let normalized_prefix = normalize_shell_prefix_for_resolution(&pending, scope, prefix)
+        .map_err(ApiError::internal)?;
+
+    if let Some(prefix) = normalized_prefix.as_deref() {
+        persist_shell_rule_for_scope(
+            state,
+            record.ai_session_id,
+            StdPath::new(&record.cwd),
+            decision,
+            scope,
+            prefix,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    }
+
+    state
+        .shell_approval_registry
+        .resolve(
+            record.ai_session_id,
+            request_id,
+            ShellApprovalResolutionRecord {
+                decision,
+                scope,
+                prefix: normalized_prefix.clone(),
+            },
+        )
+        .await;
+
+    if record.mirrored_to_backend {
+        sync_shell_approval_to_backend(
+            state,
+            record.ai_session_id,
+            request_id,
+            decision,
+            scope,
+            normalized_prefix.as_deref(),
         )
         .await
         .map_err(ApiError::internal)?;
@@ -722,23 +1146,270 @@ pub async fn resolve_approval(
             "payload": {
                 "ai_session_id": record.ai_session_id,
                 "terminal_id": record.terminal_id,
-                "agent_id": effective_agent_id,
-                "capability_key": capability_key,
-                "decision": match payload.decision {
+                "request_id": request_id,
+                "agent_id": record.agent_id,
+                "model_id": record.model_id,
+                "capability_key": "builtin.shell",
+                "decision": match decision {
                     ApprovalDecision::Allow => "allow",
                     ApprovalDecision::Deny => "deny",
                 },
-                "scope": match payload.scope {
-                    ApprovalScope::Once => "once",
-                    ApprovalScope::Session => "session",
-                    ApprovalScope::Deny => "deny",
-                },
+                "scope": shell_scope_key(scope),
+                "prefix": normalized_prefix,
             }
         })
         .to_string(),
     );
 
-    Ok(Json(serde_json::json!({"ok": true})))
+    Ok(())
+}
+
+async fn persist_shell_rule_for_scope(
+    state: &AppState,
+    ai_session_id: uuid::Uuid,
+    cwd: &StdPath,
+    decision: ApprovalDecision,
+    scope: ApprovalScope,
+    prefix: &str,
+) -> anyhow::Result<()> {
+    let target_mode = match decision {
+        ApprovalDecision::Allow => ApprovalMode::Allow,
+        ApprovalDecision::Deny => ApprovalMode::Deny,
+    };
+    match scope {
+        ApprovalScope::Once => {}
+        ApprovalScope::Session => {
+            state
+                .ai_session_registry
+                .push_session_shell_rule(ai_session_id, target_mode, prefix.to_string())
+                .await
+                .ok_or_else(|| anyhow::anyhow!("ai session not found for id={ai_session_id}"))?;
+        }
+        ApprovalScope::Workspace => {
+            let mut rules = state
+                .sirix_config_store
+                .load_workspace_shell_rules(cwd)?
+                .unwrap_or_default();
+            match target_mode {
+                ApprovalMode::Allow => {
+                    rules.deny.retain(|item| item != prefix);
+                    if !rules.allow.iter().any(|item| item == prefix) {
+                        rules.allow.push(prefix.to_string());
+                    }
+                }
+                ApprovalMode::Deny => {
+                    rules.allow.retain(|item| item != prefix);
+                    if !rules.deny.iter().any(|item| item == prefix) {
+                        rules.deny.push(prefix.to_string());
+                    }
+                }
+                ApprovalMode::Ask => {}
+            }
+            state
+                .sirix_config_store
+                .save_workspace_shell_rules(cwd, &rules)?;
+        }
+        ApprovalScope::Global => {
+            let mut rules = state.sirix_config_store.load_global_shell_rules()?;
+            match target_mode {
+                ApprovalMode::Allow => {
+                    rules.deny.retain(|item| item != prefix);
+                    if !rules.allow.iter().any(|item| item == prefix) {
+                        rules.allow.push(prefix.to_string());
+                    }
+                }
+                ApprovalMode::Deny => {
+                    rules.allow.retain(|item| item != prefix);
+                    if !rules.deny.iter().any(|item| item == prefix) {
+                        rules.deny.push(prefix.to_string());
+                    }
+                }
+                ApprovalMode::Ask => {}
+            }
+            state.sirix_config_store.save_global_shell_rules(&rules)?;
+        }
+    }
+    Ok(())
+}
+
+async fn emit_shell_approval_request_event(
+    state: &AppState,
+    record: &AiSessionRecord,
+    request_id: &str,
+    supported_scopes: Vec<String>,
+    command: &[String],
+    prefix_candidates: Vec<String>,
+) {
+    let shell_command = render_shell_command(command);
+    let payload = serde_json::json!({
+        "type": "ai.approval.request",
+        "payload": {
+            "ai_session_id": record.ai_session_id,
+            "terminal_id": record.terminal_id,
+            "request_id": request_id,
+            "agent_id": record.agent_id,
+            "model_id": record.model_id,
+            "cwd": record.cwd,
+            "capability_key": "builtin.shell",
+            "configured_mode": "ask",
+            "supported_scopes": supported_scopes.clone(),
+            "approval_kind": "shell",
+            "shell_command": shell_command,
+            "shell_prefix_candidates": prefix_candidates.clone(),
+        }
+    });
+    let _ = state.local_events.send(payload.to_string());
+
+    if record.mirrored_to_backend {
+        if let Err(error) = sync_shell_approval_request_to_backend(
+            state,
+            record.ai_session_id,
+            request_id,
+            record.agent_id.as_str(),
+            record.model_id.as_str(),
+            supported_scopes,
+            &shell_command,
+            prefix_candidates,
+        )
+        .await
+        {
+            tracing::warn!(
+                ai_session_id = %record.ai_session_id,
+                request_id,
+                error = %error,
+                "failed to sync shell approval request to backend"
+            );
+        }
+    }
+}
+
+fn supported_approval_scopes(capability_key: &str) -> Vec<String> {
+    // Shell approvals still flow through the dedicated exec-policy UI path.
+    // Non-shell capability approvals can persist beyond the current session.
+    if capability_key == "builtin.shell" {
+        vec!["once".to_string(), "session".to_string()]
+    } else {
+        vec![
+            "once".to_string(),
+            "session".to_string(),
+            "workspace".to_string(),
+            "global".to_string(),
+        ]
+    }
+}
+
+pub(crate) fn persist_capability_approval(
+    store: &crate::app::ai::config::SirixConfigStore,
+    cwd: &StdPath,
+    agent_id: &str,
+    capability_key: &str,
+    decision: ApprovalDecision,
+    workspace: bool,
+) -> anyhow::Result<()> {
+    let mut target_config = if workspace {
+        store.load_workspace_config(cwd)?.unwrap_or_default()
+    } else {
+        store.load_global()?
+    };
+    if workspace {
+        ensure_workspace_agent_entry(store, cwd, &mut target_config, agent_id)?;
+    }
+
+    if capability_key.starts_with("builtin.") {
+        upsert_named_approval_rule(
+            if let Some(agent) = target_config
+                .agents
+                .iter_mut()
+                .find(|item| item.id == agent_id)
+            {
+                &mut agent.builtin_approvals
+            } else {
+                &mut target_config.builtin_approvals
+            },
+            capability_key,
+            decision,
+        );
+    } else if capability_key.starts_with("skill.") {
+        upsert_named_approval_rule(
+            if let Some(agent) = target_config
+                .agents
+                .iter_mut()
+                .find(|item| item.id == agent_id)
+            {
+                &mut agent.skill_approvals
+            } else {
+                &mut target_config.skill_approvals
+            },
+            capability_key,
+            decision,
+        );
+    } else if capability_key.starts_with("mcp.") {
+        upsert_named_approval_rule(
+            if let Some(agent) = target_config
+                .agents
+                .iter_mut()
+                .find(|item| item.id == agent_id)
+            {
+                &mut agent.mcp_approvals
+            } else {
+                &mut target_config.mcp_approvals
+            },
+            capability_key,
+            decision,
+        );
+    }
+
+    if workspace {
+        store.save_workspace_config(cwd, &target_config)?;
+    } else {
+        store.save_global(&target_config)?;
+    }
+    Ok(())
+}
+
+fn ensure_workspace_agent_entry(
+    store: &crate::app::ai::config::SirixConfigStore,
+    cwd: &StdPath,
+    target_config: &mut SirixConfig,
+    agent_id: &str,
+) -> anyhow::Result<()> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() || target_config.agents.iter().any(|item| item.id == agent_id) {
+        return Ok(());
+    }
+
+    // Workspace capability approvals should stay attached to the selected
+    // agent. When the workspace config file does not already carry that agent
+    // entry, seed it from the effective merged config instead of silently
+    // degrading the override into the workspace-global bucket.
+    if let Some(agent) = store
+        .effective_for_workspace(cwd.to_str())?
+        .config
+        .agents
+        .into_iter()
+        .find(|item| item.id == agent_id)
+    {
+        target_config.agents.push(agent);
+    }
+    Ok(())
+}
+
+fn upsert_named_approval_rule(
+    rules: &mut CapabilityRulesConfig,
+    capability_key: &str,
+    decision: ApprovalDecision,
+) {
+    let key = normalize_capability_key(capability_key);
+    rules
+        .rules
+        .retain(|existing| normalize_capability_key(existing.key.as_str()) != key);
+    rules.rules.push(CapabilityApprovalRule {
+        key,
+        mode: match decision {
+            ApprovalDecision::Allow => ApprovalMode::Allow,
+            ApprovalDecision::Deny => ApprovalMode::Deny,
+        },
+    });
 }
 
 pub async fn proxy_compatible_models(
@@ -2063,8 +2734,21 @@ fn resolve_capability_mode(
 
     let configured_mode = if capability_key == "builtin.shell" {
         resolve_shell_capability_mode(store, cwd, &agent)?
-    } else if capability_key.starts_with("builtin.") || capability_key.starts_with("mcp.") {
-        resolve_tool_capability_mode(store, cwd, &agent, capability_key)?
+    } else if capability_key.starts_with("builtin.") {
+        resolve_named_capability_mode(
+            &store.effective_builtin_approvals_for_agent(cwd, &agent)?,
+            capability_key,
+        )
+    } else if capability_key.starts_with("skill.") {
+        resolve_named_capability_mode(
+            &store.effective_skill_approvals_for_agent(cwd, &agent)?,
+            capability_key,
+        )
+    } else if capability_key.starts_with("mcp.") {
+        resolve_named_capability_mode(
+            &store.effective_mcp_approvals_for_agent(cwd, &agent)?,
+            capability_key,
+        )
     } else {
         ApprovalMode::Allow
     };
@@ -2101,46 +2785,37 @@ fn resolve_shell_capability_mode(
     })
 }
 
-fn resolve_tool_capability_mode(
-    store: &crate::app::ai::config::SirixConfigStore,
-    cwd: &StdPath,
-    agent: &crate::app::ai::config::AgentConfig,
+fn resolve_named_capability_mode(
+    rules: &CapabilityRulesConfig,
     capability_key: &str,
-) -> anyhow::Result<ApprovalMode> {
-    let rules = store.effective_tool_rules_for_agent(cwd, agent)?;
-    if rules
-        .deny
-        .iter()
-        .any(|rule| tool_rule_matches(rule, capability_key))
-    {
-        return Ok(ApprovalMode::Deny);
-    }
-    if rules
-        .allow
-        .iter()
-        .any(|rule| tool_rule_matches(rule, capability_key))
-    {
-        return Ok(ApprovalMode::Allow);
-    }
-    Ok(rules.mode)
+) -> ApprovalMode {
+    most_specific_capability_rule(&rules.rules, capability_key)
+        .map(|rule| rule.mode.clone())
+        .unwrap_or_else(|| rules.mode.clone())
 }
 
-fn tool_rule_matches(rule: &str, capability_key: &str) -> bool {
-    let normalized_rule = rule.trim();
-    if normalized_rule.is_empty() {
-        return false;
-    }
+fn most_specific_capability_rule<'a>(
+    rules: &'a [CapabilityApprovalRule],
+    capability_key: &str,
+) -> Option<&'a CapabilityApprovalRule> {
+    let normalized_capability = normalize_capability_key(capability_key);
+    rules
+        .iter()
+        .filter(|rule| {
+            capability_rule_prefix_matches(rule.key.as_str(), normalized_capability.as_str())
+        })
+        .max_by_key(|rule| normalize_capability_key(rule.key.as_str()).len())
+}
 
-    // Backward compatibility for existing builtin rules that only stored the
-    // bare builtin tool id (for example `apply_patch`) before MCP capability
-    // keys were added to the same rule set.
-    if let Some(builtin_tool_id) = capability_key.strip_prefix("builtin.") {
-        if normalized_rule.eq_ignore_ascii_case(builtin_tool_id) {
-            return true;
-        }
-    }
-
-    capability_rule_prefix_matches(normalized_rule, capability_key)
+fn normalize_capability_key(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('.')
+        .split('.')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+        .to_ascii_lowercase()
 }
 
 fn capability_rule_prefix_matches(rule: &str, capability_key: &str) -> bool {
@@ -2167,9 +2842,15 @@ async fn emit_approval_request_event(
     capability_key: &str,
     configured_mode: ApprovalMode,
 ) {
+    let request_id = uuid::Uuid::new_v4().to_string();
     if !state
         .ai_approval_registry
-        .mark_pending(record.ai_session_id, agent_id, capability_key)
+        .mark_pending(
+            record.ai_session_id,
+            agent_id,
+            capability_key,
+            request_id.as_str(),
+        )
         .await
     {
         return;
@@ -2181,20 +2862,47 @@ async fn emit_approval_request_event(
             "payload": {
                 "ai_session_id": record.ai_session_id,
                 "terminal_id": record.terminal_id,
+                "request_id": request_id,
                 "cwd": record.cwd,
                 "agent_id": agent_id,
                 "model_id": model_id,
                 "capability_key": capability_key,
                 "configured_mode": configured_mode,
+                "supported_scopes": supported_approval_scopes(capability_key),
             }
         })
         .to_string(),
     );
+
+    if record.mirrored_to_backend {
+        if let Err(error) = sync_approval_request_to_backend(
+            state,
+            record.ai_session_id,
+            request_id.as_str(),
+            agent_id,
+            model_id,
+            capability_key,
+            configured_mode,
+            supported_approval_scopes(capability_key),
+        )
+        .await
+        {
+            tracing::warn!(
+                ai_session_id = %record.ai_session_id,
+                agent_id,
+                capability_key,
+                error = %error,
+                "failed to sync approval request to backend"
+            );
+        }
+    }
 }
 
 async fn sync_approval_to_backend(
     state: &AppState,
     ai_session_id: uuid::Uuid,
+    request_id: Option<&str>,
+    agent_id: &str,
     capability_key: &str,
     decision: ApprovalDecision,
     scope: ApprovalScope,
@@ -2203,7 +2911,7 @@ async fn sync_approval_to_backend(
         return Ok(());
     };
     let url = format!(
-        "{}/api/v1/ai-sessions/{}/approvals",
+        "{}/api/v1/ai-sessions/{}/approvals/resolve",
         state.config.backend.base_url.trim_end_matches('/'),
         ai_session_id
     );
@@ -2211,7 +2919,9 @@ async fn sync_approval_to_backend(
         .post(url)
         .bearer_auth(session.access_token)
         .json(&serde_json::json!({
+            "request_id": request_id,
             "capability_key": capability_key,
+            "agent_id": agent_id,
             "decision": match decision {
                 ApprovalDecision::Allow => "allow",
                 ApprovalDecision::Deny => "deny",
@@ -2219,8 +2929,123 @@ async fn sync_approval_to_backend(
             "scope": match scope {
                 ApprovalScope::Once => "once",
                 ApprovalScope::Session => "session",
-                ApprovalScope::Deny => "deny",
+                ApprovalScope::Workspace => "workspace",
+                ApprovalScope::Global => "global",
             },
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn sync_shell_approval_to_backend(
+    state: &AppState,
+    ai_session_id: uuid::Uuid,
+    request_id: &str,
+    decision: ApprovalDecision,
+    scope: ApprovalScope,
+    prefix: Option<&str>,
+) -> anyhow::Result<()> {
+    let Some(session) = state.auth_session_store.current_session().await else {
+        return Ok(());
+    };
+    let url = format!(
+        "{}/api/v1/ai-sessions/{}/approvals/resolve",
+        state.config.backend.base_url.trim_end_matches('/'),
+        ai_session_id
+    );
+    reqwest::Client::new()
+        .post(url)
+        .bearer_auth(session.access_token)
+        .json(&serde_json::json!({
+            "request_id": request_id,
+            "capability_key": "builtin.shell",
+            "agent_id": "",
+            "decision": match decision {
+                ApprovalDecision::Allow => "allow",
+                ApprovalDecision::Deny => "deny",
+            },
+            "scope": shell_scope_key(scope),
+            "prefix": prefix,
+            "approval_kind": "shell",
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn sync_approval_request_to_backend(
+    state: &AppState,
+    ai_session_id: uuid::Uuid,
+    request_id: &str,
+    agent_id: &str,
+    model_id: &str,
+    capability_key: &str,
+    configured_mode: ApprovalMode,
+    supported_scopes: Vec<String>,
+) -> anyhow::Result<()> {
+    let Some(session) = state.auth_session_store.current_session().await else {
+        return Ok(());
+    };
+    let url = format!(
+        "{}/api/v1/ai-sessions/{}/approval-requests",
+        state.config.backend.base_url.trim_end_matches('/'),
+        ai_session_id
+    );
+    reqwest::Client::new()
+        .post(url)
+        .bearer_auth(session.access_token)
+        .json(&serde_json::json!({
+            "request_id": request_id,
+            "agent_id": agent_id,
+            "model_id": model_id,
+            "capability_key": capability_key,
+            "configured_mode": match configured_mode {
+                ApprovalMode::Allow => "allow",
+                ApprovalMode::Ask => "ask",
+                ApprovalMode::Deny => "deny",
+            },
+            "supported_scopes": supported_scopes,
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+async fn sync_shell_approval_request_to_backend(
+    state: &AppState,
+    ai_session_id: uuid::Uuid,
+    request_id: &str,
+    agent_id: &str,
+    model_id: &str,
+    supported_scopes: Vec<String>,
+    shell_command: &str,
+    prefix_candidates: Vec<String>,
+) -> anyhow::Result<()> {
+    let Some(session) = state.auth_session_store.current_session().await else {
+        return Ok(());
+    };
+    let url = format!(
+        "{}/api/v1/ai-sessions/{}/approval-requests",
+        state.config.backend.base_url.trim_end_matches('/'),
+        ai_session_id
+    );
+    reqwest::Client::new()
+        .post(url)
+        .bearer_auth(session.access_token)
+        .json(&serde_json::json!({
+            "request_id": request_id,
+            "agent_id": agent_id,
+            "model_id": model_id,
+            "capability_key": "builtin.shell",
+            "configured_mode": "ask",
+            "supported_scopes": supported_scopes,
+            "approval_kind": "shell",
+            "shell_command": shell_command,
+            "shell_prefix_candidates": prefix_candidates,
         }))
         .send()
         .await?
@@ -2439,6 +3264,46 @@ mod tests {
         assert_eq!(
             data[2].get("id").and_then(JsonValue::as_str),
             Some("shared-model @ openai")
+        );
+    }
+
+    #[test]
+    fn resolve_named_capability_mode_uses_capability_default_when_no_specific_rule_matches() {
+        let rules = CapabilityRulesConfig {
+            mode: ApprovalMode::Deny,
+            ..CapabilityRulesConfig::default()
+        };
+
+        assert_eq!(
+            resolve_named_capability_mode(&rules, "builtin.apply_patch"),
+            ApprovalMode::Deny
+        );
+    }
+
+    #[test]
+    fn resolve_named_capability_mode_prefers_most_specific_rule() {
+        let rules = CapabilityRulesConfig {
+            mode: ApprovalMode::Ask,
+            rules: vec![
+                CapabilityApprovalRule {
+                    key: "mcp.github".to_string(),
+                    mode: ApprovalMode::Allow,
+                },
+                CapabilityApprovalRule {
+                    key: "mcp.github.list_issues".to_string(),
+                    mode: ApprovalMode::Deny,
+                },
+            ],
+            ..CapabilityRulesConfig::default()
+        };
+
+        assert_eq!(
+            resolve_named_capability_mode(&rules, "mcp.github.list_issues"),
+            ApprovalMode::Deny
+        );
+        assert_eq!(
+            resolve_named_capability_mode(&rules, "mcp.github.create_issue"),
+            ApprovalMode::Allow
         );
     }
 }

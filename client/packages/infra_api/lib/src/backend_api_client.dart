@@ -101,4 +101,15 @@ abstract class BackendApiClient {
     required String accessToken,
     required String terminalId,
   });
+
+  Future<void> resolveAiApproval({
+    required String accessToken,
+    required String sessionId,
+    String? requestId,
+    required String capabilityKey,
+    required String agentId,
+    required String decision,
+    required String scope,
+    String? prefix,
+  });
 }

@@ -35,6 +35,14 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/ai-sessions/:ai_session_id/approvals",
             post(ai_sessions::create_ai_approval),
         )
+        .route(
+            "/api/v1/ai-sessions/:ai_session_id/approval-requests",
+            post(ai_sessions::create_ai_approval_request),
+        )
+        .route(
+            "/api/v1/ai-sessions/:ai_session_id/approvals/resolve",
+            post(ai_sessions::resolve_ai_approval),
+        )
         .route("/api/v1/devices/register", post(devices::register_device))
         .route("/api/v1/devices/my", get(devices::list_my_devices))
         .route(

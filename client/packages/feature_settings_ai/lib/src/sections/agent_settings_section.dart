@@ -394,7 +394,7 @@ class _AgentDetailPane extends StatelessWidget {
                                 AiSettingsChip(label: 'id: ${agent.id}'),
                                 AiSettingsChip(label: agent.providerId),
                                 AiSettingsChip(label: agent.modelId),
-                                AiSettingsChip(label: _approvalModeLabel(agent.approvalMode)),
+                                AiSettingsChip(label: approvalModeLabel(agent.approvalMode)),
                               ],
                             ),
                           ],
@@ -464,7 +464,7 @@ class _AgentDetailPane extends StatelessWidget {
                             ? 'Not configured'
                             : '${agent.fallbackProviderId} / ${agent.fallbackModelId}',
                       ),
-                      ('Shell Authorization', _approvalModeLabel(agent.approvalMode)),
+                      ('Shell Authorization', approvalModeLabel(agent.approvalMode)),
                       ('Agent Shell Rules', _shellRulesSummary(agent.shellRules)),
                     ],
                   ),
@@ -660,6 +660,9 @@ Future<AgentConfigModel?> _showAgentDialog(
   var fallbackModelId = existing?.fallbackModelId ?? '';
   var approvalMode = existing?.approvalMode ?? ApprovalMode.ask;
   var shellRules = existing?.shellRules ?? const ShellRulesConfigModel();
+  var builtinApprovals = existing?.builtinApprovals ?? const CapabilityRulesConfigModel();
+  var skillApprovals = existing?.skillApprovals ?? const CapabilityRulesConfigModel();
+  var mcpApprovals = existing?.mcpApprovals ?? const CapabilityRulesConfigModel();
   var enabled = existing?.enabled ?? true;
   var builtinToolIds = [...(existing?.builtinToolIds ?? kBuiltinToolCatalog)];
   var skillIds = [...(existing?.skillIds ?? const <String>[])];
@@ -667,6 +670,10 @@ Future<AgentConfigModel?> _showAgentDialog(
   var subAgentIds = [...(existing?.subAgentIds ?? const <String>[])];
   final allowRulesController = TextEditingController(text: shellRules.allow.join('\n'));
   final denyRulesController = TextEditingController(text: shellRules.deny.join('\n'));
+  final discoveredMcpServers = {
+    for (final server in state.statusOverview?.mcp.servers ?? const <LocalMcpServerStatus>[])
+      server.id: server,
+  };
 
   final submitted = await showAiSettingsDialog<bool>(
     context: context,
@@ -693,6 +700,9 @@ Future<AgentConfigModel?> _showAgentDialog(
           systemPrompt: systemPromptController.text,
           approvalMode: approvalMode,
           shellRules: shellRules,
+          builtinApprovals: builtinApprovals,
+          skillApprovals: skillApprovals,
+          mcpApprovals: mcpApprovals,
           builtinToolIds: builtinToolIds,
           skillIds: skillIds,
           mcpServerIds: mcpServerIds,
@@ -788,23 +798,24 @@ Future<AgentConfigModel?> _showAgentDialog(
                 }
               },
             ),
-            DropdownButtonFormField<ApprovalMode>(
-              key: ValueKey('approval-${approvalMode.name}'),
-              initialValue: approvalMode,
-              decoration: const InputDecoration(labelText: 'Shell Authorization'),
-              items: ApprovalMode.values
-                  .map(
-                    (mode) => DropdownMenuItem(
-                      value: mode,
-                      child: Text(_approvalModeLabel(mode)),
-                    ),
-                  )
-                  .toList(growable: false),
-              onChanged: (value) {
-                if (value != null) {
-                  setState(() => approvalMode = value);
-                }
-              },
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Shell Authorization',
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: context.sirix.textMuted,
+                        fontWeight: FontWeight.w700,
+                      ),
+                ),
+                const SizedBox(height: 10),
+                ApprovalModeSegmentedControl(
+                  value: approvalMode,
+                  onChanged: (value) {
+                    setState(() => approvalMode = value);
+                  },
+                ),
+              ],
             ),
             AiSettingsCard(
               child: Column(
@@ -878,6 +889,42 @@ Future<AgentConfigModel?> _showAgentDialog(
                   ),
                 ],
               ),
+            ),
+            _AgentCapabilityOverridesCard(
+              title: 'Builtin Tool Permissions',
+              subtitle: 'Override the global builtin permission defaults for this agent. These entries apply after the global layer and before workspace/session decisions.',
+              config: builtinApprovals,
+              items: [
+                for (final id in builtinToolIds) _SelectableItem(id: 'builtin.$id', label: id),
+              ],
+              onChanged: (next) => setState(() => builtinApprovals = next),
+            ),
+            _AgentCapabilityOverridesCard(
+              title: 'Skill Permissions',
+              subtitle: 'Override the global skill permission defaults for this agent.',
+              config: skillApprovals,
+              items: [
+                for (final skill in state.config.skills.where((item) => skillIds.contains(item.id)))
+                  _SelectableItem(id: 'skill.${skill.id}', label: skill.name, description: skill.path),
+              ],
+              onChanged: (next) => setState(() => skillApprovals = next),
+            ),
+            _AgentCapabilityOverridesCard(
+              title: 'MCP Permissions',
+              subtitle: 'Override the global MCP permission defaults for this agent at the server/function level using Desktop Server discovery results.',
+              config: mcpApprovals,
+              items: [
+                for (final server in state.config.mcpServers.where((item) => mcpServerIds.contains(item.id))) ...[
+                  _SelectableItem(id: 'mcp.${server.id}', label: server.name, description: server.id),
+                  for (final tool in discoveredMcpServers[server.id]?.discoveredTools ?? const <LocalMcpServerToolStatus>[])
+                    _SelectableItem(
+                      id: 'mcp.${server.id}.${tool.id}',
+                      label: '${server.name} · ${tool.title}',
+                      description: tool.description ?? tool.id,
+                    ),
+                ],
+              ],
+              onChanged: (next) => setState(() => mcpApprovals = next),
             ),
             DropdownButtonFormField<String>(
               key: ValueKey('fallback-provider-$fallbackProviderId'),
@@ -1115,6 +1162,9 @@ Future<AgentConfigModel?> _showAgentDialog(
     systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
     approvalMode: approvalMode,
     shellRules: shellRules,
+    builtinApprovals: builtinApprovals,
+    skillApprovals: skillApprovals,
+    mcpApprovals: mcpApprovals,
     builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
     skillIds: skillIds,
     mcpServerIds: mcpServerIds,
@@ -1195,6 +1245,147 @@ class _AgentRuleEditor extends StatelessWidget {
       ),
     );
   }
+}
+
+class _AgentCapabilityOverridesCard extends StatelessWidget {
+  const _AgentCapabilityOverridesCard({
+    required this.title,
+    required this.subtitle,
+    required this.config,
+    required this.items,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String subtitle;
+  final CapabilityRulesConfigModel config;
+  final List<_SelectableItem> items;
+  final ValueChanged<CapabilityRulesConfigModel> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return AiSettingsCard(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            subtitle,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: palette.textMuted,
+                ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'Default Mode',
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  color: palette.textMuted,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+          const SizedBox(height: 10),
+          ApprovalModeSegmentedControl(
+            value: config.mode,
+            onChanged: (value) {
+              onChanged(config.copyWith(mode: value));
+            },
+          ),
+          if (items.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            for (final item in items) ...[
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final stacked = constraints.maxWidth < 760;
+                  final details = Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.label,
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                      if (item.description != null && item.description!.trim().isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            item.description!,
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: palette.textMuted,
+                                ),
+                          ),
+                        ),
+                    ],
+                  );
+                  final control = SizedBox(
+                    width: stacked ? double.infinity : 240,
+                    child: ApprovalModeSegmentedControl(
+                      value: _agentCapabilityModeFor(config, item.id),
+                      dense: true,
+                      onChanged: (value) {
+                        onChanged(_agentCapabilityConfigWithRule(config, item.id, value));
+                      },
+                    ),
+                  );
+
+                  if (stacked) {
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        details,
+                        const SizedBox(height: 12),
+                        control,
+                      ],
+                    );
+                  }
+
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: details),
+                      const SizedBox(width: 12),
+                      control,
+                    ],
+                  );
+                },
+              ),
+              if (item != items.last) const Divider(height: 18),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+ApprovalMode _agentCapabilityModeFor(CapabilityRulesConfigModel config, String key) {
+  for (final rule in config.rules) {
+    if (rule.key == key) {
+      return rule.mode;
+    }
+  }
+  return config.mode;
+}
+
+CapabilityRulesConfigModel _agentCapabilityConfigWithRule(
+  CapabilityRulesConfigModel config,
+  String key,
+  ApprovalMode mode,
+) {
+  final nextRules = [
+    for (final rule in config.rules)
+      if (rule.key != key) rule,
+    CapabilityApprovalRuleModel(key: key, mode: mode),
+  ];
+  return config.copyWith(rules: nextRules);
 }
 
 class _SelectionField extends StatelessWidget {
@@ -1462,14 +1653,6 @@ String _shellRulesSummary(ShellRulesConfigModel shellRules) {
     return 'No agent-specific overrides.';
   }
   return 'Allow $allowCount, Deny $denyCount';
-}
-
-String _approvalModeLabel(ApprovalMode mode) {
-  return switch (mode) {
-    ApprovalMode.allow => 'Allow',
-    ApprovalMode.ask => 'Ask',
-    ApprovalMode.deny => 'Deny',
-  };
 }
 
 enum _PromptPreviewMode {

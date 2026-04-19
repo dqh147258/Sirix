@@ -6,7 +6,9 @@ use tokio::sync::{broadcast, oneshot, Mutex, RwLock};
 
 use crate::app::{
     ai::{
-        approval::AiApprovalRegistry, config::SirixConfigStore, openai_auth::OpenAiAuthRegistry,
+        approval::{AiApprovalRegistry, ShellApprovalRegistry},
+        config::SirixConfigStore,
+        openai_auth::OpenAiAuthRegistry,
         session::AiSessionRegistry,
     },
     auth::AuthSessionStore,
@@ -28,6 +30,7 @@ pub struct AppState {
     pub sirix_config_store: Arc<SirixConfigStore>,
     pub ai_session_registry: Arc<AiSessionRegistry>,
     pub ai_approval_registry: Arc<AiApprovalRegistry>,
+    pub shell_approval_registry: Arc<ShellApprovalRegistry>,
     pub openai_auth_registry: Arc<OpenAiAuthRegistry>,
     pub status_registry: Arc<RwLock<StatusRegistry>>,
 }
@@ -81,6 +84,7 @@ impl AppState {
                 AiApprovalRegistry::new(approval_storage_dir)
                     .expect("failed to initialize ai approval registry"),
             ),
+            shell_approval_registry: Arc::new(ShellApprovalRegistry::default()),
             openai_auth_registry: Arc::new(OpenAiAuthRegistry::new()),
             status_registry: Arc::new(RwLock::new(StatusRegistry::default())),
         }

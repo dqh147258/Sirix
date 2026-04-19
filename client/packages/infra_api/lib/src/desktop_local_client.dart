@@ -255,20 +255,24 @@ class DesktopLocalClient {
 
   Future<void> resolveAiApproval({
     required String sessionId,
+    String? requestId,
     required String capabilityKey,
     required String agentId,
     required String decision,
     required String scope,
+    String? prefix,
   }) async {
     await _request(
       'POST',
       '/ai/sessions/approvals/resolve',
       body: {
         'session_id': sessionId,
+        if (requestId != null && requestId.trim().isNotEmpty) 'request_id': requestId,
         'capability_key': capabilityKey,
         'agent_id': agentId,
         'decision': decision,
         'scope': scope,
+        if (prefix != null && prefix.trim().isNotEmpty) 'prefix': prefix,
       },
     );
   }

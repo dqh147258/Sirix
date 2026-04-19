@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'package:app_core/app_core.dart';
+import 'package:infra_api/infra_api.dart';
 
 Future<T?> showAiSettingsDialog<T>(
   {required BuildContext context,
@@ -300,6 +301,132 @@ class AiSettingsEmptyState extends StatelessWidget {
       ),
     );
   }
+}
+
+String approvalModeLabel(ApprovalMode mode) {
+  return switch (mode) {
+    ApprovalMode.allow => 'Allow',
+    ApprovalMode.ask => 'Ask',
+    ApprovalMode.deny => 'Deny',
+  };
+}
+
+class ApprovalModeSegmentedControl extends StatelessWidget {
+  const ApprovalModeSegmentedControl({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    this.dense = false,
+  });
+
+  final ApprovalMode value;
+  final ValueChanged<ApprovalMode> onChanged;
+  final bool dense;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return Container(
+      padding: EdgeInsets.all(dense ? 4 : 5),
+      decoration: BoxDecoration(
+        color: palette.surface.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Row(
+        children: [
+          for (final mode in ApprovalMode.values) ...[
+            Expanded(
+              child: _ApprovalModeSegment(
+                mode: mode,
+                selected: mode == value,
+                dense: dense,
+                onTap: () => onChanged(mode),
+              ),
+            ),
+            if (mode != ApprovalMode.values.last)
+              SizedBox(width: dense ? 4 : 5),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ApprovalModeSegment extends StatelessWidget {
+  const _ApprovalModeSegment({
+    required this.mode,
+    required this.selected,
+    required this.dense,
+    required this.onTap,
+  });
+
+  final ApprovalMode mode;
+  final bool selected;
+  final bool dense;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          padding: EdgeInsets.symmetric(
+            horizontal: dense ? 8 : 12,
+            vertical: dense ? 9 : 11,
+          ),
+          decoration: BoxDecoration(
+            color: selected
+                ? palette.primaryBright.withValues(alpha: 0.16)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: selected
+                  ? palette.primaryBright.withValues(alpha: 0.34)
+                  : Colors.transparent,
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                _approvalModeIcon(mode),
+                size: dense ? 15 : 16,
+                color: selected ? palette.primaryBright : palette.textMuted,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  approvalModeLabel(mode),
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: selected ? palette.textPrimary : palette.textSecondary,
+                        fontSize: dense ? 12 : null,
+                      ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+IconData _approvalModeIcon(ApprovalMode mode) {
+  return switch (mode) {
+    ApprovalMode.allow => Icons.check_circle_outline_rounded,
+    ApprovalMode.ask => Icons.help_outline_rounded,
+    ApprovalMode.deny => Icons.block_rounded,
+  };
 }
 
 class AiSettingsChip extends StatelessWidget {

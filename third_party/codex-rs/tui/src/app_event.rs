@@ -122,6 +122,7 @@ pub(crate) enum AppEvent {
         id: String,
         command: Vec<String>,
         decision: ReviewDecision,
+        sync_resolution: bool,
         persistence_scope: Option<String>,
         persistence_decision: Option<String>,
         prefix: Option<String>,

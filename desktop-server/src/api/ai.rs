@@ -41,8 +41,9 @@ use crate::app::{
             effective_model_runtime_context_window, infer_provider_default_context_window,
             normalized_sirix_config, resolve_session_picker_model, session_picker_model_id,
             validate_sirix_config, ApprovalMode, CapabilityApprovalRule, CapabilityRulesConfig,
-            ModelConfig, ModelKind, ProviderConfig, ProviderKind, ShellRulesConfig, SirixConfig,
-            ToolRulesConfig,
+            ModelConfig, ModelKind, ProviderConfig, ProviderKind, RecentWorkspaceItem,
+            ShellRulesConfig, SirixConfig, ToolRulesConfig, WorkspaceEditableConfig,
+            WorkspaceSettingsSnapshot,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -56,6 +57,23 @@ use crate::app::{
 #[derive(Debug, Deserialize)]
 pub struct EffectiveConfigQuery {
     pub cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceSettingsQuery {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SelectWorkspaceRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveWorkspaceSettingsRequest {
+    pub path: String,
+    pub editable_config: WorkspaceEditableConfig,
+    pub editable_shell_rules: ShellRulesConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +205,11 @@ pub struct AgentSystemPromptPreviewResponse {
     pub preview: JsonValue,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RecentWorkspacesResponse {
+    pub workspaces: Vec<RecentWorkspaceItem>,
+}
+
 pub async fn get_openai_auth_status(
     Path(provider_id): Path<String>,
     State(state): State<AppState>,
@@ -308,6 +331,70 @@ pub async fn set_tool_rules(
     Ok(Json(payload))
 }
 
+fn required_workspace_path(raw: &str) -> Result<PathBuf, ApiError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request(
+            "workspace path cannot be empty".to_string(),
+        ));
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+pub async fn get_recent_workspaces(
+    State(state): State<AppState>,
+) -> Result<Json<RecentWorkspacesResponse>, ApiError> {
+    let workspaces = state
+        .sirix_config_store
+        .load_recent_workspaces()
+        .map_err(ApiError::internal)?;
+    Ok(Json(RecentWorkspacesResponse { workspaces }))
+}
+
+pub async fn get_workspace_settings(
+    State(state): State<AppState>,
+    Query(query): Query<WorkspaceSettingsQuery>,
+) -> Result<Json<WorkspaceSettingsSnapshot>, ApiError> {
+    let workspace_path = required_workspace_path(&query.path)?;
+    let response = state
+        .sirix_config_store
+        .load_workspace_settings(workspace_path.as_path())
+        // Invalid or stale workspace selections are user-input problems, not
+        // upstream/runtime failures. Return a 4xx so the desktop client can
+        // surface a recoverable validation message instead of a generic server
+        // error when a recent workspace was deleted or a bad path was entered.
+        .map_err(ApiError::bad_request_anyhow)?;
+    Ok(Json(response))
+}
+
+pub async fn select_workspace(
+    State(state): State<AppState>,
+    Json(payload): Json<SelectWorkspaceRequest>,
+) -> Result<Json<WorkspaceSettingsSnapshot>, ApiError> {
+    let workspace_path = required_workspace_path(&payload.path)?;
+    let response = state
+        .sirix_config_store
+        .load_workspace_settings(workspace_path.as_path())
+        .map_err(ApiError::bad_request_anyhow)?;
+    Ok(Json(response))
+}
+
+pub async fn save_workspace_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<SaveWorkspaceSettingsRequest>,
+) -> Result<Json<WorkspaceSettingsSnapshot>, ApiError> {
+    let workspace_path = required_workspace_path(&payload.path)?;
+    let response = state
+        .sirix_config_store
+        .save_workspace_settings(
+            workspace_path.as_path(),
+            &payload.editable_config,
+            &payload.editable_shell_rules,
+        )
+        .map_err(ApiError::bad_request_anyhow)?;
+    Ok(Json(response))
+}
+
 pub async fn get_effective_ai_config(
     State(state): State<AppState>,
     Query(query): Query<EffectiveConfigQuery>,
@@ -335,12 +422,18 @@ pub async fn preview_agent_system_prompt(
         .ok_or_else(|| {
             ApiError::bad_request(format!("agent not found: {}", payload.agent_id.trim()))
         })?;
-    let workspace_root = payload
-        .cwd
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
+    let fallback_workspace_root = std::env::current_dir().ok();
+    let workspace_root = state
+        .sirix_config_store
+        .normalize_workspace_root_str(payload.cwd.as_deref())
+        .map_err(ApiError::internal)?
+        .or(fallback_workspace_root
+            .as_deref()
+            .map(|path| state.sirix_config_store.normalize_workspace_root(path))
+            .transpose()
+            .map_err(ApiError::internal)?
+            .flatten())
+        .or(fallback_workspace_root);
     let prompt = build_agent_system_prompt_preview(
         &normalized,
         &agent,
@@ -434,6 +527,9 @@ pub async fn launch_session(
         .await
         .map_err(ApiError::internal)?
     };
+    let _ = state
+        .sirix_config_store
+        .upsert_recent_workspace(cwd.as_path());
     Ok(Json(response))
 }
 

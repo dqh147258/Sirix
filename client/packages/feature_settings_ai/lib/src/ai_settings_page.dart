@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -16,7 +17,12 @@ import 'sections/shell_rules_settings_section.dart';
 import 'sections/skills_settings_section.dart';
 
 class AiSettingsPage extends ConsumerStatefulWidget {
-  const AiSettingsPage({super.key});
+  const AiSettingsPage({
+    super.key,
+    this.scope = AiSettingsScope.global,
+  });
+
+  final AiSettingsScope scope;
 
   @override
   ConsumerState<AiSettingsPage> createState() => _AiSettingsPageState();
@@ -30,8 +36,18 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
   void initState() {
     super.initState();
     Future.microtask(() {
-      ref.read(aiSettingsViewModelProvider.notifier).load();
+      ref.read(aiSettingsViewModelProvider(widget.scope).notifier).load();
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant AiSettingsPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.scope != widget.scope) {
+      Future.microtask(() {
+        ref.read(aiSettingsViewModelProvider(widget.scope).notifier).load(force: true);
+      });
+    }
   }
 
   @override
@@ -43,10 +59,11 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
-    final state = ref.watch(aiSettingsViewModelProvider);
-    final vm = ref.read(aiSettingsViewModelProvider.notifier);
+    final provider = aiSettingsViewModelProvider(widget.scope);
+    final state = ref.watch(provider);
+    final vm = ref.read(provider.notifier);
 
-    ref.listen<AiSettingsState>(aiSettingsViewModelProvider, (previous, next) {
+    ref.listen<AiSettingsState>(provider, (previous, next) {
       final nextNotice = next.noticeMessage?.trim();
       if (previous?.noticeMessage == next.noticeMessage) {
         return;
@@ -73,6 +90,8 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
         setState(() => _visibleNoticeMessage = null);
       });
     });
+
+    final canPersist = !state.saving && (!state.isWorkspaceScope || state.hasSelectedWorkspace);
 
     return Padding(
       padding: const EdgeInsets.all(20),
@@ -114,74 +133,76 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
                       bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05)),
                     ),
                   ),
-                  child: Wrap(
-                    spacing: 14,
-                    runSpacing: 14,
-                    alignment: WrapAlignment.spaceBetween,
-                    crossAxisAlignment: WrapCrossAlignment.center,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      SizedBox(
-                        width: isTightContent
-                            ? (contentMaxWidth - 44).clamp(260.0, 520.0)
-                            : 480,
-                        child: Column(
+                      if (state.isWorkspaceScope && !isTightContent)
+                        Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              'AI Settings',
-                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    fontFamily: 'Space Grotesk',
-                                  ),
+                            Expanded(
+                              child: _SettingsHeaderIntro(state: state),
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Manage local AI runtime behavior, provider routing, skill access, MCP transport, and agent permissions from one control surface.',
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                    color: palette.textSecondary,
+                            const SizedBox(width: 16),
+                            SizedBox(
+                              width: contentMaxWidth.clamp(320.0, 980.0) * 0.46,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  _WorkspaceTargetSummaryBar(
+                                    state: state,
+                                    onOpen: state.loading
+                                        ? null
+                                        : () => _showWorkspaceTargetDialog(),
                                   ),
+                                  const SizedBox(height: 14),
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: _HeaderActions(
+                                      state: state,
+                                      vm: vm,
+                                      canPersist: canPersist,
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
-                            const SizedBox(height: 10),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                const AiSettingsChip(label: 'Desktop Runtime'),
-                                AiSettingsChip(
-                                  label: state.effective?.workspaceSource == null
-                                      ? '~/.sirix/config.toml'
-                                      : 'effective: ${state.effective!.workspaceSource}',
-                                ),
-                              ],
+                          ],
+                        )
+                      else
+                        Wrap(
+                          spacing: 14,
+                          runSpacing: 14,
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: isTightContent
+                                  ? (contentMaxWidth - 44).clamp(260.0, 520.0)
+                                  : 520,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _SettingsHeaderIntro(state: state),
+                                  if (state.isWorkspaceScope) ...[
+                                    const SizedBox(height: 14),
+                                    _WorkspaceTargetSummaryBar(
+                                      state: state,
+                                      onOpen: state.loading
+                                          ? null
+                                          : () => _showWorkspaceTargetDialog(),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            _HeaderActions(
+                              state: state,
+                              vm: vm,
+                              canPersist: canPersist,
                             ),
                           ],
                         ),
-                      ),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 10,
-                        children: [
-                          OutlinedButton.icon(
-                            onPressed: state.loading ? null : () => vm.load(force: true),
-                            icon: const Icon(Icons.refresh_rounded),
-                            label: const Text('Reload'),
-                          ),
-                          FilledButton.icon(
-                            onPressed: state.saving ? null : vm.save,
-                            icon: state.saving
-                                ? SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: palette.surface,
-                                    ),
-                                  )
-                                : const Icon(Icons.save_rounded),
-                            label: Text(state.saving ? 'Saving...' : 'Save Changes'),
-                          ),
-                        ],
-                      ),
                     ],
                   ),
                 ),
@@ -231,6 +252,339 @@ class _AiSettingsPageState extends ConsumerState<AiSettingsPage> {
       ),
     );
   }
+
+  Future<void> _showWorkspaceTargetDialog() async {
+    final provider = aiSettingsViewModelProvider(widget.scope);
+    final vm = ref.read(provider.notifier);
+    vm.updateWorkspaceSearchQuery('');
+    await showAiSettingsDialog<void>(
+      context: context,
+      title: 'Workspace Target',
+      subtitle:
+          'Choose a recent workspace or select a directory from the file system. Selecting any option closes this dialog immediately.',
+      width: 760,
+      actions: const [],
+      child: Consumer(
+        builder: (context, ref, _) {
+          final state = ref.watch(provider);
+          final vm = ref.read(provider.notifier);
+          return _WorkspaceTargetDialogBody(state: state, vm: vm);
+        },
+      ),
+    );
+  }
+}
+
+class _WorkspaceTargetSummaryBar extends StatelessWidget {
+  const _WorkspaceTargetSummaryBar({
+    required this.state,
+    required this.onOpen,
+  });
+
+  final AiSettingsState state;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: palette.surfaceMuted.withValues(alpha: 0.26),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: palette.glassStroke),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            alignment: WrapAlignment.spaceBetween,
+            children: [
+              SizedBox(
+                width: 540,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      state.selectedWorkspaceRoot ?? 'No workspace selected',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                            fontFamily: 'JetBrains Mono',
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                    if (state.workspaceStatusMessage != null) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        state.workspaceStatusMessage!,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: palette.textMuted,
+                            ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpen,
+                icon: const Icon(Icons.folder_open_rounded),
+                label: const Text('Open'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SettingsHeaderIntro extends StatelessWidget {
+  const _SettingsHeaderIntro({
+    required this.state,
+  });
+
+  final AiSettingsState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          _titleForScope(state.scope),
+          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                fontWeight: FontWeight.w700,
+                fontFamily: 'Space Grotesk',
+              ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          _subtitleForScope(state.scope),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: palette.textSecondary,
+              ),
+        ),
+        const SizedBox(height: 10),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: _chipsForState(state)
+              .map((label) => AiSettingsChip(label: label))
+              .toList(growable: false),
+        ),
+      ],
+    );
+  }
+}
+
+class _HeaderActions extends StatelessWidget {
+  const _HeaderActions({
+    required this.state,
+    required this.vm,
+    required this.canPersist,
+  });
+
+  final AiSettingsState state;
+  final AiSettingsViewModel vm;
+  final bool canPersist;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    return Wrap(
+      spacing: 10,
+      runSpacing: 10,
+      children: [
+        OutlinedButton.icon(
+          onPressed: state.loading ? null : () => vm.load(force: true),
+          icon: const Icon(Icons.refresh_rounded),
+          label: const Text('Reload'),
+        ),
+        FilledButton.icon(
+          onPressed: canPersist ? vm.save : null,
+          icon: state.saving
+              ? SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: palette.surface,
+                  ),
+                )
+              : const Icon(Icons.save_rounded),
+          label: Text(state.saving ? 'Saving...' : 'Save Changes'),
+        ),
+      ],
+    );
+  }
+}
+
+class _WorkspaceTargetDialogBody extends StatelessWidget {
+  const _WorkspaceTargetDialogBody({
+    required this.state,
+    required this.vm,
+  });
+
+  final AiSettingsState state;
+  final AiSettingsViewModel vm;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final filtered = state.filteredRecentWorkspaces;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Recent Workspaces',
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                      fontFamily: 'Space Grotesk',
+                    ),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final folder = await getDirectoryPath();
+                if (folder == null || folder.trim().isEmpty || !context.mounted) {
+                  return;
+                }
+                await vm.selectWorkspace(folder);
+                if (context.mounted) {
+                  Navigator.of(context).pop();
+                }
+              },
+              icon: const Icon(Icons.create_new_folder_rounded),
+              label: const Text('Select from file system'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 14),
+        TextFormField(
+          key: ValueKey('workspace-search-${state.scope.name}'),
+          initialValue: state.workspaceSearchQuery,
+          onChanged: vm.updateWorkspaceSearchQuery,
+          decoration: const InputDecoration(
+            labelText: 'Search recent workspaces',
+            hintText: 'Filter by folder name or full path',
+            prefixIcon: Icon(Icons.search_rounded),
+          ),
+        ),
+        const SizedBox(height: 14),
+        if (state.recentWorkspaces.isEmpty)
+          const AiSettingsEmptyState(
+            text: 'No recent workspaces yet. Use Select from file system to choose a workspace directory.',
+          )
+        else if (filtered.isEmpty)
+          const AiSettingsEmptyState(
+            text: 'No recent workspaces match the current search query.',
+          )
+        else
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: filtered.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final workspace = filtered[index];
+                final isSelected = workspace.rootPath == state.selectedWorkspaceRoot;
+                return Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(12),
+                    onTap: () async {
+                      await vm.selectWorkspace(workspace.rootPath);
+                      if (context.mounted) {
+                        Navigator.of(context).pop();
+                      }
+                    },
+                    child: Ink(
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? palette.surfaceMuted.withValues(alpha: 0.52)
+                            : palette.surfaceRaised,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: isSelected
+                              ? palette.primaryBright.withValues(alpha: 0.42)
+                              : palette.glassStroke,
+                        ),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.workspaces_rounded,
+                              color: isSelected ? palette.primaryBright : palette.textMuted,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    workspace.label,
+                                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    workspace.rootPath,
+                                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                          color: palette.textMuted,
+                                          fontFamily: 'JetBrains Mono',
+                                        ),
+                                  ),
+                                  if (workspace.subtitle != null &&
+                                      workspace.subtitle!.trim().isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      workspace.subtitle!,
+                                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                            color: palette.textSecondary,
+                                          ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                AiSettingsChip(
+                                  label: workspace.hasSirixConfig ? '.sirix' : 'No .sirix',
+                                ),
+                                if (workspace.hasCodexConfig)
+                                  const AiSettingsChip(label: '.codex detected'),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
 }
 
 class _NavPane extends StatelessWidget {
@@ -260,7 +614,7 @@ class _NavPane extends StatelessWidget {
         'Approval defaults and shell authorization policy',
         Icons.rule_folder_rounded,
       ),
-    ];
+    ].where((item) => state.visibleSections.contains(item.$1)).toList(growable: false);
 
     return Container(
       decoration: BoxDecoration(
@@ -275,9 +629,11 @@ class _NavPane extends StatelessWidget {
             padding: EdgeInsets.fromLTRB(isCollapsed ? 0 : 6, 2, isCollapsed ? 0 : 6, 16),
             child: isCollapsed
                 ? Tooltip(
-                    message: 'Control Surface',
+                    message: state.isWorkspaceScope ? 'Workspace Settings' : 'Global Settings',
                     child: Icon(
-                      Icons.dashboard_customize_rounded,
+                      state.isWorkspaceScope
+                          ? Icons.folder_special_rounded
+                          : Icons.dashboard_customize_rounded,
                       color: palette.primaryBright,
                     ),
                   )
@@ -285,7 +641,7 @@ class _NavPane extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Control Surface',
+                        state.isWorkspaceScope ? 'Workspace Surface' : 'Control Surface',
                         style: Theme.of(context).textTheme.titleMedium?.copyWith(
                               fontFamily: 'Space Grotesk',
                               fontWeight: FontWeight.w700,
@@ -293,7 +649,9 @@ class _NavPane extends StatelessWidget {
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'A desktop-native shell for local AI runtime controls, aligned with the rest of the Sirix workspace.',
+                        state.isWorkspaceScope
+                            ? 'Workspace Settings only exposes local Skills, MCP, Agents, and Permissions so global CLI/provider state stays centralized.'
+                            : 'A desktop-native shell for local AI runtime controls, aligned with the rest of the Sirix workspace.',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: palette.textMuted,
                             ),
@@ -323,7 +681,13 @@ class _SectionBody extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final vm = ref.read(aiSettingsViewModelProvider.notifier);
+    final vm = ref.read(aiSettingsViewModelProvider(state.scope).notifier);
+
+    if (state.isWorkspaceScope && !state.hasSelectedWorkspace) {
+      return const AiSettingsEmptyState(
+        text: 'Choose a recent workspace or open a directory to start editing workspace-local Skills, MCP, Agents, and Permissions.',
+      );
+    }
 
     return switch (state.selectedSection) {
       AiSettingsSection.cli => CliSettingsSection(state: state, vm: vm),
@@ -413,7 +777,7 @@ class _NavItem extends StatelessWidget {
                                   letterSpacing: 0.5,
                                   fontFamily: 'Inter',
                                 ).copyWith(
-                                  fontFamily: 'Space Grotesk', // Override for titles
+                                  fontFamily: 'Space Grotesk',
                                 ),
                               ),
                               const SizedBox(height: 2),
@@ -498,4 +862,36 @@ class _BannerStack extends StatelessWidget {
       ],
     );
   }
+}
+
+String _titleForScope(AiSettingsScope scope) {
+  return switch (scope) {
+    AiSettingsScope.global => 'Global Settings',
+    AiSettingsScope.workspace => 'Workspace Settings',
+  };
+}
+
+String _subtitleForScope(AiSettingsScope scope) {
+  return switch (scope) {
+    AiSettingsScope.global =>
+      'Manage global AI runtime behavior, provider routing, skill access, MCP transport, and agent permissions for the entire desktop runtime.',
+    AiSettingsScope.workspace =>
+      'Manage workspace-local Skills, MCP, Agents, and Permissions overrides without duplicating global CLI or Provider configuration.',
+  };
+}
+
+List<String> _chipsForState(AiSettingsState state) {
+  final effectiveSource = state.effective?.workspaceSource;
+  if (!state.isWorkspaceScope) {
+    return [
+      'Desktop Runtime',
+      effectiveSource == null ? '~/.sirix/config.toml' : 'effective: $effectiveSource',
+    ];
+  }
+
+  return [
+    'Workspace Local',
+    if (effectiveSource != null) 'effective: $effectiveSource',
+    if (effectiveSource == null && state.selectedWorkspaceRoot != null) 'effective: global defaults',
+  ];
 }

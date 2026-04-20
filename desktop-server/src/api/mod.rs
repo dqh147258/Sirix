@@ -33,6 +33,19 @@ pub fn router(state: AppState) -> Router {
             "/ai/config",
             get(ai::get_ai_config).patch(ai::set_ai_config),
         )
+        .route("/ai/workspaces/recent", get(ai::get_recent_workspaces))
+        .route(
+            "/ai/workspaces/select",
+            axum::routing::post(ai::select_workspace),
+        )
+        .route(
+            "/ai/workspaces/settings",
+            get(ai::get_workspace_settings).patch(ai::save_workspace_settings),
+        )
+        .route(
+            "/ai/workspace-settings",
+            get(ai::get_workspace_settings).patch(ai::save_workspace_settings),
+        )
         .route(
             "/ai/config/system-prompt-preview",
             axum::routing::post(ai::preview_agent_system_prompt),
@@ -113,4 +126,68 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/ws", get(ws::local_ws_upgrade))
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::router;
+    use crate::{
+        app::state::AppState,
+        bootstrap::config::{
+            AppConfig, AuthorizationConfig, BackendConfig, CaptureConfig, LocalWsConfig,
+            LoggingConfig, StreamConfig,
+        },
+    };
+
+    fn test_state() -> AppState {
+        AppState::new(
+            AppConfig {
+                backend: BackendConfig {
+                    base_url: "http://127.0.0.1:3000".to_string(),
+                    health_path: "/health".to_string(),
+                    heartbeat_path: "/heartbeat".to_string(),
+                    heartbeat_interval_seconds: 30,
+                    device_id: uuid::Uuid::new_v4().to_string(),
+                    event_ws_path: "/events".to_string(),
+                    session_decision_path: "/session-decision".to_string(),
+                    webrtc_signal_path: "/webrtc".to_string(),
+                    runtime_settings_path: "/runtime-settings".to_string(),
+                    runtime_logs_path: "/runtime-logs".to_string(),
+                    pending_sessions_path: "/pending-sessions".to_string(),
+                    screen_state_path: "/screen-state".to_string(),
+                },
+                local_ws: LocalWsConfig {
+                    host: "127.0.0.1".to_string(),
+                    port_range_start: 18080,
+                    port_range_end: 18090,
+                },
+                authorization: AuthorizationConfig::default(),
+                capture: CaptureConfig {
+                    snapshot_interval_seconds: 5,
+                    snapshot_width: 1280,
+                },
+                stream: StreamConfig {
+                    default_profile: "balanced".to_string(),
+                    default_fps: 15,
+                    auto_adapt: true,
+                },
+                logging: LoggingConfig {
+                    level: "info".to_string(),
+                    json: false,
+                },
+            },
+            18080,
+        )
+    }
+
+    #[test]
+    fn router_builds_with_workspace_routes_once() {
+        let result = std::panic::catch_unwind(|| {
+            let _ = router(test_state());
+        });
+        assert!(
+            result.is_ok(),
+            "router should build without overlapping workspace route panics"
+        );
+    }
 }

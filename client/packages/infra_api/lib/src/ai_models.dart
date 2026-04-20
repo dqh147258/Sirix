@@ -104,6 +104,81 @@ class CapabilityRulesConfigModel {
   }
 }
 
+/// Keep Dart-side rule handling aligned with the Desktop Server merge logic so
+/// the settings UI can preview layered/global/workspace permission behavior
+/// without round-tripping every interaction through Rust.
+String normalizeCapabilityRuleKey(String raw) {
+  return raw
+      .trim()
+      .split('.')
+      .map((segment) => segment.trim())
+      .where((segment) => segment.isNotEmpty)
+      .join('.')
+      .toLowerCase();
+}
+
+ApprovalMode capabilityRuleModeFor(CapabilityRulesConfigModel config, String key) {
+  final normalizedKey = normalizeCapabilityRuleKey(key);
+  for (final rule in config.rules) {
+    if (normalizeCapabilityRuleKey(rule.key) == normalizedKey) {
+      return rule.mode;
+    }
+  }
+  return config.mode;
+}
+
+CapabilityRulesConfigModel mergeCapabilityRules(
+  CapabilityRulesConfigModel base,
+  CapabilityRulesConfigModel overlay,
+) {
+  final mergedRules = <CapabilityApprovalRuleModel>[
+    ...base.rules,
+    for (final rule in overlay.rules)
+      CapabilityApprovalRuleModel(
+        key: normalizeCapabilityRuleKey(rule.key),
+        mode: rule.mode,
+      ),
+  ];
+  final dedupedByKey = <String, CapabilityApprovalRuleModel>{};
+  for (final rule in mergedRules) {
+    final normalizedKey = normalizeCapabilityRuleKey(rule.key);
+    if (normalizedKey.isEmpty) {
+      continue;
+    }
+    dedupedByKey[normalizedKey] = rule.copyWith(key: normalizedKey);
+  }
+  return CapabilityRulesConfigModel(
+    version: base.version > overlay.version ? base.version : overlay.version,
+    mode: overlay.mode,
+    rules: dedupedByKey.values.toList(growable: false),
+  );
+}
+
+/// Build the minimal overlay that transforms [base] into [target] when both
+/// are merged with the same Desktop Server semantics (`base -> overlay`).
+CapabilityRulesConfigModel diffCapabilityRulesOverlay(
+  CapabilityRulesConfigModel base,
+  CapabilityRulesConfigModel target,
+) {
+  final relevantKeys = <String>{
+    for (final rule in base.rules) normalizeCapabilityRuleKey(rule.key),
+    for (final rule in target.rules) normalizeCapabilityRuleKey(rule.key),
+  }..removeWhere((key) => key.isEmpty);
+  final overlayRules = <CapabilityApprovalRuleModel>[
+    for (final key in relevantKeys)
+      if (capabilityRuleModeFor(base, key) != capabilityRuleModeFor(target, key))
+        CapabilityApprovalRuleModel(
+          key: key,
+          mode: capabilityRuleModeFor(target, key),
+        ),
+  ];
+  return CapabilityRulesConfigModel(
+    version: base.version > target.version ? base.version : target.version,
+    mode: target.mode,
+    rules: overlayRules,
+  );
+}
+
 String _providerKindJson(ProviderKind value) {
   return switch (value) {
     ProviderKind.openAiCompatible => 'open_ai_compatible',
@@ -871,6 +946,23 @@ class SirixAiConfig {
     };
   }
 
+  /// Workspace Settings intentionally persists only the user-approved
+  /// workspace-owned sections. The desktop server projects this reduced payload
+  /// into `<workspace>/.sirix/config.toml` so global-only `CLI` / `Providers`
+  /// never leak into workspace overrides by accident.
+  Map<String, dynamic> toWorkspaceOwnedJson() {
+    return {
+      'version': version,
+      'skills': skills.map((item) => item.toJson()).toList(growable: false),
+      'mcp': mcp.toJson(),
+      'builtin_approvals': builtinApprovals.toJson(),
+      'skill_approvals': skillApprovals.toJson(),
+      'mcp_approvals': mcpApprovals.toJson(),
+      'mcp_servers': mcpServers.map((item) => item.toJson()).toList(growable: false),
+      'agents': agents.map((item) => item.toJson()).toList(growable: false),
+    };
+  }
+
   SirixAiConfig copyWith({
     int? version,
     CliSettingsConfig? cli,
@@ -917,6 +1009,169 @@ class EffectiveSirixAiConfig {
       ),
       workspacePath: json['workspace_path'] as String?,
       workspaceSource: json['workspace_source'] as String?,
+    );
+  }
+}
+
+@immutable
+class WorkspaceEditableAiConfig {
+  const WorkspaceEditableAiConfig({
+    this.version = 1,
+    this.skills = const [],
+    this.mcp = const McpGlobalConfigModel(),
+    this.builtinApprovals = const CapabilityRulesConfigModel(),
+    this.skillApprovals = const CapabilityRulesConfigModel(),
+    this.mcpApprovals = const CapabilityRulesConfigModel(),
+    this.mcpServers = const [],
+    this.agents = const [],
+  });
+
+  final int version;
+  final List<SkillConfigModel> skills;
+  final McpGlobalConfigModel mcp;
+  final CapabilityRulesConfigModel builtinApprovals;
+  final CapabilityRulesConfigModel skillApprovals;
+  final CapabilityRulesConfigModel mcpApprovals;
+  final List<McpServerConfigModel> mcpServers;
+  final List<AgentConfigModel> agents;
+
+  factory WorkspaceEditableAiConfig.fromJson(Map<String, dynamic> json) {
+    return WorkspaceEditableAiConfig(
+      version: (json['version'] as num?)?.toInt() ?? 1,
+      skills: (json['skills'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(SkillConfigModel.fromJson)
+          .toList(growable: false),
+      mcp: McpGlobalConfigModel.fromJson(
+        (json['mcp'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      builtinApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['builtin_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      skillApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['skill_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      mcpApprovals: CapabilityRulesConfigModel.fromJson(
+        (json['mcp_approvals'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      mcpServers: (json['mcp_servers'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(McpServerConfigModel.fromJson)
+          .toList(growable: false),
+      agents: (json['agents'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(AgentConfigModel.fromJson)
+          .toList(growable: false),
+    );
+  }
+
+  /// Keep the workspace payload deliberately smaller than `SirixAiConfig`.
+  /// The desktop server persists this JSON directly into `.sirix/config.toml`,
+  /// so omitting global-only `cli` / `providers` here prevents accidental
+  /// workspace overrides when UI code reuses generic settings editors.
+  Map<String, dynamic> toJson() {
+    return {
+      'version': version,
+      'skills': skills.map((item) => item.toJson()).toList(growable: false),
+      'mcp': mcp.toJson(),
+      'builtin_approvals': builtinApprovals.toJson(),
+      'skill_approvals': skillApprovals.toJson(),
+      'mcp_approvals': mcpApprovals.toJson(),
+      'mcp_servers': mcpServers.map((item) => item.toJson()).toList(growable: false),
+      'agents': agents.map((item) => item.toJson()).toList(growable: false),
+    };
+  }
+
+  WorkspaceEditableAiConfig copyWith({
+    int? version,
+    List<SkillConfigModel>? skills,
+    McpGlobalConfigModel? mcp,
+    CapabilityRulesConfigModel? builtinApprovals,
+    CapabilityRulesConfigModel? skillApprovals,
+    CapabilityRulesConfigModel? mcpApprovals,
+    List<McpServerConfigModel>? mcpServers,
+    List<AgentConfigModel>? agents,
+  }) {
+    return WorkspaceEditableAiConfig(
+      version: version ?? this.version,
+      skills: skills ?? this.skills,
+      mcp: mcp ?? this.mcp,
+      builtinApprovals: builtinApprovals ?? this.builtinApprovals,
+      skillApprovals: skillApprovals ?? this.skillApprovals,
+      mcpApprovals: mcpApprovals ?? this.mcpApprovals,
+      mcpServers: mcpServers ?? this.mcpServers,
+      agents: agents ?? this.agents,
+    );
+  }
+}
+
+@immutable
+class RecentWorkspaceEntry {
+  const RecentWorkspaceEntry({
+    required this.workspaceRoot,
+    required this.displayName,
+    this.hasSirixConfig = false,
+    this.hasCodexConfig = false,
+    this.lastSelectedAt = '',
+  });
+
+  final String workspaceRoot;
+  final String displayName;
+  final bool hasSirixConfig;
+  final bool hasCodexConfig;
+  final String lastSelectedAt;
+
+  factory RecentWorkspaceEntry.fromJson(Map<String, dynamic> json) {
+    return RecentWorkspaceEntry(
+      workspaceRoot: json['workspace_root'] as String? ?? '',
+      displayName: json['display_name'] as String? ?? '',
+      hasSirixConfig: json['has_sirix_config'] as bool? ?? false,
+      hasCodexConfig: json['has_codex_config'] as bool? ?? false,
+      lastSelectedAt: json['last_selected_at'] as String? ?? '',
+    );
+  }
+}
+
+@immutable
+class WorkspaceSettingsResponseModel {
+  const WorkspaceSettingsResponseModel({
+    required this.workspaceRoot,
+    required this.editableConfig,
+    required this.editableShellRules,
+    required this.effectiveConfig,
+    required this.effectiveShellRules,
+    this.effectiveWorkspaceSource,
+    this.hasSirixConfig = false,
+    this.hasCodexConfig = false,
+  });
+
+  final String workspaceRoot;
+  final WorkspaceEditableAiConfig editableConfig;
+  final ShellRulesConfigModel editableShellRules;
+  final SirixAiConfig effectiveConfig;
+  final ShellRulesConfigModel effectiveShellRules;
+  final String? effectiveWorkspaceSource;
+  final bool hasSirixConfig;
+  final bool hasCodexConfig;
+
+  factory WorkspaceSettingsResponseModel.fromJson(Map<String, dynamic> json) {
+    return WorkspaceSettingsResponseModel(
+      workspaceRoot: json['workspace_root'] as String? ?? '',
+      editableConfig: WorkspaceEditableAiConfig.fromJson(
+        (json['editable_config'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      editableShellRules: ShellRulesConfigModel.fromJson(
+        (json['editable_shell_rules'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      effectiveConfig: SirixAiConfig.fromJson(
+        (json['effective_config'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      effectiveShellRules: ShellRulesConfigModel.fromJson(
+        (json['effective_shell_rules'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+      ),
+      effectiveWorkspaceSource: json['effective_workspace_source'] as String?,
+      hasSirixConfig: json['has_sirix_config'] as bool? ?? false,
+      hasCodexConfig: json['has_codex_config'] as bool? ?? false,
     );
   }
 }

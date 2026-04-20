@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
+use chrono::Utc;
 use codex_core::build_responses_request_preview;
 use codex_core::config::Config;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ const DEFAULT_AGENT_DESCRIPTION: &str =
     "Built-in Codex agent with the standard Codex system prompt.";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_MODEL_ID: &str = "gpt-5";
+const SIRIX_DIR_NAME: &str = ".sirix";
+const CODEX_DIR_NAME: &str = ".codex";
 const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
 const SIRIX_AGENT_ROLES_DIR: &str = "agent-roles";
 pub const SIRIX_AGENT_RUNTIME_FILE_NAME: &str = "sirix-agent-runtime.json";
@@ -35,6 +38,9 @@ const SIRIX_SHARED_STORAGE_MIGRATION_SENTINEL: &str = ".legacy-session-storage-m
 const SIRIX_SESSIONS_SUBDIR: &str = "sessions";
 const SIRIX_ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
 const SIRIX_SESSION_INDEX_FILE_NAME: &str = "session_index.jsonl";
+const SIRIX_RECENT_WORKSPACES_FILE_NAME: &str = "desktop-recent-workspaces.json";
+const SIRIX_LEGACY_RECENT_WORKSPACES_FILE_NAME: &str = "recent-workspaces.json";
+const SIRIX_RECENT_WORKSPACES_LIMIT: usize = 50;
 static PROMPT_PREVIEW_RUNTIME_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -395,6 +401,134 @@ pub struct EffectiveSirixConfig {
     pub workspace_source: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceEditableConfig {
+    #[serde(default = "default_config_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub skills: Vec<SkillConfig>,
+    #[serde(default)]
+    pub mcp: McpGlobalConfig,
+    #[serde(default)]
+    pub builtin_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub skill_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub mcp_approvals: CapabilityRulesConfig,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
+}
+
+impl Default for WorkspaceEditableConfig {
+    fn default() -> Self {
+        Self {
+            version: default_config_version(),
+            skills: Vec::new(),
+            mcp: McpGlobalConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
+            mcp_servers: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+}
+
+impl WorkspaceEditableConfig {
+    /// Workspace Settings intentionally excludes the user-declared global-only
+    /// `cli` and `providers` sections. We project those fields out on read so
+    /// save flows never accidentally echo inherited global state into
+    /// `<workspace>/.sirix/config.toml`.
+    pub fn from_sirix_config(config: SirixConfig) -> Self {
+        Self {
+            version: config.version,
+            skills: config.skills,
+            mcp: config.mcp,
+            builtin_approvals: config.builtin_approvals,
+            skill_approvals: config.skill_approvals,
+            mcp_approvals: config.mcp_approvals,
+            mcp_servers: config.mcp_servers,
+            agents: config.agents,
+        }
+    }
+
+    pub fn as_workspace_config(&self) -> SirixConfig {
+        // Workspace Settings persists only project-local sections. We still
+        // materialize a full `SirixConfig` here so normalization/validation can
+        // reuse the existing merge rules, but the on-disk serializer continues
+        // to be `WorkspaceEditableConfig`, which omits `cli` and `providers`.
+        SirixConfig {
+            version: self.version,
+            cli: CliSettings::default(),
+            providers: Vec::new(),
+            skills: self.skills.clone(),
+            mcp: self.mcp.clone(),
+            builtin_approvals: self.builtin_approvals.clone(),
+            skill_approvals: self.skill_approvals.clone(),
+            mcp_approvals: self.mcp_approvals.clone(),
+            mcp_servers: self.mcp_servers.clone(),
+            agents: self.agents.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RecentWorkspacesRegistry {
+    #[serde(default = "default_config_version")]
+    version: u32,
+    #[serde(default)]
+    items: Vec<RecentWorkspaceRecord>,
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+impl Default for RecentWorkspacesRegistry {
+    fn default() -> Self {
+        Self {
+            version: default_config_version(),
+            items: Vec::new(),
+            paths: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RecentWorkspaceRecord {
+    workspace_root: String,
+    last_selected_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RecentWorkspaceItem {
+    pub workspace_root: String,
+    pub display_name: String,
+    pub has_sirix_config: bool,
+    pub has_codex_config: bool,
+    pub last_selected_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceSettingsSnapshot {
+    pub workspace_root: String,
+    pub editable_config: WorkspaceEditableConfig,
+    pub editable_shell_rules: ShellRulesConfig,
+    pub effective_config: SirixConfig,
+    pub effective_shell_rules: ShellRulesConfig,
+    pub effective_workspace_source: Option<String>,
+    pub has_sirix_config: bool,
+    pub has_codex_config: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceRootMetadata {
+    workspace_root: PathBuf,
+    effective_workspace_source: Option<PathBuf>,
+    has_sirix_config: bool,
+    has_codex_config: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiLaunchConfig {
     pub effective_config: SirixConfig,
@@ -472,16 +606,65 @@ impl SirixConfigStore {
         self.sirix_home.join("tool-rules.json")
     }
 
+    pub fn recent_workspaces_path(&self) -> PathBuf {
+        self.sirix_home.join(SIRIX_RECENT_WORKSPACES_FILE_NAME)
+    }
+
+    fn legacy_recent_workspaces_path(&self) -> PathBuf {
+        self.sirix_home
+            .join(SIRIX_LEGACY_RECENT_WORKSPACES_FILE_NAME)
+    }
+
     pub fn workspace_shell_rules_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(".sirix").join("shell-rules.json")
+        cwd.join(SIRIX_DIR_NAME).join("shell-rules.json")
     }
 
     pub fn workspace_tool_rules_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(".sirix").join("tool-rules.json")
+        cwd.join(SIRIX_DIR_NAME).join("tool-rules.json")
     }
 
     pub fn workspace_config_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(".sirix").join("config.toml")
+        cwd.join(SIRIX_DIR_NAME).join("config.toml")
+    }
+
+    /// Normalize a user-facing workspace selection into the canonical
+    /// workspace root. This keeps `.sirix`-folder picks, effective-config
+    /// preview, prompt preview, workspace saves, and recent-workspace storage
+    /// on one shared interpretation of "workspace".
+    pub fn normalize_workspace_root(&self, candidate: &Path) -> anyhow::Result<Option<PathBuf>> {
+        let raw = if candidate
+            .file_name()
+            .is_some_and(|name| name == std::ffi::OsStr::new(SIRIX_DIR_NAME))
+        {
+            candidate.parent().map(PathBuf::from)
+        } else {
+            Some(candidate.to_path_buf())
+        };
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        if !raw.is_dir() {
+            return Ok(None);
+        }
+        let canonical = normalize_canonical_workspace_path(
+            fs::canonicalize(&raw)
+                .with_context(|| format!("failed to resolve workspace {}", raw.display()))?,
+        )
+        .with_context(|| format!("failed to normalize workspace {}", raw.display()))?;
+        if !canonical.is_dir() {
+            return Ok(None);
+        }
+        Ok(Some(canonical))
+    }
+
+    pub fn normalize_workspace_root_str(
+        &self,
+        raw: Option<&str>,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+            return Ok(None);
+        };
+        self.normalize_workspace_root(Path::new(raw))
     }
 
     fn shared_codex_home(&self) -> PathBuf {
@@ -559,6 +742,16 @@ impl SirixConfigStore {
         parse_config_with_compat(&raw, &path).map(Some)
     }
 
+    pub fn load_workspace_editable_config(
+        &self,
+        cwd: &Path,
+    ) -> anyhow::Result<WorkspaceEditableConfig> {
+        Ok(self
+            .load_workspace_config(cwd)?
+            .map(WorkspaceEditableConfig::from_sirix_config)
+            .unwrap_or_default())
+    }
+
     pub fn save_workspace_config(&self, cwd: &Path, config: &SirixConfig) -> anyhow::Result<()> {
         let mut normalized = config.clone();
         normalize_sirix_config(&mut normalized);
@@ -569,6 +762,25 @@ impl SirixConfigStore {
         }
         let serialized = toml::to_string_pretty(&normalized)
             .context("failed to serialize sirix workspace config")?;
+        fs::write(&path, serialized)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        Ok(())
+    }
+
+    pub fn save_workspace_editable_config(
+        &self,
+        cwd: &Path,
+        config: &WorkspaceEditableConfig,
+    ) -> anyhow::Result<()> {
+        let mut normalized = config.clone();
+        normalize_workspace_editable_config(&mut normalized);
+        let path = self.workspace_config_path(cwd);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let serialized = toml::to_string_pretty(&normalized)
+            .context("failed to serialize workspace-only sirix config")?;
         fs::write(&path, serialized)
             .with_context(|| format!("failed to write {}", path.display()))?;
         Ok(())
@@ -759,30 +971,134 @@ impl SirixConfigStore {
         cwd: Option<&str>,
     ) -> anyhow::Result<EffectiveSirixConfig> {
         let global = self.load_global()?;
-        let Some(cwd) = cwd.filter(|value| !value.trim().is_empty()) else {
+        let Some(workspace_root) = self.normalize_workspace_root_str(cwd)? else {
             return Ok(EffectiveSirixConfig {
                 config: global,
                 workspace_path: None,
                 workspace_source: None,
             });
         };
+        let metadata = self.workspace_root_metadata(workspace_root)?;
+        self.effective_for_workspace_metadata(global, &metadata)
+    }
 
-        let workspace_dir = PathBuf::from(cwd);
-        if !workspace_dir.is_dir() {
-            return Ok(EffectiveSirixConfig {
-                config: global,
-                workspace_path: None,
-                workspace_source: None,
-            });
+    pub fn load_workspace_settings(
+        &self,
+        candidate: &Path,
+    ) -> anyhow::Result<WorkspaceSettingsSnapshot> {
+        let Some(workspace_root) = self.normalize_workspace_root(candidate)? else {
+            anyhow::bail!("workspace path must point to a directory");
+        };
+        // Treat both explicit "Open" picks and direct settings loads as recent
+        // workspace selections so the recents list stays in sync even before a
+        // user performs the first workspace-local save.
+        self.upsert_recent_workspace(workspace_root.as_path())?;
+        self.workspace_settings_snapshot(workspace_root.as_path())
+    }
+
+    pub fn save_workspace_settings(
+        &self,
+        candidate: &Path,
+        editable_config: &WorkspaceEditableConfig,
+        editable_shell_rules: &ShellRulesConfig,
+    ) -> anyhow::Result<WorkspaceSettingsSnapshot> {
+        let Some(workspace_root) = self.normalize_workspace_root(candidate)? else {
+            anyhow::bail!("workspace path must point to a directory");
+        };
+        let global = self.load_global()?;
+        let existing_workspace_config = self.load_workspace_config(workspace_root.as_path())?;
+        let mut normalized_editable_config = editable_config.clone();
+        normalize_workspace_editable_config(&mut normalized_editable_config);
+        if normalized_editable_config.version == 0 {
+            normalized_editable_config.version = existing_workspace_config
+                .as_ref()
+                .map(|config| config.version)
+                .unwrap_or(global.version.max(default_config_version()));
         }
 
-        let sirix_workspace = workspace_dir.join(".sirix").join("config.toml");
-        if sirix_workspace.is_file() {
-            let raw = fs::read_to_string(&sirix_workspace)
+        // Workspace-local agents intentionally keep referencing provider/model
+        // ids from the global/effective catalog. Validate the merged view so a
+        // project override can still target those global providers while the
+        // workspace file itself remains free of `providers`/`cli`.
+        let validation_config =
+            merge_sirix_config(global, normalized_editable_config.as_workspace_config());
+        validate_sirix_config(&validation_config)?;
+
+        self.save_workspace_editable_config(workspace_root.as_path(), &normalized_editable_config)?;
+        self.save_workspace_shell_rules(workspace_root.as_path(), editable_shell_rules)?;
+        self.upsert_recent_workspace(workspace_root.as_path())?;
+        self.workspace_settings_snapshot(workspace_root.as_path())
+    }
+
+    pub fn workspace_source_metadata(&self, cwd: &Path) -> (Option<String>, bool, bool) {
+        let metadata = self
+            .normalize_workspace_root(cwd)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| cwd.to_path_buf());
+        self.workspace_root_metadata(metadata)
+            .map(|metadata| {
+                (
+                    metadata
+                        .effective_workspace_source
+                        .as_deref()
+                        .map(display_path_string),
+                    metadata.has_sirix_config,
+                    metadata.has_codex_config,
+                )
+            })
+            .unwrap_or((None, false, false))
+    }
+
+    pub fn load_recent_workspaces(&self) -> anyhow::Result<Vec<RecentWorkspaceItem>> {
+        let registry = self.load_recent_workspace_registry()?;
+        registry
+            .items
+            .into_iter()
+            .map(|record| self.recent_workspace_item(record))
+            .collect()
+    }
+
+    pub fn upsert_recent_workspace(
+        &self,
+        candidate: &Path,
+    ) -> anyhow::Result<Vec<RecentWorkspaceItem>> {
+        let Some(workspace_root) = self.normalize_workspace_root(candidate)? else {
+            anyhow::bail!("workspace path must point to a directory");
+        };
+        let workspace_root = display_path_string(workspace_root.as_path());
+        let mut registry = self.load_recent_workspace_registry()?;
+        registry
+            .items
+            .retain(|item| item.workspace_root != workspace_root);
+        registry.items.insert(
+            0,
+            RecentWorkspaceRecord {
+                workspace_root,
+                last_selected_at: Utc::now().to_rfc3339(),
+            },
+        );
+        registry.items.truncate(SIRIX_RECENT_WORKSPACES_LIMIT);
+        registry.paths.clear();
+        self.save_recent_workspace_registry(&registry)?;
+        self.load_recent_workspaces()
+    }
+
+    fn effective_for_workspace_metadata(
+        &self,
+        global: SirixConfig,
+        metadata: &WorkspaceRootMetadata,
+    ) -> anyhow::Result<EffectiveSirixConfig> {
+        if metadata.has_sirix_config {
+            let sirix_workspace = metadata
+                .effective_workspace_source
+                .as_ref()
+                .context("workspace metadata missing .sirix config path")?;
+            let raw = fs::read_to_string(sirix_workspace)
                 .with_context(|| format!("failed to read {}", sirix_workspace.display()))?;
-            let workspace = parse_config_with_compat(&raw, &sirix_workspace)?;
+            let workspace = parse_config_with_compat(&raw, sirix_workspace)?;
             let workspace_cli_close_override =
-                extract_cli_close_confirmation_override(&raw, &sirix_workspace)?;
+                extract_cli_close_confirmation_override(&raw, sirix_workspace)?;
             let mut merged = merge_sirix_config(global, workspace);
             // `CliSettings` keeps this toggle as a concrete `bool`, so regular deserialization
             // cannot tell whether the workspace omitted the field or explicitly set it to
@@ -794,24 +1110,171 @@ impl SirixConfigStore {
             }
             return Ok(EffectiveSirixConfig {
                 config: merged,
-                workspace_path: Some(workspace_dir.display().to_string()),
-                workspace_source: Some(sirix_workspace.display().to_string()),
+                workspace_path: Some(display_path_string(metadata.workspace_root.as_path())),
+                workspace_source: Some(display_path_string(sirix_workspace.as_path())),
             });
         }
 
-        let codex_workspace = workspace_dir.join(".codex").join("config.toml");
-        if codex_workspace.is_file() {
+        if metadata.has_codex_config {
             return Ok(EffectiveSirixConfig {
                 config: global,
-                workspace_path: Some(workspace_dir.display().to_string()),
-                workspace_source: Some(codex_workspace.display().to_string()),
+                workspace_path: Some(display_path_string(metadata.workspace_root.as_path())),
+                workspace_source: metadata
+                    .effective_workspace_source
+                    .as_deref()
+                    .map(display_path_string),
             });
         }
 
         Ok(EffectiveSirixConfig {
             config: global,
-            workspace_path: Some(workspace_dir.display().to_string()),
+            workspace_path: Some(display_path_string(metadata.workspace_root.as_path())),
             workspace_source: None,
+        })
+    }
+
+    fn workspace_root_metadata(
+        &self,
+        workspace_root: PathBuf,
+    ) -> anyhow::Result<WorkspaceRootMetadata> {
+        let sirix_workspace = self.workspace_config_path(workspace_root.as_path());
+        let codex_workspace = workspace_root.join(CODEX_DIR_NAME).join("config.toml");
+        let has_sirix_config = sirix_workspace.is_file();
+        let has_codex_config = codex_workspace.is_file();
+        let effective_workspace_source = if has_sirix_config {
+            Some(sirix_workspace)
+        } else if has_codex_config {
+            // `.codex` is surfaced only as informational metadata for Workspace
+            // Settings. The caller can explain that adjacent config exists, but
+            // this feature never parses or merges `.codex` into Sirix settings.
+            Some(codex_workspace)
+        } else {
+            None
+        };
+        Ok(WorkspaceRootMetadata {
+            workspace_root,
+            effective_workspace_source,
+            has_sirix_config,
+            has_codex_config,
+        })
+    }
+
+    fn workspace_settings_snapshot(
+        &self,
+        workspace_root: &Path,
+    ) -> anyhow::Result<WorkspaceSettingsSnapshot> {
+        let global = self.load_global()?;
+        let metadata = self.workspace_root_metadata(workspace_root.to_path_buf())?;
+        let editable_config = self
+            .load_workspace_config(workspace_root)?
+            .map(WorkspaceEditableConfig::from_sirix_config)
+            .unwrap_or_else(|| WorkspaceEditableConfig {
+                version: global.version,
+                ..WorkspaceEditableConfig::default()
+            });
+        let editable_shell_rules = self
+            .load_workspace_shell_rules(workspace_root)?
+            .unwrap_or_default();
+        let effective = self.effective_for_workspace_metadata(global, &metadata)?;
+        let effective_shell_rules = self.effective_shell_rules(workspace_root)?;
+        Ok(WorkspaceSettingsSnapshot {
+            workspace_root: display_path_string(metadata.workspace_root.as_path()),
+            editable_config,
+            editable_shell_rules,
+            effective_config: effective.config,
+            effective_shell_rules,
+            effective_workspace_source: metadata
+                .effective_workspace_source
+                .as_deref()
+                .map(display_path_string),
+            has_sirix_config: metadata.has_sirix_config,
+            has_codex_config: metadata.has_codex_config,
+        })
+    }
+
+    fn load_recent_workspace_registry(&self) -> anyhow::Result<RecentWorkspacesRegistry> {
+        let path = self.recent_workspaces_path();
+        let legacy_path = self.legacy_recent_workspaces_path();
+        let source_path = if path.is_file() {
+            path
+        } else if legacy_path.is_file() {
+            legacy_path
+        } else {
+            return Ok(RecentWorkspacesRegistry::default());
+        };
+        let raw = fs::read_to_string(&source_path)
+            .with_context(|| format!("failed to read {}", source_path.display()))?;
+        let mut registry = serde_json::from_str::<RecentWorkspacesRegistry>(&raw)
+            .with_context(|| format!("failed to parse {}", source_path.display()))?;
+        if registry.items.is_empty() && !registry.paths.is_empty() {
+            registry.items = registry
+                .paths
+                .iter()
+                .map(|workspace_root| RecentWorkspaceRecord {
+                    workspace_root: workspace_root.clone(),
+                    last_selected_at: String::new(),
+                })
+                .collect();
+        }
+        registry.items = self.normalize_recent_workspace_records(registry.items);
+        registry.paths.clear();
+        Ok(registry)
+    }
+
+    fn save_recent_workspace_registry(
+        &self,
+        registry: &RecentWorkspacesRegistry,
+    ) -> anyhow::Result<()> {
+        let path = self.recent_workspaces_path();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        let serialized = serde_json::to_string_pretty(registry)
+            .context("failed to serialize recent workspaces")?;
+        fs::write(&path, serialized).with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    fn normalize_recent_workspace_records(
+        &self,
+        records: Vec<RecentWorkspaceRecord>,
+    ) -> Vec<RecentWorkspaceRecord> {
+        let mut seen = HashSet::<String>::new();
+        let mut normalized = Vec::new();
+        for mut record in records {
+            let trimmed = record.workspace_root.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(Some(workspace_root)) = self.normalize_workspace_root(Path::new(trimmed)) {
+                record.workspace_root = display_path_string(workspace_root.as_path());
+            } else {
+                record.workspace_root = trimmed.to_string();
+            }
+            if !seen.insert(record.workspace_root.clone()) {
+                continue;
+            }
+            normalized.push(record);
+            if normalized.len() == SIRIX_RECENT_WORKSPACES_LIMIT {
+                break;
+            }
+        }
+        normalized
+    }
+
+    fn recent_workspace_item(
+        &self,
+        record: RecentWorkspaceRecord,
+    ) -> anyhow::Result<RecentWorkspaceItem> {
+        let path = PathBuf::from(&record.workspace_root);
+        let (_, has_sirix_config, has_codex_config) =
+            self.workspace_source_metadata(path.as_path());
+        Ok(RecentWorkspaceItem {
+            display_name: workspace_display_name(path.as_path()),
+            workspace_root: record.workspace_root,
+            has_sirix_config,
+            has_codex_config,
+            last_selected_at: record.last_selected_at,
         })
     }
 
@@ -822,6 +1285,9 @@ impl SirixConfigStore {
         session_id: Uuid,
     ) -> anyhow::Result<AiLaunchConfig> {
         let effective = self.effective_for_workspace(cwd.to_str())?;
+        let workspace_root = self
+            .normalize_workspace_root(cwd)?
+            .unwrap_or_else(|| cwd.to_path_buf());
         let config = effective.config;
         let agent = resolve_agent(&config, agent_id)?;
         let session_providers = config
@@ -864,7 +1330,7 @@ impl SirixConfigStore {
             session_providers,
             codex_home,
             session_storage_dir,
-            workspace_root: cwd.to_path_buf(),
+            workspace_root,
             workspace_source: effective.workspace_source.map(PathBuf::from),
         })
     }
@@ -1675,6 +2141,144 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
             );
         }
     }
+}
+
+fn normalize_workspace_editable_config(config: &mut WorkspaceEditableConfig) {
+    let default_builtin_tools = default_builtin_tool_ids();
+    let all_skill_ids = config
+        .skills
+        .iter()
+        .map(|skill| skill.id.clone())
+        .collect::<Vec<_>>();
+    let all_mcp_ids = config
+        .mcp_servers
+        .iter()
+        .map(|server| server.id.clone())
+        .collect::<Vec<_>>();
+
+    for skill in &mut config.skills {
+        skill.id = skill.id.trim().to_string();
+        skill.name = skill.name.trim().to_string();
+        skill.path = skill.path.trim().to_string();
+    }
+    config
+        .skills
+        .retain(|skill| !skill.id.is_empty() && !skill.name.is_empty() && !skill.path.is_empty());
+    dedup_by_key(&mut config.skills, |skill| skill.id.clone());
+
+    normalize_capability_rules(&mut config.builtin_approvals);
+    normalize_capability_rules(&mut config.skill_approvals);
+    normalize_capability_rules(&mut config.mcp_approvals);
+
+    for server in &mut config.mcp_servers {
+        server.id = server.id.trim().to_string();
+        server.name = server.name.trim().to_string();
+        server.enabled_tools = normalize_string_list(std::mem::take(&mut server.enabled_tools));
+        server.disabled_tools = normalize_string_list(std::mem::take(&mut server.disabled_tools));
+    }
+    config
+        .mcp_servers
+        .retain(|server| !server.id.is_empty() && !server.name.is_empty());
+    dedup_by_key(&mut config.mcp_servers, |server| server.id.clone());
+
+    for agent in &mut config.agents {
+        normalize_workspace_agent(agent, &all_skill_ids, &all_mcp_ids, &default_builtin_tools);
+    }
+    config
+        .agents
+        .retain(|agent| !agent.id.is_empty() && !agent.name.is_empty());
+    dedup_by_key(&mut config.agents, |agent| agent.id.clone());
+}
+
+fn normalize_workspace_agent(
+    agent: &mut AgentConfig,
+    all_skill_ids: &[String],
+    all_mcp_ids: &[String],
+    default_builtin_tools: &[String],
+) {
+    if agent.builtin_tool_ids.is_empty() && agent.legacy_builtin_tools_enabled.unwrap_or(true) {
+        agent.builtin_tool_ids = default_builtin_tools.to_vec();
+    }
+
+    if agent.skill_ids.is_empty() {
+        if !agent.legacy_enabled_skill_ids.is_empty() {
+            agent.skill_ids = agent.legacy_enabled_skill_ids.clone();
+        } else if !agent.legacy_disabled_skill_ids.is_empty() {
+            let disabled = agent
+                .legacy_disabled_skill_ids
+                .iter()
+                .collect::<HashSet<_>>();
+            agent.skill_ids = all_skill_ids
+                .iter()
+                .filter(|item| !disabled.contains(item))
+                .cloned()
+                .collect();
+        }
+    }
+
+    if agent.mcp_server_ids.is_empty() {
+        if !agent.legacy_enabled_mcp_server_ids.is_empty() {
+            agent.mcp_server_ids = agent.legacy_enabled_mcp_server_ids.clone();
+        } else if !agent.legacy_disabled_mcp_server_ids.is_empty() {
+            let disabled = agent
+                .legacy_disabled_mcp_server_ids
+                .iter()
+                .collect::<HashSet<_>>();
+            agent.mcp_server_ids = all_mcp_ids
+                .iter()
+                .filter(|item| !disabled.contains(item))
+                .cloned()
+                .collect();
+        }
+    }
+
+    if matches!(agent.approval_mode, ApprovalMode::Allow) {
+        if let Some(shell_rule) = agent
+            .legacy_capability_rules
+            .iter()
+            .find(|rule| rule.key == "builtin.shell")
+        {
+            agent.approval_mode = shell_rule.approval_mode.clone();
+        }
+    }
+
+    normalize_shell_rules(&mut agent.shell_rules);
+    normalize_shell_rules(&mut agent.tool_rules);
+    normalize_capability_rules(&mut agent.builtin_approvals);
+    normalize_capability_rules(&mut agent.skill_approvals);
+    normalize_capability_rules(&mut agent.mcp_approvals);
+    normalize_builtin_codex_agent(agent, default_builtin_tools);
+
+    agent.id = agent.id.trim().to_string();
+    agent.name = agent.name.trim().to_string();
+    agent.description = agent.description.trim().to_string();
+    agent.provider_id = agent.provider_id.trim().to_string();
+    agent.model_id = agent.model_id.trim().to_string();
+    agent.fallback_provider_id = agent.fallback_provider_id.trim().to_string();
+    agent.fallback_model_id = agent.fallback_model_id.trim().to_string();
+    agent.system_prompt = agent.system_prompt.trim().to_string();
+    agent.builtin_tool_ids = normalize_string_list(std::mem::take(&mut agent.builtin_tool_ids));
+    agent.skill_ids = normalize_string_list(std::mem::take(&mut agent.skill_ids));
+    agent.mcp_server_ids = normalize_string_list(std::mem::take(&mut agent.mcp_server_ids));
+    agent.sub_agent_ids = normalize_string_list(std::mem::take(&mut agent.sub_agent_ids));
+}
+
+fn normalize_string_list(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut normalized = Vec::new();
+    for item in items {
+        let trimmed = item.trim().to_string();
+        if trimmed.is_empty() || !seen.insert(trimmed.clone()) {
+            continue;
+        }
+        normalized.push(trimmed);
+    }
+    normalized
+}
+
+fn dedup_by_key<T>(items: &mut Vec<T>, key_fn: impl Fn(&T) -> String) {
+    let mut seen = HashSet::<String>::new();
+    items.retain(|item| seen.insert(key_fn(item)));
 }
 
 pub fn normalized_sirix_config(config: &SirixConfig) -> SirixConfig {
@@ -2643,11 +3247,11 @@ fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
         } else {
             overlay.providers
         },
-        skills: if overlay.skills.is_empty() {
-            base.skills
-        } else {
-            overlay.skills
-        },
+        // Workspace resource catalogs are additive: global entries always stay
+        // active, while workspace entries append new ids or override matching
+        // ids locally. This keeps Workspace Settings as a supplemental layer
+        // instead of a full replacement surface for skills.
+        skills: merge_items_by_id(base.skills, overlay.skills, |skill| skill.id.clone()),
         mcp: if overlay.mcp == McpGlobalConfig::default() {
             base.mcp
         } else {
@@ -2668,17 +3272,33 @@ fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
         } else {
             merge_capability_rules(base.mcp_approvals, overlay.mcp_approvals)
         },
-        mcp_servers: if overlay.mcp_servers.is_empty() {
-            base.mcp_servers
-        } else {
-            overlay.mcp_servers
-        },
-        agents: if overlay.agents.is_empty() {
-            base.agents
-        } else {
-            overlay.agents
-        },
+        // MCP server definitions follow the same additive contract as skills:
+        // global servers remain effective and workspace-local entries either
+        // extend the catalog or override an existing id for this workspace.
+        mcp_servers: merge_items_by_id(base.mcp_servers, overlay.mcp_servers, |server| {
+            server.id.clone()
+        }),
+        // Agent profiles also merge additively so a workspace can introduce
+        // extra agents or locally override a global profile by id without
+        // discarding the rest of the inherited global agent catalog.
+        agents: merge_items_by_id(base.agents, overlay.agents, |agent| agent.id.clone()),
     }
+}
+
+fn merge_items_by_id<T>(base: Vec<T>, overlay: Vec<T>, id_fn: impl Fn(&T) -> String) -> Vec<T> {
+    let mut merged = base;
+    for item in overlay {
+        let item_id = id_fn(&item);
+        if let Some(existing_index) = merged
+            .iter()
+            .position(|candidate| id_fn(candidate) == item_id)
+        {
+            merged[existing_index] = item;
+        } else {
+            merged.push(item);
+        }
+    }
+    merged
 }
 
 fn merge_shell_rules(base: ShellRulesConfig, overlay: ShellRulesConfig) -> ShellRulesConfig {
@@ -3398,6 +4018,39 @@ pub fn builtin_tool_catalog() -> Vec<&'static str> {
 
 fn default_true() -> bool {
     true
+}
+
+fn display_path_string(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn workspace_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| display_path_string(path))
+}
+
+fn normalize_canonical_workspace_path(path: PathBuf) -> anyhow::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix("/private/var/") {
+            return Ok(PathBuf::from(format!("/var/{stripped}")));
+        }
+    }
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{}", stripped)));
+        }
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(path)
 }
 
 fn default_config_version() -> u32 {
@@ -4384,6 +5037,431 @@ model = "gpt-5.4"
         assert!(
             !effective.config.cli.close_model_without_confirmation,
             "workspace config should be able to disable the global close shortcut override"
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn normalize_workspace_root_treats_selected_sirix_directory_as_parent_workspace() {
+        let root = env::temp_dir().join(format!("sirix-config-normalize-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(workspace_dir.join(SIRIX_DIR_NAME))
+            .expect("workspace .sirix dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let normalized = store
+            .normalize_workspace_root(workspace_dir.join(SIRIX_DIR_NAME).as_path())
+            .expect("workspace root should normalize")
+            .expect(".sirix directory should normalize to its parent");
+
+        assert_eq!(
+            normalized,
+            normalize_canonical_workspace_path(fs::canonicalize(&workspace_dir).unwrap()).unwrap()
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn recent_workspace_registry_dedupes_and_truncates_to_fifty_entries() {
+        let root = env::temp_dir().join(format!("sirix-recent-workspaces-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let mut workspace_paths = Vec::new();
+        for index in 0..52 {
+            let workspace_dir = root.join(format!("workspace-{index:02}"));
+            fs::create_dir_all(&workspace_dir).expect("workspace dir should exist");
+            workspace_paths.push(workspace_dir);
+        }
+
+        for workspace_dir in &workspace_paths {
+            store
+                .upsert_recent_workspace(workspace_dir.as_path())
+                .expect("workspace should be added to recents");
+        }
+        let duplicate_workspace = workspace_paths[7].clone();
+        store
+            .upsert_recent_workspace(duplicate_workspace.as_path())
+            .expect("duplicate workspace should move to front");
+
+        let recent = store
+            .load_recent_workspaces()
+            .expect("recent workspaces should load");
+        let duplicate_workspace_root = display_path_string(
+            normalize_canonical_workspace_path(fs::canonicalize(&duplicate_workspace).unwrap())
+                .unwrap()
+                .as_path(),
+        );
+
+        assert_eq!(recent.len(), SIRIX_RECENT_WORKSPACES_LIMIT);
+        assert_eq!(recent[0].workspace_root, duplicate_workspace_root);
+        assert_eq!(
+            recent
+                .iter()
+                .filter(|item| item.workspace_root == duplicate_workspace_root)
+                .count(),
+            1,
+            "dedupe should keep only one entry per normalized workspace root"
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn save_workspace_settings_omits_cli_and_providers_from_workspace_config() {
+        let root = env::temp_dir().join(format!("sirix-workspace-save-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("workspace dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let global = SirixConfig::default();
+        store
+            .save_global(&global)
+            .expect("global config should be persisted");
+
+        let editable = WorkspaceEditableConfig {
+            version: global.version,
+            agents: vec![global.agents[0].clone()],
+            ..WorkspaceEditableConfig::default()
+        };
+        let shell_rules = ShellRulesConfig {
+            allow: vec!["git status".to_string()],
+            ..ShellRulesConfig::default()
+        };
+
+        let snapshot = store
+            .save_workspace_settings(workspace_dir.as_path(), &editable, &shell_rules)
+            .expect("workspace settings should save");
+        let raw = fs::read_to_string(store.workspace_config_path(workspace_dir.as_path()))
+            .expect("workspace config should be readable");
+
+        assert!(
+            !raw.contains("[cli]"),
+            "workspace config should not serialize the global-only cli section"
+        );
+        assert!(
+            !raw.contains("providers"),
+            "workspace config should not serialize global providers into workspace scope"
+        );
+        assert_eq!(
+            snapshot.effective_config.providers.len(),
+            global.providers.len(),
+            "effective workspace config should still inherit provider catalogs from global settings"
+        );
+        assert_eq!(
+            snapshot.workspace_root,
+            display_path_string(
+                normalize_canonical_workspace_path(fs::canonicalize(&workspace_dir).unwrap())
+                    .unwrap()
+                    .as_path()
+            )
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn workspace_catalogs_add_global_resources_instead_of_replacing_them() {
+        let root = env::temp_dir().join(format!("sirix-workspace-additive-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("workspace dir should exist");
+
+        let global_skill_dir = root.join("global-skill");
+        fs::create_dir_all(&global_skill_dir).expect("global skill dir should exist");
+        fs::write(global_skill_dir.join("SKILL.md"), "# Global Skill\n")
+            .expect("global skill should have SKILL.md");
+
+        let workspace_skill_dir = root.join("workspace-skill");
+        fs::create_dir_all(&workspace_skill_dir).expect("workspace skill dir should exist");
+        fs::write(workspace_skill_dir.join("SKILL.md"), "# Workspace Skill\n")
+            .expect("workspace skill should have SKILL.md");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let mut global = SirixConfig::default();
+        global.skills = vec![SkillConfig {
+            id: "review".to_string(),
+            name: "Global Review".to_string(),
+            path: display_path_string(global_skill_dir.as_path()),
+            enabled: true,
+            allow_outside_sandbox: false,
+        }];
+        global.mcp_servers = vec![McpServerConfig {
+            id: "docs".to_string(),
+            name: "Global Docs".to_string(),
+            enabled: true,
+            approval_mode: ApprovalMode::Ask,
+            enabled_tools: vec!["search".to_string()],
+            disabled_tools: Vec::new(),
+            json_config: "command = \"docs-mcp\"\n".to_string(),
+        }];
+        global.agents.push(AgentConfig {
+            id: "reviewer".to_string(),
+            name: "Global Reviewer".to_string(),
+            description: "Global review agent".to_string(),
+            provider_id: DEFAULT_PROVIDER_ID.to_string(),
+            model_id: DEFAULT_MODEL_ID.to_string(),
+            fallback_provider_id: String::new(),
+            fallback_model_id: String::new(),
+            system_prompt: "Review globally".to_string(),
+            approval_mode: ApprovalMode::Ask,
+            shell_rules: ShellRulesConfig::default(),
+            tool_rules: ToolRulesConfig::default(),
+            builtin_approvals: CapabilityRulesConfig::default(),
+            skill_approvals: CapabilityRulesConfig::default(),
+            mcp_approvals: CapabilityRulesConfig::default(),
+            builtin_tool_ids: default_builtin_tool_ids(),
+            skill_ids: vec!["review".to_string()],
+            mcp_server_ids: vec!["docs".to_string()],
+            sub_agent_ids: Vec::new(),
+            enabled: true,
+            legacy_builtin_tools_enabled: None,
+            legacy_enabled_skill_ids: Vec::new(),
+            legacy_disabled_skill_ids: Vec::new(),
+            legacy_enabled_mcp_server_ids: Vec::new(),
+            legacy_disabled_mcp_server_ids: Vec::new(),
+            legacy_capability_rules: Vec::new(),
+        });
+        store
+            .save_global(&global)
+            .expect("global config should be persisted");
+
+        let editable = WorkspaceEditableConfig {
+            version: global.version,
+            skills: vec![
+                SkillConfig {
+                    id: "review".to_string(),
+                    name: "Workspace Review Override".to_string(),
+                    path: display_path_string(global_skill_dir.as_path()),
+                    enabled: true,
+                    allow_outside_sandbox: true,
+                },
+                SkillConfig {
+                    id: "workspace-helper".to_string(),
+                    name: "Workspace Helper".to_string(),
+                    path: display_path_string(workspace_skill_dir.as_path()),
+                    enabled: true,
+                    allow_outside_sandbox: false,
+                },
+            ],
+            mcp_servers: vec![
+                McpServerConfig {
+                    id: "docs".to_string(),
+                    name: "Workspace Docs Override".to_string(),
+                    enabled: true,
+                    approval_mode: ApprovalMode::Allow,
+                    enabled_tools: vec!["search".to_string(), "summarize".to_string()],
+                    disabled_tools: Vec::new(),
+                    json_config: "command = \"workspace-docs-mcp\"\n".to_string(),
+                },
+                McpServerConfig {
+                    id: "workspace-docs".to_string(),
+                    name: "Workspace Docs".to_string(),
+                    enabled: true,
+                    approval_mode: ApprovalMode::Ask,
+                    enabled_tools: vec!["lookup".to_string()],
+                    disabled_tools: Vec::new(),
+                    json_config: "command = \"workspace-helper-mcp\"\n".to_string(),
+                },
+            ],
+            agents: vec![
+                AgentConfig {
+                    id: "reviewer".to_string(),
+                    name: "Workspace Reviewer".to_string(),
+                    description: "Workspace override agent".to_string(),
+                    provider_id: DEFAULT_PROVIDER_ID.to_string(),
+                    model_id: DEFAULT_MODEL_ID.to_string(),
+                    fallback_provider_id: String::new(),
+                    fallback_model_id: String::new(),
+                    system_prompt: "Review locally".to_string(),
+                    approval_mode: ApprovalMode::Ask,
+                    shell_rules: ShellRulesConfig::default(),
+                    tool_rules: ToolRulesConfig::default(),
+                    builtin_approvals: CapabilityRulesConfig::default(),
+                    skill_approvals: CapabilityRulesConfig::default(),
+                    mcp_approvals: CapabilityRulesConfig::default(),
+                    builtin_tool_ids: default_builtin_tool_ids(),
+                    skill_ids: vec!["review".to_string(), "workspace-helper".to_string()],
+                    mcp_server_ids: vec!["docs".to_string(), "workspace-docs".to_string()],
+                    sub_agent_ids: Vec::new(),
+                    enabled: true,
+                    legacy_builtin_tools_enabled: None,
+                    legacy_enabled_skill_ids: Vec::new(),
+                    legacy_disabled_skill_ids: Vec::new(),
+                    legacy_enabled_mcp_server_ids: Vec::new(),
+                    legacy_disabled_mcp_server_ids: Vec::new(),
+                    legacy_capability_rules: Vec::new(),
+                },
+                AgentConfig {
+                    id: "workspace-helper".to_string(),
+                    name: "Workspace Helper Agent".to_string(),
+                    description: "Workspace-only helper".to_string(),
+                    provider_id: DEFAULT_PROVIDER_ID.to_string(),
+                    model_id: DEFAULT_MODEL_ID.to_string(),
+                    fallback_provider_id: String::new(),
+                    fallback_model_id: String::new(),
+                    system_prompt: "Help locally".to_string(),
+                    approval_mode: ApprovalMode::Ask,
+                    shell_rules: ShellRulesConfig::default(),
+                    tool_rules: ToolRulesConfig::default(),
+                    builtin_approvals: CapabilityRulesConfig::default(),
+                    skill_approvals: CapabilityRulesConfig::default(),
+                    mcp_approvals: CapabilityRulesConfig::default(),
+                    builtin_tool_ids: default_builtin_tool_ids(),
+                    skill_ids: vec!["workspace-helper".to_string()],
+                    mcp_server_ids: vec!["workspace-docs".to_string()],
+                    sub_agent_ids: Vec::new(),
+                    enabled: true,
+                    legacy_builtin_tools_enabled: None,
+                    legacy_enabled_skill_ids: Vec::new(),
+                    legacy_disabled_skill_ids: Vec::new(),
+                    legacy_enabled_mcp_server_ids: Vec::new(),
+                    legacy_disabled_mcp_server_ids: Vec::new(),
+                    legacy_capability_rules: Vec::new(),
+                },
+            ],
+            ..WorkspaceEditableConfig::default()
+        };
+
+        let snapshot = store
+            .save_workspace_settings(
+                workspace_dir.as_path(),
+                &editable,
+                &ShellRulesConfig::default(),
+            )
+            .expect("workspace settings should save");
+
+        assert_eq!(snapshot.effective_config.skills.len(), 2);
+        assert_eq!(
+            snapshot
+                .effective_config
+                .skills
+                .iter()
+                .find(|skill| skill.id == "review")
+                .expect("review skill should exist")
+                .name,
+            "Workspace Review Override"
+        );
+        assert!(
+            snapshot
+                .effective_config
+                .skills
+                .iter()
+                .any(|skill| skill.id == "workspace-helper"),
+            "workspace-only skill should be added on top of the global catalog"
+        );
+
+        assert_eq!(snapshot.effective_config.mcp_servers.len(), 2);
+        assert_eq!(
+            snapshot
+                .effective_config
+                .mcp_servers
+                .iter()
+                .find(|server| server.id == "docs")
+                .expect("docs server should exist")
+                .name,
+            "Workspace Docs Override"
+        );
+        assert!(
+            snapshot
+                .effective_config
+                .mcp_servers
+                .iter()
+                .any(|server| server.id == "workspace-docs"),
+            "workspace-only MCP server should be added on top of the global catalog"
+        );
+
+        assert!(
+            snapshot
+                .effective_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "codex"),
+            "global builtin codex agent should remain available"
+        );
+        assert_eq!(
+            snapshot
+                .effective_config
+                .agents
+                .iter()
+                .find(|agent| agent.id == "reviewer")
+                .expect("reviewer agent should exist")
+                .name,
+            "Workspace Reviewer"
+        );
+        assert!(
+            snapshot
+                .effective_config
+                .agents
+                .iter()
+                .any(|agent| agent.id == "workspace-helper"),
+            "workspace-only agent should be added on top of the global catalog"
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn codex_only_workspace_is_informational_metadata_not_effective_override() {
+        let root = env::temp_dir().join(format!("sirix-codex-metadata-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(workspace_dir.join(CODEX_DIR_NAME))
+            .expect("workspace .codex dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let global = SirixConfig::default();
+        store
+            .save_global(&global)
+            .expect("global config should be persisted");
+        fs::write(
+            workspace_dir.join(CODEX_DIR_NAME).join("config.toml"),
+            "model = \"gpt-5.4\"\n",
+        )
+        .expect(".codex config should be written");
+
+        let snapshot = store
+            .load_workspace_settings(workspace_dir.as_path())
+            .expect("workspace settings should load");
+
+        assert!(snapshot.has_codex_config);
+        assert!(!snapshot.has_sirix_config);
+        assert_eq!(
+            snapshot.effective_config.providers.len(),
+            global.providers.len(),
+            "`.codex` metadata should not be parsed into workspace-effective providers"
+        );
+        assert_eq!(
+            snapshot.effective_workspace_source,
+            Some(display_path_string(
+                workspace_dir
+                    .join(CODEX_DIR_NAME)
+                    .join("config.toml")
+                    .as_path()
+            ))
         );
 
         fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");

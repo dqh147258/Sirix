@@ -129,6 +129,53 @@ class DesktopLocalClient {
     return SirixAiConfig.fromJson(_decodeMap(response));
   }
 
+  Future<List<RecentWorkspaceEntry>> getRecentWorkspaces() async {
+    final response = await _request('GET', '/ai/workspaces/recent');
+    final decoded = _decodeMap(response);
+    final workspaces = decoded['workspaces'] as List<dynamic>? ?? const [];
+    return workspaces
+        .whereType<Map<String, dynamic>>()
+        .map(RecentWorkspaceEntry.fromJson)
+        .toList(growable: false);
+  }
+
+  Future<WorkspaceSettingsResponseModel> getWorkspaceSettings(String path) async {
+    final suffix = '?path=${Uri.encodeQueryComponent(path)}';
+    final response = await _request('GET', '/ai/workspace-settings$suffix');
+    return WorkspaceSettingsResponseModel.fromJson(_decodeMap(response));
+  }
+
+  Future<WorkspaceSettingsResponseModel> selectWorkspace(String path) async {
+    // The desktop backend owns workspace-root normalization so selecting a
+    // literal `.sirix` folder, a normal workspace root, or a symlinked
+    // directory all converge on one canonical path before the UI caches it.
+    final response = await _request(
+      'POST',
+      '/ai/workspaces/select',
+      body: {
+        'path': path,
+      },
+    );
+    return WorkspaceSettingsResponseModel.fromJson(_decodeMap(response));
+  }
+
+  Future<WorkspaceSettingsResponseModel> saveWorkspaceSettings({
+    required String path,
+    required WorkspaceEditableAiConfig editableConfig,
+    required ShellRulesConfigModel editableShellRules,
+  }) async {
+    final response = await _request(
+      'PATCH',
+      '/ai/workspace-settings',
+      body: {
+        'path': path,
+        'editable_config': editableConfig.toJson(),
+        'editable_shell_rules': editableShellRules.toJson(),
+      },
+    );
+    return WorkspaceSettingsResponseModel.fromJson(_decodeMap(response));
+  }
+
   Future<EffectiveSirixAiConfig> getEffectiveAiConfig({String? cwd}) async {
     final suffix = (cwd == null || cwd.isEmpty)
         ? ''

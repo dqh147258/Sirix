@@ -39,8 +39,8 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
   @override
   void initState() {
     super.initState();
-    if (widget.state.config.agents.isNotEmpty) {
-      _selectedAgentId = widget.state.config.agents.first.id;
+    if (widget.state.visibleAgents.isNotEmpty) {
+      _selectedAgentId = widget.state.visibleAgents.first.id;
     }
   }
 
@@ -54,11 +54,11 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
   void didUpdateWidget(covariant AgentSettingsSection oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (_selectedAgentId != null &&
-        !widget.state.config.agents.any((agent) => agent.id == _selectedAgentId)) {
+        !widget.state.visibleAgents.any((agent) => agent.id == _selectedAgentId)) {
       _selectedAgentId = null;
     }
-    if (_selectedAgentId == null && widget.state.config.agents.isNotEmpty) {
-      _selectedAgentId = widget.state.config.agents.first.id;
+    if (_selectedAgentId == null && widget.state.visibleAgents.isNotEmpty) {
+      _selectedAgentId = widget.state.visibleAgents.first.id;
     }
   }
 
@@ -83,14 +83,15 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
             if (created == null) {
               return;
             }
-            widget.vm.upsertAgent(created);
-            setState(() => _selectedAgentId = created.id);
+            widget.vm.upsertAgent(created.agent);
+            setState(() => _selectedAgentId = created.agent.id);
           },
         );
 
+        final visibleAgents = widget.state.visibleAgents;
         final selectedAgent = _selectedAgentId == null
             ? null
-            : widget.state.config.agents.firstWhere(
+            : visibleAgents.firstWhere(
                 (agent) => agent.id == _selectedAgentId,
               );
         final detailPane = selectedAgent == null
@@ -99,6 +100,10 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
                 agent: selectedAgent,
                 state: widget.state,
                 vm: widget.vm,
+                sourceLabel: widget.state.sourceLabelForResource(
+                  workspaceOwned: widget.state.workspaceOwnsAgent(selectedAgent.id),
+                  globalOwned: widget.state.globalOwnsAgent(selectedAgent.id),
+                ),
                 onEdit: () async {
                   final updated = await _showAgentDialog(
                     context,
@@ -107,7 +112,7 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
                     existing: selectedAgent,
                   );
                   if (updated != null) {
-                    widget.vm.upsertAgent(updated);
+                    widget.vm.upsertAgent(updated.agent);
                   }
                 },
               );
@@ -155,11 +160,17 @@ class _AgentListPane extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final palette = context.sirix;
+    final visibleAgents = state.visibleAgents;
     final agentCards = [
-      for (final agent in state.config.agents) _AgentListItem(
+      for (final agent in visibleAgents) _AgentListItem(
         agent: agent,
         selected: agent.id == selectedAgentId,
         compact: compact,
+        sourceLabel: state.sourceLabelForResource(
+          workspaceOwned: state.workspaceOwnsAgent(agent.id),
+          globalOwned: state.globalOwnsAgent(agent.id),
+        ),
         onTap: () => onSelect(agent.id),
       ),
     ];
@@ -188,16 +199,45 @@ class _AgentListPane extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AiSettingsSectionHeader(
-                title: 'Agent Profiles',
-                subtitle: 'Switch between local runtime profiles and manage the exact tools, MCP servers, skills, and fallback model each one can use.',
-                action: FilledButton.icon(
-                  onPressed: onCreate,
-                  icon: const Icon(Icons.add_rounded),
-                  label: const Text('New Agent'),
-                ),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                alignment: WrapAlignment.spaceBetween,
+                children: [
+                  SizedBox(
+                    width: compact ? 180 : 210,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Agent Profiles',
+                          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                                fontFamily: 'Space Grotesk',
+                                fontWeight: FontWeight.w700,
+                              ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Manage runtime profiles, approvals, and fallback behavior without breaking the split-pane layout.',
+                          maxLines: compact ? 4 : 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: palette.textMuted,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilledButton.icon(
+                    onPressed: onCreate,
+                    icon: const Icon(Icons.add_rounded),
+                    label: const Text('New Agent'),
+                  ),
+                ],
               ),
-              if (state.config.agents.isEmpty)
+              const SizedBox(height: 14),
+              if (visibleAgents.isEmpty)
                 const AiSettingsEmptyState(text: 'No agents configured yet.')
               else if (hasBoundedHeight)
                 Expanded(
@@ -225,12 +265,14 @@ class _AgentListItem extends StatelessWidget {
     required this.agent,
     required this.selected,
     required this.compact,
+    required this.sourceLabel,
     required this.onTap,
   });
 
   final AgentConfigModel agent;
   final bool selected;
   final bool compact;
+  final String? sourceLabel;
   final VoidCallback onTap;
 
   @override
@@ -298,13 +340,15 @@ class _AgentListItem extends StatelessWidget {
                     ),
                     if (!compact) ...[
                       const SizedBox(height: 8),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          AiSettingsChip(label: agent.providerId),
-                          AiSettingsChip(label: agent.modelId),
-                          AiSettingsChip(label: agent.enabled ? 'Enabled' : 'Disabled'),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        if (sourceLabel != null && sourceLabel!.trim().isNotEmpty)
+                          AiSettingsChip(label: sourceLabel!),
+                        AiSettingsChip(label: agent.providerId),
+                        AiSettingsChip(label: agent.modelId),
+                        AiSettingsChip(label: agent.enabled ? 'Enabled' : 'Disabled'),
                         ],
                       ),
                     ],
@@ -324,22 +368,26 @@ class _AgentDetailPane extends StatelessWidget {
     required this.agent,
     required this.state,
     required this.vm,
+    required this.sourceLabel,
     required this.onEdit,
   });
 
   final AgentConfigModel agent;
   final AiSettingsState state;
   final AiSettingsViewModel vm;
+  final String? sourceLabel;
   final Future<void> Function() onEdit;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final isBuiltinCodex = _isBuiltinCodexAgent(agent);
-    final skills = state.config.skills.where((item) => agent.skillIds.contains(item.id)).toList();
+    final canRemoveAgent =
+        !isBuiltinCodex && (!state.isWorkspaceScope || state.workspaceOwnsAgent(agent.id));
+    final skills = state.visibleSkills.where((item) => agent.skillIds.contains(item.id)).toList();
     final mcpServers =
-        state.config.mcpServers.where((item) => agent.mcpServerIds.contains(item.id)).toList();
-    final subAgents = state.config.agents
+        state.visibleMcpServers.where((item) => agent.mcpServerIds.contains(item.id)).toList();
+    final subAgents = state.visibleAgents
         .where((item) => agent.subAgentIds.contains(item.id))
         .toList(growable: false);
 
@@ -392,6 +440,8 @@ class _AgentDetailPane extends StatelessWidget {
                               runSpacing: 8,
                               children: [
                                 AiSettingsChip(label: 'id: ${agent.id}'),
+                                if (sourceLabel != null && sourceLabel!.trim().isNotEmpty)
+                                  AiSettingsChip(label: sourceLabel!),
                                 AiSettingsChip(label: agent.providerId),
                                 AiSettingsChip(label: agent.modelId),
                                 AiSettingsChip(label: approvalModeLabel(agent.approvalMode)),
@@ -425,14 +475,14 @@ class _AgentDetailPane extends StatelessWidget {
                           context,
                           vm: vm,
                           state: state,
-                          config: state.config,
+                          config: state.promptPreviewBaseConfig,
                           agent: agent,
                         ),
                         icon: const Icon(Icons.preview_rounded),
                         label: const Text('Preview System Prompt'),
                       ),
                       OutlinedButton.icon(
-                        onPressed: isBuiltinCodex ? null : () => vm.removeAgent(agent.id),
+                        onPressed: canRemoveAgent ? () => vm.removeAgent(agent.id) : null,
                         icon: const Icon(Icons.delete_outline_rounded),
                         label: const Text('Delete Agent'),
                       ),
@@ -582,13 +632,24 @@ class _InfoList extends StatelessWidget {
   }
 }
 
-Future<AgentConfigModel?> _showAgentDialog(
+class _AgentDialogResult {
+  const _AgentDialogResult({
+    required this.agent,
+  });
+
+  final AgentConfigModel agent;
+}
+
+Future<_AgentDialogResult?> _showAgentDialog(
   BuildContext context, {
   required AiSettingsState state,
   required AiSettingsViewModel vm,
   required AgentConfigModel? existing,
 }) async {
-  final providers = state.config.providers
+  // Workspace Settings keeps provider/model definitions global-only, so the
+  // agent editor always reads picker options from the effective provider
+  // catalog while the saved agent object itself still remains workspace-local.
+  final providers = state.agentPickerProviders
       .where((provider) => provider.enabled)
       .toList(growable: false);
   if (providers.isEmpty) {
@@ -615,6 +676,7 @@ Future<AgentConfigModel?> _showAgentDialog(
         .toList(growable: false);
   }
 
+  final globalConfig = state.globalReferenceConfig;
   final idController = TextEditingController(
     text: existing?.id ?? vm.createStableId('agent'),
   );
@@ -658,11 +720,49 @@ Future<AgentConfigModel?> _showAgentDialog(
 
   var fallbackProviderId = existing?.fallbackProviderId ?? '';
   var fallbackModelId = existing?.fallbackModelId ?? '';
+  if (fallbackProviderId.trim().isNotEmpty &&
+      providers.every((provider) => provider.id != fallbackProviderId)) {
+    // Workspace/global agent overrides can outlive provider list changes. If a
+    // previously saved fallback provider is now disabled or removed, clear the
+    // stale fallback locally so opening the dialog never crashes before the
+    // user has a chance to repair the agent configuration.
+    fallbackProviderId = '';
+    fallbackModelId = '';
+  }
+  if (fallbackProviderId.trim().isNotEmpty) {
+    final fallbackModels = textModelsForProvider(fallbackProviderId);
+    if (fallbackModels.isEmpty || fallbackModels.every((model) => model.id != fallbackModelId)) {
+      // A fallback model can disappear independently of its provider (for
+      // example the provider stays enabled but the old text model is disabled).
+      // Coerce the stale selection up front so the dropdown never receives an
+      // invalid initial value that would break dialog rendering.
+      fallbackModelId = fallbackModels.isEmpty ? '' : fallbackModels.first.id;
+    }
+  }
   var approvalMode = existing?.approvalMode ?? ApprovalMode.ask;
   var shellRules = existing?.shellRules ?? const ShellRulesConfigModel();
-  var builtinApprovals = existing?.builtinApprovals ?? const CapabilityRulesConfigModel();
-  var skillApprovals = existing?.skillApprovals ?? const CapabilityRulesConfigModel();
-  var mcpApprovals = existing?.mcpApprovals ?? const CapabilityRulesConfigModel();
+  final builtinApprovalBase = globalConfig.builtinApprovals;
+  final skillApprovalBase = globalConfig.skillApprovals;
+  final mcpApprovalBase = globalConfig.mcpApprovals;
+  final workspaceBuiltinApprovals = state.config.builtinApprovals;
+  final workspaceSkillApprovals = state.config.skillApprovals;
+  final workspaceMcpApprovals = state.config.mcpApprovals;
+  // Agent-specific capability editors should work from the inherited global
+  // layer first, then save back only the delta. Workspace approval policy is
+  // intentionally rendered separately as a read-only layer because the runtime
+  // applies workspace policy after agent overrides.
+  var builtinApprovals = mergeCapabilityRules(
+    builtinApprovalBase,
+    existing?.builtinApprovals ?? const CapabilityRulesConfigModel(),
+  );
+  var skillApprovals = mergeCapabilityRules(
+    skillApprovalBase,
+    existing?.skillApprovals ?? const CapabilityRulesConfigModel(),
+  );
+  var mcpApprovals = mergeCapabilityRules(
+    mcpApprovalBase,
+    existing?.mcpApprovals ?? const CapabilityRulesConfigModel(),
+  );
   var enabled = existing?.enabled ?? true;
   var builtinToolIds = [...(existing?.builtinToolIds ?? kBuiltinToolCatalog)];
   var skillIds = [...(existing?.skillIds ?? const <String>[])];
@@ -686,6 +786,11 @@ Future<AgentConfigModel?> _showAgentDialog(
         final fallbackModels = fallbackProviderId.trim().isEmpty
             ? const <AiModelConfig>[]
             : textModelsForProvider(fallbackProviderId);
+        final availableSkills = state.visibleSkills;
+        final availableMcpServers = state.visibleMcpServers;
+        final availableSubAgents = state.visibleAgents
+            .where((agent) => agent.id != idController.text.trim())
+            .toList(growable: false);
 
         // Build the preview from the draft form state so the button reflects
         // unsaved edits instead of the last persisted agent snapshot.
@@ -700,9 +805,18 @@ Future<AgentConfigModel?> _showAgentDialog(
           systemPrompt: systemPromptController.text,
           approvalMode: approvalMode,
           shellRules: shellRules,
-          builtinApprovals: builtinApprovals,
-          skillApprovals: skillApprovals,
-          mcpApprovals: mcpApprovals,
+          builtinApprovals: diffCapabilityRulesOverlay(
+            builtinApprovalBase,
+            builtinApprovals,
+          ),
+          skillApprovals: diffCapabilityRulesOverlay(
+            skillApprovalBase,
+            skillApprovals,
+          ),
+          mcpApprovals: diffCapabilityRulesOverlay(
+            mcpApprovalBase,
+            mcpApprovals,
+          ),
           builtinToolIds: builtinToolIds,
           skillIds: skillIds,
           mcpServerIds: mcpServerIds,
@@ -892,38 +1006,127 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _AgentCapabilityOverridesCard(
               title: 'Builtin Tool Permissions',
-              subtitle: 'Override the global builtin permission defaults for this agent. These entries apply after the global layer and before workspace/session decisions.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Adjust the global-derived builtin permission layer for this agent. Workspace policy is shown below as read-only because workspace permission edits stay on the Permissions page.'
+                  : 'Override the global builtin permission defaults for this agent. These entries apply after the global layer and before workspace/session decisions.',
               config: builtinApprovals,
+              referenceConfig: state.isWorkspaceScope ? builtinApprovalBase : null,
               items: [
-                for (final id in builtinToolIds) _SelectableItem(id: 'builtin.$id', label: id),
+                for (final id in builtinToolIds)
+                  _SelectableItem(
+                    id: 'builtin.$id',
+                    label: id,
+                    referenceMode: capabilityRuleModeFor(
+                      builtinApprovalBase,
+                      'builtin.$id',
+                    ),
+                  ),
               ],
+              lockedConfig: state.isWorkspaceScope ? workspaceBuiltinApprovals : null,
+              lockedItems: state.isWorkspaceScope
+                  ? [
+                      for (final id in builtinToolIds)
+                        _SelectableItem(
+                          id: 'builtin.$id',
+                          label: id,
+                          sourceLabel: 'Workspace',
+                        ),
+                    ]
+                  : const [],
+              onLockedInteraction: state.isWorkspaceScope
+                  ? () => _showWorkspacePermissionEditHint(context)
+                  : null,
               onChanged: (next) => setState(() => builtinApprovals = next),
             ),
             _AgentCapabilityOverridesCard(
               title: 'Skill Permissions',
-              subtitle: 'Override the global skill permission defaults for this agent.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Adjust the global-derived skill permission layer for this agent. Workspace skill policy is visible below as read-only.'
+                  : 'Override the global skill permission defaults for this agent.',
               config: skillApprovals,
+              referenceConfig: state.isWorkspaceScope ? skillApprovalBase : null,
               items: [
-                for (final skill in state.config.skills.where((item) => skillIds.contains(item.id)))
-                  _SelectableItem(id: 'skill.${skill.id}', label: skill.name, description: skill.path),
+                for (final skill in availableSkills.where((item) => skillIds.contains(item.id)))
+                  _SelectableItem(
+                    id: 'skill.${skill.id}',
+                    label: skill.name,
+                    description: skill.path,
+                    referenceMode: capabilityRuleModeFor(
+                      skillApprovalBase,
+                      'skill.${skill.id}',
+                    ),
+                  ),
               ],
+              lockedConfig: state.isWorkspaceScope ? workspaceSkillApprovals : null,
+              lockedItems: state.isWorkspaceScope
+                  ? [
+                      for (final skill in availableSkills.where((item) => skillIds.contains(item.id)))
+                        _SelectableItem(
+                          id: 'skill.${skill.id}',
+                          label: skill.name,
+                          description: skill.path,
+                          sourceLabel: 'Workspace',
+                        ),
+                    ]
+                  : const [],
+              onLockedInteraction: state.isWorkspaceScope
+                  ? () => _showWorkspacePermissionEditHint(context)
+                  : null,
               onChanged: (next) => setState(() => skillApprovals = next),
             ),
             _AgentCapabilityOverridesCard(
               title: 'MCP Permissions',
-              subtitle: 'Override the global MCP permission defaults for this agent at the server/function level using Desktop Server discovery results.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Adjust the global-derived MCP permission layer for this agent. Workspace MCP policy is visible below as read-only.'
+                  : 'Override the global MCP permission defaults for this agent at the server/function level using Desktop Server discovery results.',
               config: mcpApprovals,
+              referenceConfig: state.isWorkspaceScope ? mcpApprovalBase : null,
               items: [
-                for (final server in state.config.mcpServers.where((item) => mcpServerIds.contains(item.id))) ...[
-                  _SelectableItem(id: 'mcp.${server.id}', label: server.name, description: server.id),
+                for (final server in availableMcpServers.where((item) => mcpServerIds.contains(item.id))) ...[
+                  _SelectableItem(
+                    id: 'mcp.${server.id}',
+                    label: server.name,
+                    description: server.id,
+                    referenceMode: capabilityRuleModeFor(
+                      mcpApprovalBase,
+                      'mcp.${server.id}',
+                    ),
+                  ),
                   for (final tool in discoveredMcpServers[server.id]?.discoveredTools ?? const <LocalMcpServerToolStatus>[])
                     _SelectableItem(
                       id: 'mcp.${server.id}.${tool.id}',
                       label: '${server.name} · ${tool.title}',
                       description: tool.description ?? tool.id,
+                      referenceMode: capabilityRuleModeFor(
+                        mcpApprovalBase,
+                        'mcp.${server.id}.${tool.id}',
+                      ),
                     ),
                 ],
               ],
+              lockedConfig: state.isWorkspaceScope ? workspaceMcpApprovals : null,
+              lockedItems: state.isWorkspaceScope
+                  ? [
+                      for (final server in availableMcpServers.where((item) => mcpServerIds.contains(item.id))) ...[
+                        _SelectableItem(
+                          id: 'mcp.${server.id}',
+                          label: server.name,
+                          description: server.id,
+                          sourceLabel: 'Workspace',
+                        ),
+                        for (final tool in discoveredMcpServers[server.id]?.discoveredTools ?? const <LocalMcpServerToolStatus>[])
+                          _SelectableItem(
+                            id: 'mcp.${server.id}.${tool.id}',
+                            label: '${server.name} · ${tool.title}',
+                            description: tool.description ?? tool.id,
+                            sourceLabel: 'Workspace',
+                          ),
+                      ],
+                    ]
+                  : const [],
+              onLockedInteraction: state.isWorkspaceScope
+                  ? () => _showWorkspacePermissionEditHint(context)
+                  : null,
               onChanged: (next) => setState(() => mcpApprovals = next),
             ),
             DropdownButtonFormField<String>(
@@ -994,7 +1197,7 @@ Future<AgentConfigModel?> _showAgentDialog(
                   vm: vm,
                   state: state,
                   config: _buildPreviewConfigForDraft(
-                    state.config,
+                    state.promptPreviewBaseConfig,
                     existingAgentId: existing?.id,
                     draftAgent: draftAgent,
                   ),
@@ -1036,13 +1239,15 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _SelectionField(
               title: 'Skills',
-              subtitle: 'Choose which configured local skills should be available to this agent.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Choose which workspace skills should be available to this agent.'
+                  : 'Choose which configured local skills should be available to this agent.',
               selectionSummary: _summarizeSelection(
                 selectedIds: skillIds,
-                allIds: state.config.skills.map((item) => item.id).toList(growable: false),
+                allIds: availableSkills.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final skill in state.config.skills.where((item) => skillIds.contains(item.id)))
+                for (final skill in availableSkills.where((item) => skillIds.contains(item.id)))
                   skill.name,
               ],
               onPressed: () async {
@@ -1051,7 +1256,7 @@ Future<AgentConfigModel?> _showAgentDialog(
                   title: 'Skills',
                   subtitle: 'Select the local skills available to this agent.',
                   items: [
-                    for (final skill in state.config.skills)
+                    for (final skill in availableSkills)
                       _SelectableItem(
                         id: skill.id,
                         label: skill.name,
@@ -1067,13 +1272,15 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _SelectionField(
               title: 'MCP Servers',
-              subtitle: 'Choose which MCP server definitions this agent can use.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Choose which workspace MCP server definitions this agent can use.'
+                  : 'Choose which MCP server definitions this agent can use.',
               selectionSummary: _summarizeSelection(
                 selectedIds: mcpServerIds,
-                allIds: state.config.mcpServers.map((item) => item.id).toList(growable: false),
+                allIds: availableMcpServers.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final server in state.config.mcpServers.where((item) => mcpServerIds.contains(item.id)))
+                for (final server in availableMcpServers.where((item) => mcpServerIds.contains(item.id)))
                   server.name,
               ],
               onPressed: () async {
@@ -1082,7 +1289,7 @@ Future<AgentConfigModel?> _showAgentDialog(
                   title: 'MCP Servers',
                   subtitle: 'Select which MCP servers this agent can access.',
                   items: [
-                    for (final server in state.config.mcpServers)
+                    for (final server in availableMcpServers)
                       _SelectableItem(
                         id: server.id,
                         label: server.name,
@@ -1098,16 +1305,15 @@ Future<AgentConfigModel?> _showAgentDialog(
             ),
             _SelectionField(
               title: 'Sub Agents',
-              subtitle: 'Selected agents are exposed to Codex as spawnable Sirix sub-agent roles with role descriptions and runtime role configs.',
+              subtitle: state.isWorkspaceScope
+                  ? 'Selected workspace agents are exposed to Codex as spawnable Sirix sub-agent roles.'
+                  : 'Selected agents are exposed to Codex as spawnable Sirix sub-agent roles with role descriptions and runtime role configs.',
               selectionSummary: _summarizeSelection(
                 selectedIds: subAgentIds,
-                allIds: state.config.agents
-                    .where((agent) => agent.id != idController.text.trim())
-                    .map((item) => item.id)
-                    .toList(growable: false),
+                allIds: availableSubAgents.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final subAgent in state.config.agents.where((item) => subAgentIds.contains(item.id)))
+                for (final subAgent in availableSubAgents.where((item) => subAgentIds.contains(item.id)))
                   subAgent.name,
               ],
               onPressed: () async {
@@ -1116,13 +1322,12 @@ Future<AgentConfigModel?> _showAgentDialog(
                   title: 'Sub Agents',
                   subtitle: 'Select the agents that should be exposed as Sirix sub-agent roles for this profile.',
                   items: [
-                    for (final subAgent in state.config.agents)
-                      if (subAgent.id != idController.text.trim())
-                        _SelectableItem(
-                          id: subAgent.id,
-                          label: subAgent.name,
-                          description: subAgent.description,
-                        ),
+                    for (final subAgent in availableSubAgents)
+                      _SelectableItem(
+                        id: subAgent.id,
+                        label: subAgent.name,
+                        description: subAgent.description,
+                      ),
                   ],
                   initialSelectedIds: subAgentIds,
                 );
@@ -1151,25 +1356,36 @@ Future<AgentConfigModel?> _showAgentDialog(
     return null;
   }
 
-  return AgentConfigModel(
-    id: isBuiltinCodex ? _builtinCodexAgentId : idController.text.trim(),
-    name: nameController.text.trim(),
-    description: descriptionController.text.trim(),
-    providerId: providerId,
-    modelId: modelId,
-    fallbackProviderId: fallbackProviderId,
-    fallbackModelId: fallbackModelId,
-    systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
-    approvalMode: approvalMode,
-    shellRules: shellRules,
-    builtinApprovals: builtinApprovals,
-    skillApprovals: skillApprovals,
-    mcpApprovals: mcpApprovals,
-    builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
-    skillIds: skillIds,
-    mcpServerIds: mcpServerIds,
-    subAgentIds: subAgentIds,
-    enabled: isBuiltinCodex ? true : enabled,
+  return _AgentDialogResult(
+    agent: AgentConfigModel(
+      id: isBuiltinCodex ? _builtinCodexAgentId : idController.text.trim(),
+      name: nameController.text.trim(),
+      description: descriptionController.text.trim(),
+      providerId: providerId,
+      modelId: modelId,
+      fallbackProviderId: fallbackProviderId,
+      fallbackModelId: fallbackModelId,
+      systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
+      approvalMode: approvalMode,
+      shellRules: shellRules,
+      builtinApprovals: diffCapabilityRulesOverlay(
+        builtinApprovalBase,
+        builtinApprovals,
+      ),
+      skillApprovals: diffCapabilityRulesOverlay(
+        skillApprovalBase,
+        skillApprovals,
+      ),
+      mcpApprovals: diffCapabilityRulesOverlay(
+        mcpApprovalBase,
+        mcpApprovals,
+      ),
+      builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
+      skillIds: skillIds,
+      mcpServerIds: mcpServerIds,
+      subAgentIds: subAgentIds,
+      enabled: isBuiltinCodex ? true : enabled,
+    ),
   );
 }
 
@@ -1254,6 +1470,10 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
     required this.config,
     required this.items,
     required this.onChanged,
+    this.referenceConfig,
+    this.lockedConfig,
+    this.lockedItems = const [],
+    this.onLockedInteraction,
   });
 
   final String title;
@@ -1261,6 +1481,10 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
   final CapabilityRulesConfigModel config;
   final List<_SelectableItem> items;
   final ValueChanged<CapabilityRulesConfigModel> onChanged;
+  final CapabilityRulesConfigModel? referenceConfig;
+  final CapabilityRulesConfigModel? lockedConfig;
+  final List<_SelectableItem> lockedItems;
+  final VoidCallback? onLockedInteraction;
 
   @override
   Widget build(BuildContext context) {
@@ -1294,6 +1518,7 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
           const SizedBox(height: 10),
           ApprovalModeSegmentedControl(
             value: config.mode,
+            referenceMode: referenceConfig?.mode,
             onChanged: (value) {
               onChanged(config.copyWith(mode: value));
             },
@@ -1329,6 +1554,7 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
                     width: stacked ? double.infinity : 240,
                     child: ApprovalModeSegmentedControl(
                       value: _agentCapabilityModeFor(config, item.id),
+                      referenceMode: item.referenceMode,
                       dense: true,
                       onChanged: (value) {
                         onChanged(_agentCapabilityConfigWithRule(config, item.id, value));
@@ -1360,6 +1586,131 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
               if (item != items.last) const Divider(height: 18),
             ],
           ],
+          if (lockedConfig != null) ...[
+            const SizedBox(height: 18),
+            Divider(color: palette.glassStroke),
+            const SizedBox(height: 18),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onLockedInteraction,
+              child: AbsorbPointer(
+                child: Opacity(
+                  opacity: 0.7,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            'Workspace Layer',
+                            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                          ),
+                          const AiSettingsChip(label: 'Workspace'),
+                          const Icon(Icons.lock_outline_rounded, size: 16),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Workspace policy is applied after agent overrides. Edit these values on the Permissions page.',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: palette.textMuted,
+                            ),
+                      ),
+                      const SizedBox(height: 14),
+                      Text(
+                        'Default Mode',
+                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                              color: palette.textMuted,
+                              fontWeight: FontWeight.w700,
+                            ),
+                      ),
+                      const SizedBox(height: 10),
+                      ApprovalModeSegmentedControl(
+                        value: lockedConfig!.mode,
+                        onChanged: (_) {},
+                      ),
+                      if (lockedItems.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        for (final item in lockedItems) ...[
+                          LayoutBuilder(
+                            builder: (context, constraints) {
+                              final stacked = constraints.maxWidth < 760;
+                              final details = Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    crossAxisAlignment: WrapCrossAlignment.center,
+                                    children: [
+                                      Text(
+                                        item.label,
+                                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                      ),
+                                      if (item.sourceLabel != null &&
+                                          item.sourceLabel!.trim().isNotEmpty)
+                                        AiSettingsChip(label: item.sourceLabel!),
+                                    ],
+                                  ),
+                                  if (item.description != null &&
+                                      item.description!.trim().isNotEmpty)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 4),
+                                      child: Text(
+                                        item.description!,
+                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                              color: palette.textMuted,
+                                            ),
+                                      ),
+                                    ),
+                                ],
+                              );
+                              final control = SizedBox(
+                                width: stacked ? double.infinity : 240,
+                                child: ApprovalModeSegmentedControl(
+                                  value: _agentCapabilityModeFor(lockedConfig!, item.id),
+                                  dense: true,
+                                  onChanged: (_) {},
+                                ),
+                              );
+
+                              if (stacked) {
+                                return Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    details,
+                                    const SizedBox(height: 12),
+                                    control,
+                                  ],
+                                );
+                              }
+
+                              return Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Expanded(child: details),
+                                  const SizedBox(width: 12),
+                                  control,
+                                ],
+                              );
+                            },
+                          ),
+                          if (item != lockedItems.last) const Divider(height: 18),
+                        ],
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1367,12 +1718,7 @@ class _AgentCapabilityOverridesCard extends StatelessWidget {
 }
 
 ApprovalMode _agentCapabilityModeFor(CapabilityRulesConfigModel config, String key) {
-  for (final rule in config.rules) {
-    if (rule.key == key) {
-      return rule.mode;
-    }
-  }
-  return config.mode;
+  return capabilityRuleModeFor(config, key);
 }
 
 CapabilityRulesConfigModel _agentCapabilityConfigWithRule(
@@ -1380,12 +1726,21 @@ CapabilityRulesConfigModel _agentCapabilityConfigWithRule(
   String key,
   ApprovalMode mode,
 ) {
+  final normalizedKey = normalizeCapabilityRuleKey(key);
   final nextRules = [
     for (final rule in config.rules)
-      if (rule.key != key) rule,
-    CapabilityApprovalRuleModel(key: key, mode: mode),
+      if (normalizeCapabilityRuleKey(rule.key) != normalizedKey) rule,
+    CapabilityApprovalRuleModel(key: normalizedKey, mode: mode),
   ];
   return config.copyWith(rules: nextRules);
+}
+
+void _showWorkspacePermissionEditHint(BuildContext context) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(
+      content: Text('Workspace permission policy is read-only here. Open Permissions to change it.'),
+    ),
+  );
 }
 
 class _SelectionField extends StatelessWidget {
@@ -1471,11 +1826,15 @@ class _SelectableItem {
     required this.id,
     required this.label,
     this.description,
+    this.sourceLabel,
+    this.referenceMode,
   });
 
   final String id;
   final String label;
   final String? description;
+  final String? sourceLabel;
+  final ApprovalMode? referenceMode;
 }
 
 Future<List<String>?> _showMultiSelectDialog(
@@ -1509,6 +1868,9 @@ Future<List<String>?> _showMultiSelectDialog(
                   });
                 },
                 title: Text(item.label),
+                secondary: item.sourceLabel == null || item.sourceLabel!.trim().isEmpty
+                    ? null
+                    : AiSettingsChip(label: item.sourceLabel!),
                 subtitle: item.description == null || item.description!.trim().isEmpty
                     ? null
                     : Text(item.description!),
@@ -1544,7 +1906,7 @@ Future<void> _showPromptPreviewDialog(
   final previewFuture = vm.previewSystemPrompt(
     config: config,
     agentId: agent.id,
-    cwd: state.effective?.workspacePath,
+    cwd: state.isWorkspaceScope ? state.selectedWorkspaceRoot : state.effective?.workspacePath,
   );
 
   return showAiSettingsDialog<void>(
@@ -2355,7 +2717,7 @@ String? _readNonEmptyString(Object? value) {
 
 String _prettyPreviewJson(Object? value) {
   try {
-    return const JsonEncoder.withIndent('  ').convert(value);
+    return JsonEncoder.withIndent('  ').convert(value);
   } catch (_) {
     return value.toString();
   }

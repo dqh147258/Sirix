@@ -73,7 +73,8 @@ class DesktopHomePage extends ConsumerStatefulWidget {
 
 class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
   int _navigationIndex = 0;
-  static const int _settingsSectionIndex = 4;
+  static const int _globalSettingsSectionIndex = 4;
+  static const int _workspaceSettingsSectionIndex = 5;
 
   @override
   void initState() {
@@ -126,11 +127,18 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
         child: _DesktopAccountPage(session: authState.session!),
       ),
       _DesktopSection(
-        label: 'Settings',
-        title: 'AI Settings',
-        subtitle: 'CLI, Provider, Skills, MCP and Agent controls',
+        label: 'Global Settings',
+        title: 'Global Settings',
+        subtitle: 'CLI, Provider, Skills, MCP, Agent, and permission controls',
         icon: Icons.tune_rounded,
-        child: AiSettingsPage(),
+        child: const AiSettingsPage(scope: AiSettingsScope.global),
+      ),
+      _DesktopSection(
+        label: 'Workspace Settings',
+        title: 'Workspace Settings',
+        subtitle: 'Workspace-local Skills, MCP, Agents, and Permissions',
+        icon: Icons.folder_special_rounded,
+        child: const AiSettingsPage(scope: AiSettingsScope.workspace),
       ),
     ];
     final currentSection =
@@ -236,8 +244,11 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                         PopupMenuButton<_AccountMenuAction>(
                           onSelected: (action) async {
                             switch (action) {
-                              case _AccountMenuAction.settings:
-                                setState(() => _navigationIndex = _settingsSectionIndex);
+                              case _AccountMenuAction.globalSettings:
+                                setState(() => _navigationIndex = _globalSettingsSectionIndex);
+                                break;
+                              case _AccountMenuAction.workspaceSettings:
+                                setState(() => _navigationIndex = _workspaceSettingsSectionIndex);
                                 break;
                               case _AccountMenuAction.logout:
                                 await ref.read(authViewModelProvider('desktop').notifier).logout();
@@ -246,8 +257,12 @@ class _DesktopHomePageState extends ConsumerState<DesktopHomePage> {
                           },
                           itemBuilder: (context) => const [
                             PopupMenuItem(
-                              value: _AccountMenuAction.settings,
-                              child: Text('Settings'),
+                              value: _AccountMenuAction.globalSettings,
+                              child: Text('Global Settings'),
+                            ),
+                            PopupMenuItem(
+                              value: _AccountMenuAction.workspaceSettings,
+                              child: Text('Workspace Settings'),
                             ),
                             PopupMenuItem(
                               value: _AccountMenuAction.logout,
@@ -481,7 +496,8 @@ class _DesktopSection {
 }
 
 enum _AccountMenuAction {
-  settings,
+  globalSettings,
+  workspaceSettings,
   logout,
 }
 

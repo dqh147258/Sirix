@@ -25,8 +25,8 @@ class McpSettingsSection extends StatelessWidget {
       for (final server in state.statusOverview?.mcp.servers ?? const <LocalMcpServerStatus>[])
         server.id: server,
     };
-    final servers = state.config.mcpServers;
-    final mcpGlobal = state.config.mcp;
+    final servers = state.visibleMcpServers;
+    final mcpGlobal = state.effectiveEditableConfig.mcp;
     final activeCount = servers.where((server) => server.enabled).length;
     final healthyCount = runtimeStatuses.values.where((server) => server.healthy).length;
     final discoveredToolCount = runtimeStatuses.values.fold<int>(
@@ -125,6 +125,12 @@ class McpSettingsSection extends StatelessWidget {
                         server: server,
                         runtimeStatus: runtimeStatuses[server.id],
                         vm: vm,
+                        sourceLabel: state.sourceLabelForResource(
+                          workspaceOwned: state.workspaceOwnsMcpServer(server.id),
+                          globalOwned: state.globalOwnsMcpServer(server.id),
+                        ),
+                        allowRemove:
+                            !state.isWorkspaceScope || state.workspaceOwnsMcpServer(server.id),
                         onEdit: () async {
                           final edited = await _showMcpDialog(context, vm: vm, existing: server);
                           if (edited != null) {
@@ -291,12 +297,16 @@ class _McpServerCard extends StatelessWidget {
     required this.server,
     required this.runtimeStatus,
     required this.vm,
+    required this.sourceLabel,
+    required this.allowRemove,
     required this.onEdit,
   });
 
   final McpServerConfigModel server;
   final LocalMcpServerStatus? runtimeStatus;
   final AiSettingsViewModel vm;
+  final String? sourceLabel;
+  final bool allowRemove;
   final VoidCallback onEdit;
 
   @override
@@ -378,6 +388,10 @@ class _McpServerCard extends StatelessWidget {
                                   color: palette.textMuted,
                                 ),
                           ),
+                          if (sourceLabel != null && sourceLabel!.trim().isNotEmpty) ...[
+                            const SizedBox(height: 6),
+                            AiSettingsChip(label: sourceLabel!),
+                          ],
                         ],
                       ),
                     ),
@@ -589,7 +603,7 @@ class _McpServerCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
                 TextButton(
-                  onPressed: () => vm.removeMcpServer(server.id),
+                  onPressed: allowRemove ? () => vm.removeMcpServer(server.id) : null,
                   style: TextButton.styleFrom(
                     foregroundColor: palette.error,
                   ),

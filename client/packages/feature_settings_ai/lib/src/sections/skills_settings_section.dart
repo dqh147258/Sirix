@@ -23,6 +23,7 @@ class SkillsSettingsSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.sirix;
+    final skills = state.visibleSkills;
 
     return ListView(
       children: [
@@ -79,12 +80,18 @@ class SkillsSettingsSection extends StatelessWidget {
               spacing: 16,
               runSpacing: 16,
               children: [
-                for (final skill in state.config.skills)
+                for (final skill in skills)
                   SizedBox(
                     width: cardWidth,
                     child: _SkillGridCard(
                       skill: skill,
                       vm: vm,
+                      sourceLabel: state.sourceLabelForResource(
+                        workspaceOwned: state.workspaceOwnsSkill(skill.id),
+                        globalOwned: state.globalOwnsSkill(skill.id),
+                      ),
+                      allowDelete:
+                          !state.isWorkspaceScope || state.workspaceOwnsSkill(skill.id),
                       onEdit: () async {
                         final edited = await _showSkillDialog(context, vm: vm, existing: skill);
                         if (edited != null) {
@@ -161,11 +168,15 @@ class _SkillGridCard extends StatelessWidget {
   const _SkillGridCard({
     required this.skill,
     required this.vm,
+    required this.sourceLabel,
+    required this.allowDelete,
     required this.onEdit,
   });
 
   final SkillConfigModel skill;
   final AiSettingsViewModel vm;
+  final String? sourceLabel;
+  final bool allowDelete;
   final VoidCallback onEdit;
 
   @override
@@ -222,6 +233,10 @@ class _SkillGridCard extends StatelessWidget {
                           letterSpacing: 1.2,
                         ),
                       ),
+                      if (sourceLabel != null && sourceLabel!.trim().isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        AiSettingsChip(label: sourceLabel!),
+                      ],
                     ],
                   ),
                 ),
@@ -249,10 +264,11 @@ class _SkillGridCard extends StatelessWidget {
                       value: _SkillCardAction.edit,
                       child: Text('Edit Skill'),
                     ),
-                    PopupMenuItem(
-                      value: _SkillCardAction.delete,
-                      child: Text('Delete Skill', style: TextStyle(color: palette.error)),
-                    ),
+                    if (allowDelete)
+                      PopupMenuItem(
+                        value: _SkillCardAction.delete,
+                        child: Text('Delete Skill', style: TextStyle(color: palette.error)),
+                      ),
                   ],
                 ),
               ],

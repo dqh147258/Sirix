@@ -317,11 +317,13 @@ class ApprovalModeSegmentedControl extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.dense = false,
+    this.referenceMode,
   });
 
   final ApprovalMode value;
   final ValueChanged<ApprovalMode> onChanged;
   final bool dense;
+  final ApprovalMode? referenceMode;
 
   @override
   Widget build(BuildContext context) {
@@ -342,6 +344,9 @@ class ApprovalModeSegmentedControl extends StatelessWidget {
                 mode: mode,
                 selected: mode == value,
                 dense: dense,
+                showReferenceDot: referenceMode != null &&
+                    referenceMode != value &&
+                    mode == referenceMode,
                 onTap: () => onChanged(mode),
               ),
             ),
@@ -359,12 +364,14 @@ class _ApprovalModeSegment extends StatelessWidget {
     required this.mode,
     required this.selected,
     required this.dense,
+    required this.showReferenceDot,
     required this.onTap,
   });
 
   final ApprovalMode mode;
   final bool selected;
   final bool dense;
+  final bool showReferenceDot;
   final VoidCallback onTap;
 
   @override
@@ -401,6 +408,17 @@ class _ApprovalModeSegment extends StatelessWidget {
                 size: dense ? 15 : 16,
                 color: selected ? palette.primaryBright : palette.textMuted,
               ),
+              if (showReferenceDot) ...[
+                const SizedBox(width: 4),
+                Container(
+                  width: dense ? 6 : 7,
+                  height: dense ? 6 : 7,
+                  decoration: BoxDecoration(
+                    color: palette.warning,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+              ],
               const SizedBox(width: 6),
               Flexible(
                 child: Text(

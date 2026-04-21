@@ -37,6 +37,7 @@ impl RuntimeLogSource {
 }
 
 pub struct RuntimeLogStore {
+    logs_root_dir: PathBuf,
     run_dir: PathBuf,
     max_lines_per_file: usize,
     buffers: Mutex<HashMap<RuntimeLogSource, VecDeque<String>>>,
@@ -56,6 +57,7 @@ impl RuntimeLogStore {
         prune_old_run_directories(&logs_root_dir, max_run_directories.max(1))?;
 
         Ok(Self {
+            logs_root_dir,
             run_dir,
             max_lines_per_file: max_lines_per_file.max(1),
             buffers: Mutex::new(HashMap::new()),
@@ -83,6 +85,8 @@ impl RuntimeLogStore {
             output.push('\n');
             output
         };
+        fs::create_dir_all(&self.logs_root_dir)?;
+        fs::create_dir_all(&self.run_dir)?;
         fs::write(self.run_dir.join(source.file_name()), output)?;
         Ok(())
     }
@@ -109,4 +113,31 @@ fn prune_old_run_directories(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn append_line_recreates_deleted_run_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "sirix-runtime-log-store-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = RuntimeLogStore::new(&root, 2, 10).expect("runtime log store should init");
+        let run_dir = store.run_dir().to_path_buf();
+        fs::remove_dir_all(&run_dir).expect("run dir should be removable for the test");
+
+        store
+            .append_line(RuntimeLogSource::ServerBackend, "hello".to_string())
+            .expect("append should recreate deleted log directories");
+
+        assert!(
+            run_dir.join(RuntimeLogSource::ServerBackend.file_name()).is_file(),
+            "append should recreate the runtime log file after the directory was deleted"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

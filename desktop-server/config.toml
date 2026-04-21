@@ -1,9 +1,11 @@
 [backend]
-base_url = "http://127.0.0.1:8080"
+# 这些字段现在只是共享 baseline，占位即可；真正的 Debug / Release
+# 默认值由 bootstrap 按 `SIRIX_SCENE` 派生，并且允许环境变量覆盖。
+base_url = ""
 health_path = "/health"
 heartbeat_path = "/api/v1/desktop/devices/{device_id}/heartbeat"
 heartbeat_interval_seconds = 10
-device_id = "00000000-0000-0000-0000-000000000001"
+device_id = ""
 event_ws_path = "/api/v1/desktop/events/{device_id}/ws"
 session_decision_path = "/api/v1/desktop/sessions/{session_id}/decision"
 webrtc_signal_path = "/api/v1/webrtc/signal"
@@ -11,8 +13,8 @@ screen_state_path = "/api/v1/desktop/devices/{device_id}/screen-state"
 
 [local_ws]
 host = "127.0.0.1"
-port_range_start = 9700
-port_range_end = 9710
+port_range_start = 0
+port_range_end = 0
 
 [authorization]
 manual_approve_timeout_seconds = 120

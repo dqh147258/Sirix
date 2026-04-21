@@ -52,12 +52,17 @@ impl AppState {
             config.backend.base_url.clone(),
             config.backend.runtime_logs_path.clone(),
         ));
-        let sirix_config_store =
-            Arc::new(SirixConfigStore::new().expect("failed to initialize ~/.sirix config store"));
+        let sirix_config_store = Arc::new(
+            SirixConfigStore::new().expect("failed to initialize scene-aware Sirix config store"),
+        );
         let approval_storage_dir = sirix_config_store
             .sirix_home()
             .join("runtime")
             .join("approvals");
+        let auth_session_path = sirix_config_store
+            .sirix_home()
+            .join("runtime")
+            .join("auth-session.json");
         Self {
             terminal_manager: Arc::new(TerminalManager::new(
                 config.backend.base_url.clone(),
@@ -65,7 +70,10 @@ impl AppState {
                 local_events.clone(),
                 sirix_config_store.sirix_home().to_path_buf(),
             )),
-            auth_session_store: AuthSessionStore::new(config.backend.base_url.clone()),
+            auth_session_store: AuthSessionStore::new(
+                config.backend.base_url.clone(),
+                auth_session_path,
+            ),
             config: Arc::new(config),
             logger,
             runtime: Arc::new(RwLock::new(RuntimeState {

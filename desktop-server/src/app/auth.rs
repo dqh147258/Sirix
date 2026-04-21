@@ -7,8 +7,6 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::RwLock};
 
-const AUTH_SESSION_FILE_PATH: &str = "runtime/auth-session.json";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthSession {
     pub user_id: String,
@@ -49,12 +47,12 @@ enum RefreshSessionError {
 }
 
 impl AuthSessionStore {
-    pub fn new(base_url: String) -> Self {
+    pub fn new(base_url: String, session_file_path: PathBuf) -> Self {
         Self {
             base_url: Arc::new(base_url.trim_end_matches('/').to_string()),
             client: reqwest::Client::new(),
             session: Arc::new(RwLock::new(None)),
-            session_file_path: Arc::new(PathBuf::from(AUTH_SESSION_FILE_PATH)),
+            session_file_path: Arc::new(session_file_path),
         }
     }
 

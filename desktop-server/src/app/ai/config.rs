@@ -14,6 +14,14 @@ use tokio::sync::Mutex;
 use toml::Value as TomlValue;
 use uuid::Uuid;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+use crate::scene::{
+    canonical_home_for_scene, resolve_scene, resolve_sirix_home, resolve_workspace_config_dir_name,
+    SirixScene, DEBUG_GLOBAL_DIR_NAME, RELEASE_GLOBAL_DIR_NAME,
+};
+
 const DEFAULT_AGENT_ID: &str = "codex";
 const LEGACY_DEFAULT_AGENT_ID: &str = "default-agent";
 const DEFAULT_AGENT_NAME: &str = "Codex";
@@ -21,7 +29,7 @@ const DEFAULT_AGENT_DESCRIPTION: &str =
     "Built-in Codex agent with the standard Codex system prompt.";
 const DEFAULT_PROVIDER_ID: &str = "openai";
 const DEFAULT_MODEL_ID: &str = "gpt-5";
-const SIRIX_DIR_NAME: &str = ".sirix";
+const SIRIX_DIR_NAME: &str = RELEASE_GLOBAL_DIR_NAME;
 const CODEX_DIR_NAME: &str = ".codex";
 const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
 const SIRIX_AGENT_ROLES_DIR: &str = "agent-roles";
@@ -616,25 +624,27 @@ impl SirixConfigStore {
     }
 
     pub fn workspace_shell_rules_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(SIRIX_DIR_NAME).join("shell-rules.json")
+        cwd.join(workspace_config_dir_name())
+            .join("shell-rules.json")
     }
 
     pub fn workspace_tool_rules_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(SIRIX_DIR_NAME).join("tool-rules.json")
+        cwd.join(workspace_config_dir_name())
+            .join("tool-rules.json")
     }
 
     pub fn workspace_config_path(&self, cwd: &Path) -> PathBuf {
-        cwd.join(SIRIX_DIR_NAME).join("config.toml")
+        cwd.join(workspace_config_dir_name()).join("config.toml")
     }
 
     /// Normalize a user-facing workspace selection into the canonical
-    /// workspace root. This keeps `.sirix`-folder picks, effective-config
+    /// workspace root. This keeps scene-aware config-folder picks, effective-config
     /// preview, prompt preview, workspace saves, and recent-workspace storage
     /// on one shared interpretation of "workspace".
     pub fn normalize_workspace_root(&self, candidate: &Path) -> anyhow::Result<Option<PathBuf>> {
         let raw = if candidate
             .file_name()
-            .is_some_and(|name| name == std::ffi::OsStr::new(SIRIX_DIR_NAME))
+            .is_some_and(is_workspace_config_dir_name)
         {
             candidate.parent().map(PathBuf::from)
         } else {
@@ -1357,6 +1367,7 @@ impl SirixConfigStore {
         let bin_dir = self.sirix_home.join("bin");
         fs::create_dir_all(&bin_dir)
             .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+        let scene = resolve_scene()?;
 
         let sibling_dir = current_exe
             .parent()
@@ -1367,7 +1378,12 @@ impl SirixConfigStore {
             return Ok(());
         }
 
-        install_bin_shim(&sirix_binary, &bin_dir.join(sirix_binary_name))?;
+        install_bin_shim(
+            &sirix_binary,
+            &bin_dir.join(sirix_binary_name),
+            scene,
+            &self.sirix_home,
+        )?;
 
         let sirix_terminal_binary_name = if cfg!(windows) {
             "sirix-terminal.exe"
@@ -1379,6 +1395,8 @@ impl SirixConfigStore {
             install_bin_shim(
                 &sirix_terminal_binary,
                 &bin_dir.join(sirix_terminal_binary_name),
+                scene,
+                &self.sirix_home,
             )?;
         }
 
@@ -1388,27 +1406,44 @@ impl SirixConfigStore {
             "sirix-runtime"
         };
         let runtime_binary = sibling_dir.join(runtime_binary_name);
-        if runtime_binary.exists() {
-            install_bin_shim(&runtime_binary, &bin_dir.join(runtime_binary_name))?;
+        if runtime_binary.exists()
+            && sibling_dir
+                .file_name()
+                .and_then(|segment| segment.to_str())
+                .is_some_and(|segment| segment == scene.runtime_profile())
+        {
+            install_bin_shim(
+                &runtime_binary,
+                &bin_dir.join(runtime_binary_name),
+                scene,
+                &self.sirix_home,
+            )?;
             return Ok(());
         }
 
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        for profile in ["debug", "release"] {
-            let candidate = manifest_dir
-                .join("..")
-                .join("third_party")
-                .join("codex-rs")
-                .join("target")
-                .join(profile)
-                .join(runtime_binary_name);
-            if candidate.exists() {
-                install_bin_shim(&candidate, &bin_dir.join(runtime_binary_name))?;
-                break;
-            }
+        let candidate = manifest_dir
+            .join("..")
+            .join("third_party")
+            .join("codex-rs")
+            .join("target")
+            .join(scene.runtime_profile())
+            .join(runtime_binary_name);
+        if candidate.exists() {
+            install_bin_shim(
+                &candidate,
+                &bin_dir.join(runtime_binary_name),
+                scene,
+                &self.sirix_home,
+            )?;
+            return Ok(());
         }
 
-        Ok(())
+        anyhow::bail!(
+            "scene {} requires {} under the matching runtime profile, but no compatible binary was found",
+            scene.as_str(),
+            runtime_binary_name
+        )
     }
 
     fn ensure_layout(&self) -> anyhow::Result<()> {
@@ -1560,19 +1595,32 @@ impl SirixConfigStore {
     }
 }
 
-fn install_bin_shim(source: &Path, target: &Path) -> anyhow::Result<()> {
+fn install_bin_shim(
+    source: &Path,
+    target: &Path,
+    scene: SirixScene,
+    sirix_home: &Path,
+) -> anyhow::Result<()> {
     if target.exists() {
         let _ = fs::remove_file(target);
     }
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(source, target).with_context(|| {
-        format!(
-            "failed to link {} -> {}",
-            target.display(),
+    {
+        let script = format!(
+            "#!/usr/bin/env bash\n# Scene-aware Sirix shim generated automatically.\nexport SIRIX_SCENE=\"{}\"\nexport SIRIX_HOME=\"{}\"\nexec \"{}\" \"$@\"\n",
+            scene.as_str(),
+            sirix_home.display(),
             source.display()
-        )
-    })?;
+        );
+        fs::write(target, script)
+            .with_context(|| format!("failed to write {}", target.display()))?;
+        let mut permissions = fs::metadata(target)?.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_mode(0o755);
+        fs::set_permissions(target, permissions)
+            .with_context(|| format!("failed to chmod {}", target.display()))?;
+    }
 
     #[cfg(windows)]
     fs::copy(source, target).with_context(|| {
@@ -4089,30 +4137,13 @@ fn default_builtin_tool_ids() -> Vec<String> {
 }
 
 fn sirix_home_dir() -> anyhow::Result<PathBuf> {
-    if let Ok(explicit) = env::var("SIRIX_HOME") {
-        if !explicit.trim().is_empty() {
-            return Ok(PathBuf::from(explicit));
-        }
-    }
-
-    // Follow Codex's source behavior and ask the platform for the user's home
-    // directory first. That keeps `~/.sirix` stable across macOS/Linux/Windows
-    // instead of depending on whichever shell variables happen to be present.
-    if let Some(home) = dirs::home_dir() {
-        return Ok(home.join(".sirix"));
-    }
-
-    let home = env::var("HOME")
-        .or_else(|_| env::var("USERPROFILE"))
-        .or_else(|_| match (env::var("HOMEDRIVE"), env::var("HOMEPATH")) {
-            (Ok(drive), Ok(path)) => Ok(format!("{drive}{path}")),
-            _ => Err(env::VarError::NotPresent),
-        })
-        .context("failed to resolve user home dir for ~/.sirix")?;
-    Ok(PathBuf::from(home).join(".sirix"))
+    resolve_sirix_home()
 }
 
 fn migrate_legacy_codex_home(sirix_home: &Path) -> anyhow::Result<()> {
+    if sirix_home != canonical_home_for_scene(SirixScene::Release)?.as_path() {
+        return Ok(());
+    }
     let home = sirix_home
         .parent()
         .context("failed to resolve ~/.sirix parent")?;
@@ -4129,6 +4160,17 @@ fn migrate_legacy_codex_home(sirix_home: &Path) -> anyhow::Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn workspace_config_dir_name() -> String {
+    resolve_workspace_config_dir_name().unwrap_or_else(|_| RELEASE_GLOBAL_DIR_NAME.to_string())
+}
+
+fn is_workspace_config_dir_name(name: &std::ffi::OsStr) -> bool {
+    let current = workspace_config_dir_name();
+    name == std::ffi::OsStr::new(current.as_str())
+        || name == std::ffi::OsStr::new(RELEASE_GLOBAL_DIR_NAME)
+        || name == std::ffi::OsStr::new(DEBUG_GLOBAL_DIR_NAME)
 }
 
 fn copy_dir_recursive(from: &Path, to: &Path) -> anyhow::Result<()> {
@@ -5059,6 +5101,32 @@ model = "gpt-5.4"
             .normalize_workspace_root(workspace_dir.join(SIRIX_DIR_NAME).as_path())
             .expect("workspace root should normalize")
             .expect(".sirix directory should normalize to its parent");
+
+        assert_eq!(
+            normalized,
+            normalize_canonical_workspace_path(fs::canonicalize(&workspace_dir).unwrap()).unwrap()
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
+    fn normalize_workspace_root_treats_selected_debug_sirix_directory_as_parent_workspace() {
+        let root = env::temp_dir().join(format!("sirix-debug-config-normalize-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(workspace_dir.join(DEBUG_GLOBAL_DIR_NAME))
+            .expect("workspace .sirix-debug dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let normalized = store
+            .normalize_workspace_root(workspace_dir.join(DEBUG_GLOBAL_DIR_NAME).as_path())
+            .expect("workspace root should normalize")
+            .expect(".sirix-debug directory should normalize to its parent");
 
         assert_eq!(
             normalized,

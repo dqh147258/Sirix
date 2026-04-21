@@ -25,10 +25,18 @@
 
 ```bash
 ./scripts/dev-up.sh
+./scripts/dev-up.sh --clear-logs
+./scripts/dev-up.sh --release
 ./scripts/dev-logs.sh backend-server
 ```
 
 这会拉起：`postgres`、`redis`、`coturn`、`backend-server`。
+
+补充说明：
+
+- 默认启动 Debug scene；附带 `--release` 时切到 Release scene。
+- `--clear-logs` 会清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`，方便只观察本轮启动日志。
+- backend-server 现在会在写 runtime logs 前自动补齐缺失目录，因此清理日志目录后再次启动不会因为目录丢失而写日志失败。
 
 ### backend 可配置项（在哪里改）
 
@@ -40,6 +48,9 @@
 ## 3.2 启动 desktop-server
 
 ```bash
+./scripts/run-desktop-server.sh
+./scripts/run-desktop-server.sh --clear-logs
+
 cd desktop-server
 CARGO_HOME=/tmp/cargo-home cargo run
 ```
@@ -65,6 +76,7 @@ CARGO_HOME=/tmp/cargo-home cargo run
 
 ```bash
 ./scripts/run-mobile-client.sh
+./scripts/run-mobile-client.sh --clear-logs
 ```
 
 或手动：
@@ -80,6 +92,7 @@ flutter run -t apps/mobile_app/lib/main.dart \
 
 ```bash
 ./scripts/run-desktop-client.sh -d macos
+./scripts/run-desktop-client.sh --clear-logs -- -d macos
 ```
 
 或手动：
@@ -87,11 +100,12 @@ flutter run -t apps/mobile_app/lib/main.dart \
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d macos \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
-  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
+  --dart-define=SIRIX_API_BASE_URL=http://127.0.0.1:46110 \
   --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1 \
-  --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=9700 \
-  --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=9710
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=46111 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=46119
 ```
 
 ## 4. 三端功能验收清单（MVP）

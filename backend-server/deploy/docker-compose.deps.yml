@@ -1,0 +1,14 @@
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_HOST_PORT:?POSTGRES_HOST_PORT is required when --expose-deps is enabled}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_HOST_PORT:?REDIS_HOST_PORT is required when --expose-deps is enabled}:6379"
+
+  coturn:
+    ports:
+      - "${TURN_HOST_PORT:?TURN_HOST_PORT is required when --expose-deps is enabled}:3478"
+      - "${TURN_HOST_PORT:?TURN_HOST_PORT is required when --expose-deps is enabled}:3478/udp"
+      - "${TURN_RELAY_HOST_START:?TURN_RELAY_HOST_START is required when --expose-deps is enabled}-${TURN_RELAY_HOST_END:?TURN_RELAY_HOST_END is required when --expose-deps is enabled}:41000-41005/udp"

@@ -1,7 +1,13 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use serde::Deserialize;
 use toml::{map::Map, Table, Value};
+
+use crate::scene::{
+    parse_scene, resolve_scene, SirixScene, SIRIX_DESKTOP_SERVER_CONFIG_PATH_ENV, SIRIX_SCENE_ENV,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -75,9 +81,33 @@ impl Default for AuthorizationConfig {
 }
 
 pub fn load_config() -> anyhow::Result<AppConfig> {
-    let mut merged = read_toml("config.toml")?;
+    let scene = resolve_scene()?;
+    let (mut merged, used_explicit_config_path) = load_shared_config_document()?;
+    apply_scene_defaults(&mut merged, scene, !used_explicit_config_path);
     apply_env_overrides(&mut merged, "DESKTOP__")?;
+    apply_sirix_runtime_overrides(&mut merged, scene)?;
     Ok(merged.try_into()?)
+}
+
+fn load_shared_config_document() -> anyhow::Result<(Value, bool)> {
+    if let Ok(explicit_path) = std::env::var(SIRIX_DESKTOP_SERVER_CONFIG_PATH_ENV) {
+        let trimmed = explicit_path.trim();
+        if !trimmed.is_empty() {
+            return Ok((read_toml(trimmed)?, true));
+        }
+    }
+
+    if let Some(default_path) = discover_shared_config_path() {
+        return Ok((read_toml(default_path.as_path())?, false));
+    }
+
+    Ok((
+        Value::Table(
+            toml::from_str::<Table>(include_str!("../../config.toml"))
+                .context("failed to parse embedded desktop-server config")?,
+        ),
+        false,
+    ))
 }
 
 fn default_screen_state_path() -> String {
@@ -100,12 +130,22 @@ fn default_manual_approve_timeout_seconds() -> u64 {
     120
 }
 
-fn read_toml(path: &str) -> anyhow::Result<Value> {
-    let content = fs::read_to_string(path)?;
+fn read_toml(path: impl AsRef<Path>) -> anyhow::Result<Value> {
+    let content = fs::read_to_string(path.as_ref())?;
     // `toml` 0.9 no longer treats `Value` parsing as "parse a full TOML document".
     // Desktop Server config files are document-style TOML with top-level tables
     // such as `[backend]`, so parse the full document as a table explicitly.
     Ok(Value::Table(toml::from_str::<Table>(&content)?))
+}
+
+fn discover_shared_config_path() -> Option<PathBuf> {
+    std::env::current_exe().ok().and_then(|current_exe| {
+        current_exe
+            .ancestors()
+            .skip(1)
+            .map(|ancestor| ancestor.join("config.toml"))
+            .find(|candidate| candidate.is_file())
+    })
 }
 
 fn apply_env_overrides(root: &mut Value, prefix: &str) -> anyhow::Result<()> {
@@ -160,6 +200,93 @@ fn parse_env_value(raw: &str) -> anyhow::Result<Value> {
     Ok(Value::String(trimmed.to_string()))
 }
 
+fn apply_scene_defaults(root: &mut Value, scene: SirixScene, override_scene_sensitive: bool) {
+    if override_scene_sensitive {
+        set_nested_value(
+            root,
+            &["backend".to_string(), "base_url".to_string()],
+            Value::String(format!("http://127.0.0.1:{}", scene.default_backend_port())),
+        );
+        set_nested_value(
+            root,
+            &["backend".to_string(), "device_id".to_string()],
+            Value::String(scene.default_device_id().to_string()),
+        );
+        set_nested_value(
+            root,
+            &["local_ws".to_string(), "port_range_start".to_string()],
+            Value::Integer(scene.default_local_ws_port_start() as i64),
+        );
+        set_nested_value(
+            root,
+            &["local_ws".to_string(), "port_range_end".to_string()],
+            Value::Integer(scene.default_local_ws_port_end() as i64),
+        );
+    }
+}
+
+fn apply_sirix_runtime_overrides(root: &mut Value, scene: SirixScene) -> anyhow::Result<()> {
+    if let Ok(explicit_scene) = std::env::var(SIRIX_SCENE_ENV) {
+        if parse_scene(&explicit_scene).is_none() {
+            anyhow::bail!("unsupported {} value: {}", SIRIX_SCENE_ENV, explicit_scene);
+        }
+    }
+
+    if let Ok(api_base_url) = std::env::var("SIRIX_API_BASE_URL") {
+        if !api_base_url.trim().is_empty() {
+            set_nested_value(
+                root,
+                &["backend".to_string(), "base_url".to_string()],
+                Value::String(api_base_url),
+            );
+        }
+    } else if let Ok(server_host) = std::env::var("SIRIX_SERVER_HOST") {
+        if !server_host.trim().is_empty() {
+            set_nested_value(
+                root,
+                &["backend".to_string(), "base_url".to_string()],
+                Value::String(format!(
+                    "http://{}:{}",
+                    server_host.trim(),
+                    scene.default_backend_port()
+                )),
+            );
+        }
+    }
+
+    if let Ok(host) = std::env::var("SIRIX_DESKTOP_SERVER_HOST") {
+        if !host.trim().is_empty() {
+            set_nested_value(
+                root,
+                &["local_ws".to_string(), "host".to_string()],
+                Value::String(host),
+            );
+        }
+    }
+
+    if let Ok(start) = std::env::var("SIRIX_DESKTOP_SERVER_PORT_START") {
+        if let Ok(parsed) = start.trim().parse::<u16>() {
+            set_nested_value(
+                root,
+                &["local_ws".to_string(), "port_range_start".to_string()],
+                Value::Integer(parsed as i64),
+            );
+        }
+    }
+
+    if let Ok(end) = std::env::var("SIRIX_DESKTOP_SERVER_PORT_END") {
+        if let Ok(parsed) = end.trim().parse::<u16>() {
+            set_nested_value(
+                root,
+                &["local_ws".to_string(), "port_range_end".to_string()],
+                Value::Integer(parsed as i64),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn json_to_toml_value(value: serde_json::Value) -> anyhow::Result<Value> {
     match value {
         serde_json::Value::Null => Err(anyhow::anyhow!("null is not supported in env override")),
@@ -212,5 +339,42 @@ fn set_nested_value(root: &mut Value, path: &[String], value: Value) {
             .entry(path[0].clone())
             .or_insert_with(|| Value::Table(Map::new()));
         set_nested_value(entry, &path[1..], value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_scene_defaults_overrides_scene_sensitive_fields_for_debug() {
+        let mut root =
+            Value::Table(toml::from_str::<Table>(include_str!("../../config.toml")).unwrap());
+        apply_scene_defaults(&mut root, SirixScene::Debug, true);
+        let config: AppConfig = root.try_into().expect("debug config should deserialize");
+
+        assert_eq!(config.backend.base_url, "http://127.0.0.1:46110");
+        assert_eq!(
+            config.backend.device_id,
+            SirixScene::Debug.default_device_id()
+        );
+        assert_eq!(config.local_ws.port_range_start, 46111);
+        assert_eq!(config.local_ws.port_range_end, 46119);
+    }
+
+    #[test]
+    fn apply_scene_defaults_overrides_scene_sensitive_fields_for_release() {
+        let mut root =
+            Value::Table(toml::from_str::<Table>(include_str!("../../config.toml")).unwrap());
+        apply_scene_defaults(&mut root, SirixScene::Release, true);
+        let config: AppConfig = root.try_into().expect("release config should deserialize");
+
+        assert_eq!(config.backend.base_url, "http://127.0.0.1:46120");
+        assert_eq!(
+            config.backend.device_id,
+            SirixScene::Release.default_device_id()
+        );
+        assert_eq!(config.local_ws.port_range_start, 46121);
+        assert_eq!(config.local_ws.port_range_end, 46129);
     }
 }

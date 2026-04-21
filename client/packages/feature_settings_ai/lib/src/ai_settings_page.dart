@@ -567,7 +567,9 @@ class _WorkspaceTargetDialogBody extends StatelessWidget {
                               runSpacing: 8,
                               children: [
                                 AiSettingsChip(
-                                  label: workspace.hasSirixConfig ? '.sirix' : 'No .sirix',
+                                  label: workspace.hasSirixConfig
+                                      ? _sceneWorkspaceDirName
+                                      : 'No $_sceneWorkspaceDirName',
                                 ),
                                 if (workspace.hasCodexConfig)
                                   const AiSettingsChip(label: '.codex detected'),
@@ -885,7 +887,9 @@ List<String> _chipsForState(AiSettingsState state) {
   if (!state.isWorkspaceScope) {
     return [
       'Desktop Runtime',
-      effectiveSource == null ? '~/.sirix/config.toml' : 'effective: $effectiveSource',
+      effectiveSource == null
+          ? '~/' '$_sceneGlobalDirName/config.toml'
+          : 'effective: $effectiveSource',
     ];
   }
 
@@ -895,3 +899,10 @@ List<String> _chipsForState(AiSettingsState state) {
     if (effectiveSource == null && state.selectedWorkspaceRoot != null) 'effective: global defaults',
   ];
 }
+
+const _sceneGlobalDirName =
+    String.fromEnvironment('SIRIX_SCENE', defaultValue: 'debug') == 'release'
+    ? '.sirix'
+    : '.sirix-debug';
+
+const _sceneWorkspaceDirName = _sceneGlobalDirName;

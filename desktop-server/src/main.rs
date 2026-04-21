@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod bootstrap;
+mod scene;
 
 use std::net::SocketAddr;
 
@@ -31,9 +32,9 @@ async fn main() -> anyhow::Result<()> {
             .sirix_config_store
             .install_bin_shims(current_exe.as_path())
         {
-            state
-                .logger
-                .warn(format!("failed to install ~/.sirix/bin shims: {error}"));
+            state.logger.warn(format!(
+                "failed to install scene-aware Sirix bin shims: {error}"
+            ));
         }
     }
     let app = api::router(state.clone()).layer(CorsLayer::permissive());

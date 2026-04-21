@@ -246,7 +246,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
       state = state.copyWith(
         saving: false,
         noticeMessage: createdWorkspaceConfig
-            ? 'Workspace settings saved. Created a new .sirix directory for this workspace.'
+            ? 'Workspace settings saved. Created a new $_sceneWorkspaceDirName directory for this workspace.'
             : 'Workspace settings saved.',
         clearError: true,
       );
@@ -893,7 +893,7 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         effectiveConfig: effective.config,
         effectiveShellRules: const ShellRulesConfigModel(),
         effectiveWorkspaceSource: effectiveSource,
-        hasSirixConfig: (effectiveSource ?? '').contains('.sirix'),
+        hasSirixConfig: _containsSirixWorkspaceDir(effectiveSource),
         hasCodexConfig: (effectiveSource ?? '').contains('.codex'),
       );
     }
@@ -1074,13 +1074,24 @@ String _normalizeWorkspaceCandidate(String candidatePath) {
   }
 
   final segments = normalized.split(RegExp(r'[\\/]'));
-  if (segments.isNotEmpty && segments.last == '.sirix') {
+  if (segments.isNotEmpty &&
+      (segments.last == '.sirix' || segments.last == '.sirix-debug')) {
     final directory = Directory(normalized);
     final parentPath = directory.parent.path;
     return parentPath == normalized ? normalized : parentPath;
   }
   return normalized;
 }
+
+bool _containsSirixWorkspaceDir(String? source) {
+  final raw = source ?? '';
+  return raw.contains('.sirix') || raw.contains('.sirix-debug');
+}
+
+const _sceneWorkspaceDirName =
+    String.fromEnvironment('SIRIX_SCENE', defaultValue: 'debug') == 'release'
+    ? '.sirix'
+    : '.sirix-debug';
 
 bool _isWindowsDriveRoot(String path) {
   return RegExp(r'^[a-zA-Z]:[\\/]$').hasMatch(path);

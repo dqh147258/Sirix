@@ -223,10 +223,10 @@ class AiSettingsState {
     }
     if (!hasWorkspaceSirixConfig) {
       return hasWorkspaceCodexConfig
-          ? 'This workspace currently inherits global settings only. A local .sirix directory will be created on first save; existing .codex config stays informational in this screen.'
-          : 'This workspace does not have a local .sirix directory yet. The first Workspace Settings save will create one automatically.';
+          ? 'This workspace currently inherits global settings only. A local $_sceneWorkspaceDirName directory will be created on first save; existing .codex config stays informational in this screen.'
+          : 'This workspace does not have a local $_sceneWorkspaceDirName directory yet. The first Workspace Settings save will create one automatically.';
     }
-    return 'Workspace-local settings are stored under ${selectedWorkspaceRoot!}/.sirix and merged on top of your global defaults.';
+    return 'Workspace-local settings are stored under ${selectedWorkspaceRoot!}/$_sceneWorkspaceDirName and merged on top of your global defaults.';
   }
 
   AiSettingsState copyWith({
@@ -320,3 +320,7 @@ List<T> _mergeById<T>(
   }
   return merged;
 }
+const _sceneWorkspaceDirName =
+    String.fromEnvironment('SIRIX_SCENE', defaultValue: 'debug') == 'release'
+    ? '.sirix'
+    : '.sirix-debug';

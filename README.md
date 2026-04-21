@@ -32,7 +32,14 @@ Sirix/
 
 ```bash
 ./scripts/dev-up.sh
+./scripts/dev-up.sh --clear-logs
+./scripts/dev-up.sh --release
 ```
+
+说明：
+
+- 默认启动 Debug 场景；附带 `--release` 时切到 Release 场景。
+- `--clear-logs` 会清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`，方便重新观察本轮联调日志。
 
 查看后端日志：
 
@@ -57,7 +64,15 @@ CARGO_HOME=/tmp/cargo-home cargo run
 
 ## 2. desktop-server 如何使用
 
-启动：
+推荐脚本：
+
+```bash
+./scripts/run-desktop-server.sh
+./scripts/run-desktop-server.sh --clear-logs
+./scripts/run-desktop-server.sh --release
+```
+
+手动启动：
 
 ```bash
 cd desktop-server
@@ -77,10 +92,12 @@ RUST_LOG=trace cargo run
 desktop-server/config.toml
 ```
 
-默认重要配置：
+默认重要配置（按 scene 派生）：
 
-- backend 地址：`http://127.0.0.1:8080`
-- 本地 WS 端口范围：`9700-9710`
+- Debug backend 地址：`http://127.0.0.1:46110`
+- Release backend 地址：`http://127.0.0.1:46120`
+- Debug 本地 WS 端口范围：`46111-46119`
+- Release 本地 WS 端口范围：`46121-46129`
 - 固定设备 ID：`00000000-0000-0000-0000-000000000001`
 
 详细说明见 [desktop-server/README.md](./desktop-server/README.md)。
@@ -110,17 +127,20 @@ flutter run -t apps/mobile_app/lib/main.dart \
   --dart-define=SIRIX_USE_MOCK=false
 ```
 
-当前默认后端地址会指向：
+当前移动端默认后端地址会指向：
 
 ```text
-http://192.168.0.36:8080
+http://192.168.0.36:<scene-port>
 ```
+
+其中 Debug 为 `46110`，Release 为 `46120`。
 
 若只想切换服务主机地址：
 
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
   --dart-define=SIRIX_SERVER_HOST=192.168.0.50
 ```
@@ -130,8 +150,9 @@ flutter run -t apps/mobile_app/lib/main.dart \
 ```bash
 cd client
 flutter run -t apps/mobile_app/lib/main.dart \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
-  --dart-define=SIRIX_API_BASE_URL=http://192.168.0.50:8080
+  --dart-define=SIRIX_API_BASE_URL=http://192.168.0.50:46110
 ```
 
 ### 3.2 桌面端
@@ -154,9 +175,12 @@ cd client/macos && pod install
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d macos \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
-  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
-  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1
+  --dart-define=SIRIX_API_BASE_URL=http://127.0.0.1:46110 \
+  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=46111 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=46119
 ```
 
 Linux 手动运行：
@@ -164,17 +188,23 @@ Linux 手动运行：
 ```bash
 cd client
 flutter run -t apps/desktop_app/lib/main.dart -d linux \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
-  --dart-define=SIRIX_SERVER_HOST=192.168.0.36 \
-  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1
+  --dart-define=SIRIX_API_BASE_URL=http://127.0.0.1:46110 \
+  --dart-define=SIRIX_DESKTOP_SERVER_HOST=127.0.0.1 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=46111 \
+  --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=46119
 ```
 
 说明：
 
-- `SIRIX_SERVER_HOST` 用于推导 backend 地址
+- `SIRIX_SCENE` 控制 Debug / Release 默认值
+- `SIRIX_SERVER_HOST` 主要用于移动端推导 backend 地址
 - `SIRIX_DESKTOP_SERVER_HOST` 用于连接本地 `desktop-server`
 - 本地桌面代理默认仍应保持 `127.0.0.1`
 - `./scripts/run-desktop-client.sh` 不传 `-d` 时会按宿主机自动选择 `macos` 或 `linux`
+- `./scripts/run-mobile-client.sh`、`./scripts/run-desktop-client.sh` 默认走 Debug；附带脚本级 `--release` 则切到 Release scene
+- 上述两个脚本都支持 `--clear-logs`，会先清理当前 scene 对应的 backend runtime logs，再启动 Flutter
 
 详细说明见 [client/README.md](./client/README.md)。
 

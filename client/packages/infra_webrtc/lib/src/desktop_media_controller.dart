@@ -39,6 +39,7 @@ class DesktopMediaState {
     this.sharing = false,
     this.sessionId,
     this.sharedScreenId,
+    this.captureFrameRate = 20,
     this.lastSignalType,
     this.lastUpdated,
   });
@@ -49,6 +50,7 @@ class DesktopMediaState {
   final bool sharing;
   final String? sessionId;
   final String? sharedScreenId;
+  final int? captureFrameRate;
   final String? lastSignalType;
   final DateTime? lastUpdated;
 
@@ -57,6 +59,7 @@ class DesktopMediaState {
     bool? sharing,
     Object? sessionId = _unset,
     Object? sharedScreenId = _unset,
+    Object? captureFrameRate = _unset,
     Object? lastSignalType = _unset,
     DateTime? lastUpdated,
   }) {
@@ -67,6 +70,9 @@ class DesktopMediaState {
       sharedScreenId: identical(sharedScreenId, _unset)
           ? this.sharedScreenId
           : sharedScreenId as String?,
+      captureFrameRate: identical(captureFrameRate, _unset)
+          ? this.captureFrameRate
+          : captureFrameRate as int?,
       lastSignalType: identical(lastSignalType, _unset)
           ? this.lastSignalType
           : lastSignalType as String?,
@@ -227,8 +233,13 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     QualityProfile? profile,
   }) async {
     _preferredQualityProfile = profile ?? QualityProfile.p720;
+    final frameRate = _captureFrameRateForProfile(_preferredQualityProfile).value;
     AppLogger.info(
       '$_mediaStreamTraceTag desktop preferred capture profile updated sessionId=$sessionId profile=${_preferredQualityProfile.name}',
+    );
+    state = state.copyWith(
+      captureFrameRate: frameRate,
+      lastUpdated: DateTime.now(),
     );
 
     if (state.sessionId != sessionId || _videoSender == null) {
@@ -266,9 +277,11 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     await videoSender.replaceTrack(nextTracks.first);
     _displayStream = nextStream;
     _sharedScreenId = screenId;
+    final frameRate = _captureFrameRateForProfile(_preferredQualityProfile).value;
     state = state.copyWith(
       sharing: true,
       sharedScreenId: screenId,
+      captureFrameRate: frameRate,
       lastSignalType: signalLabel,
       lastUpdated: DateTime.now(),
     );
@@ -322,6 +335,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
       sharing: false,
       sessionId: null,
       sharedScreenId: null,
+      captureFrameRate: null,
       lastUpdated: DateTime.now(),
     );
   }

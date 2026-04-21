@@ -26,6 +26,7 @@ class DesktopAuthorizeState {
     this.deviceId,
     this.localWsPort,
     this.registeredDeviceId,
+    this.localLatencyMs,
     this.registeringDevice = false,
     this.errorMessage,
   });
@@ -42,6 +43,7 @@ class DesktopAuthorizeState {
   final String? deviceId;
   final int? localWsPort;
   final String? registeredDeviceId;
+  final int? localLatencyMs;
   final bool registeringDevice;
   final String? errorMessage;
 
@@ -56,6 +58,7 @@ class DesktopAuthorizeState {
     Object? deviceId = _unset,
     int? localWsPort,
     Object? registeredDeviceId = _unset,
+    Object? localLatencyMs = _unset,
     bool? registeringDevice,
     String? errorMessage,
     bool clearError = false,
@@ -73,6 +76,9 @@ class DesktopAuthorizeState {
       registeredDeviceId: identical(registeredDeviceId, _unset)
           ? this.registeredDeviceId
           : registeredDeviceId as String?,
+      localLatencyMs: identical(localLatencyMs, _unset)
+          ? this.localLatencyMs
+          : localLatencyMs as int?,
       registeringDevice: registeringDevice ?? this.registeringDevice,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
     );

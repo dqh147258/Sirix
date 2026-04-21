@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'package:uuid/uuid.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -12,6 +13,7 @@ import 'desktop_terminal_channel_bridge.dart';
 import 'desktop_authorize_state.dart';
 
 const _authMediaTraceTag = '[MEDIA_AUTH_TRACE]';
+const Duration _latencyProbeTimeout = Duration(seconds: 3);
 
 class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   DesktopAuthorizeViewModel(
@@ -31,9 +33,12 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   AuthSession? _authSession;
   bool _syncingRegistration = false;
   Timer? _reconnectTimer;
+  Timer? _latencyProbeTimer;
   int _reconnectAttempt = 0;
   bool _closingChannel = false;
   bool _disposed = false;
+  DateTime? _lastPingSentAt;
+  String? _lastPingRequestId;
 
   Future<void> bindAuthSession(AuthSession? session) async {
     _authSession = session;
@@ -62,12 +67,14 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       _reconnectAttempt = 0;
       state = state.copyWith(connecting: false, connected: true, clearError: true);
       AppLogger.info('desktop local websocket connected');
+      _startLatencyProbe();
       await _syncDeviceRegistration();
     } catch (error) {
       AppLogger.error('connect desktop local websocket failed: $error');
       state = state.copyWith(
         connecting: false,
         connected: false,
+        localLatencyMs: null,
         errorMessage: AppLocalizations.current.connectDesktopFailed('$error'),
       );
       _scheduleReconnect();
@@ -142,15 +149,18 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
         AppLogger.error('desktop local websocket error: $error');
         state = state.copyWith(
           connected: false,
+          localLatencyMs: null,
           errorMessage: AppLocalizations.current.localConnectionError('$error'),
         );
+        _stopLatencyProbe();
         if (!_closingChannel) {
           _scheduleReconnect();
         }
       },
       onDone: () {
         AppLogger.warn('desktop local websocket disconnected');
-        state = state.copyWith(connected: false);
+        state = state.copyWith(connected: false, localLatencyMs: null);
+        _stopLatencyProbe();
         if (!_closingChannel) {
           _scheduleReconnect();
         }
@@ -190,6 +200,19 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
           clearError: true,
         );
         unawaited(_syncDeviceRegistration());
+        break;
+      case 'pong':
+        final requestId = decoded['request_id'] as String?;
+        final sentAt = _lastPingSentAt;
+        if (sentAt != null &&
+            (_lastPingRequestId == null ||
+                requestId == null ||
+                requestId == _lastPingRequestId)) {
+          final latencyMs = DateTime.now().difference(sentAt).inMilliseconds.clamp(0, 9999);
+          state = state.copyWith(localLatencyMs: latencyMs);
+          _lastPingSentAt = null;
+          _lastPingRequestId = null;
+        }
         break;
       case 'authorize.request':
         final sessionId = decoded['session_id'] as String?;
@@ -501,6 +524,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   Future<void> _closeChannel() async {
     _closingChannel = true;
     _cancelReconnect();
+    _stopLatencyProbe();
     AppLogger.info('closing desktop local websocket');
     await _terminalBridge.unbindSession();
     await _mediaController.stop();
@@ -509,7 +533,7 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
     await _channel?.sink.close();
     _channel = null;
     _closingChannel = false;
-    state = state.copyWith(connected: false, connecting: false);
+    state = state.copyWith(connected: false, connecting: false, localLatencyMs: null);
   }
 
   void _scheduleReconnect() {
@@ -533,9 +557,48 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   void dispose() {
     _disposed = true;
     _cancelReconnect();
+    _stopLatencyProbe();
     unawaited(_closeChannel());
     unawaited(_terminalBridge.dispose());
     super.dispose();
+  }
+
+  void _startLatencyProbe() {
+    _stopLatencyProbe();
+    _sendLatencyProbe();
+    _latencyProbeTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _sendLatencyProbe(),
+    );
+  }
+
+  void _stopLatencyProbe() {
+    _latencyProbeTimer?.cancel();
+    _latencyProbeTimer = null;
+    _lastPingSentAt = null;
+    _lastPingRequestId = null;
+  }
+
+  void _sendLatencyProbe() {
+    final channel = _channel;
+    if (_disposed || channel == null || !state.connected) {
+      return;
+    }
+
+    final lastPingSentAt = _lastPingSentAt;
+    if (lastPingSentAt != null) {
+      if (DateTime.now().difference(lastPingSentAt) < _latencyProbeTimeout) {
+        return;
+      }
+      _lastPingSentAt = null;
+      _lastPingRequestId = null;
+      state = state.copyWith(localLatencyMs: null);
+    }
+
+    final requestId = const Uuid().v4();
+    _lastPingSentAt = DateTime.now();
+    _lastPingRequestId = requestId;
+    _localClient.sendPing(channel: channel, requestId: requestId);
   }
 
   void syncMediaState(DesktopMediaState mediaState) {

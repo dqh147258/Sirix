@@ -1,5 +1,3 @@
-name: sirix
-
 services:
   postgres:
     image: postgres:16
@@ -7,8 +5,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-sirix}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sirix}
       POSTGRES_DB: ${POSTGRES_DB:-sirix}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -20,8 +16,6 @@ services:
   redis:
     image: redis:7
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -40,11 +34,6 @@ services:
       --listening-port=${TURN_PORT:-3478}
       --min-port=${TURN_MIN_PORT:-41000}
       --max-port=${TURN_MAX_PORT:-41040}
-    ports:
-      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}"
-      - "${TURN_PORT:-3478}:${TURN_PORT:-3478}/udp"
-      - "${TURN_MIN_PORT:-41000}-${TURN_MAX_PORT:-41040}:${TURN_MIN_PORT:-41000}-${TURN_MAX_PORT:-41040}/udp"
-
   backend-server:
     build:
       context: ../
@@ -68,7 +57,7 @@ services:
       APP__REDIS__URL: redis://redis:6379
       APP__WEBRTC__ICE_SERVERS: '["stun:stun.l.google.com:19302","turn:coturn:3478?transport=udp"]'
     volumes:
-      - ./runtime-logs:/app/runtime-logs
+      - "${RUNTIME_LOGS_HOST_DIR:-./runtime-logs}:/app/runtime-logs"
 
 volumes:
   pg_data:

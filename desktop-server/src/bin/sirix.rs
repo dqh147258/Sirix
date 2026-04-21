@@ -1,5 +1,7 @@
 #[path = "../cli_support.rs"]
 mod cli_support;
+#[path = "../scene.rs"]
+mod scene;
 
 use std::{
     env,

@@ -11,9 +11,11 @@ use anyhow::Context;
 use crossterm::terminal;
 use reqwest::StatusCode;
 
+use crate::scene::{
+    resolve_scene, SirixScene, SIRIX_SCENE_ENV,
+};
+
 const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT_START: u16 = 9700;
-const DEFAULT_PORT_END: u16 = 9710;
 
 pub(crate) const CURRENT_TERMINAL_ENV: &str = "SIRIX_TERMINAL_SESSION_ID";
 pub(crate) const CURRENT_TERMINAL_KIND_ENV: &str = "SIRIX_TERMINAL_KIND";
@@ -155,10 +157,14 @@ async fn probe_running_port() -> anyhow::Result<Option<u16>> {
 
 fn start_desktop_server() -> anyhow::Result<()> {
     let desktop_server = sibling_binary_path("desktop-server")?;
-    Command::new(desktop_server)
+    let scene = resolve_scene()?;
+    let mut command = Command::new(desktop_server);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .env(SIRIX_SCENE_ENV, scene.as_str());
+    command
         .spawn()
         .context("failed to autostart desktop-server")?;
     Ok(())
@@ -182,13 +188,14 @@ fn sibling_binary_path(binary_name: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn port_range() -> std::ops::RangeInclusive<u16> {
+    let scene = resolve_scene().unwrap_or(SirixScene::Debug);
     let start = env::var("SIRIX_DESKTOP_SERVER_PORT_START")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PORT_START);
+        .unwrap_or(scene.default_local_ws_port_start());
     let end = env::var("SIRIX_DESKTOP_SERVER_PORT_END")
         .ok()
         .and_then(|value| value.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PORT_END);
+        .unwrap_or(scene.default_local_ws_port_end());
     start..=end.max(start)
 }

@@ -6,6 +6,7 @@ import 'desktop_local_client.dart';
 import 'http_backend_api_client.dart';
 import 'mock_backend_api_client.dart';
 
+const _scene = String.fromEnvironment('SIRIX_SCENE', defaultValue: 'debug');
 const _useMock = bool.fromEnvironment('SIRIX_USE_MOCK', defaultValue: false);
 const _serverHost = String.fromEnvironment(
   'SIRIX_SERVER_HOST',
@@ -21,14 +22,16 @@ const _desktopLocalHost = String.fromEnvironment(
 );
 const _desktopLocalPortStart = int.fromEnvironment(
   'SIRIX_DESKTOP_SERVER_PORT_START',
-  defaultValue: 9700,
+  defaultValue: _scene == 'release' ? 46121 : 46111,
 );
 const _desktopLocalPortEnd = int.fromEnvironment(
   'SIRIX_DESKTOP_SERVER_PORT_END',
-  defaultValue: 9710,
+  defaultValue: _scene == 'release' ? 46129 : 46119,
 );
 const useMockBackend = _useMock;
-final resolvedApiBaseUrl = _apiBaseUrl.isNotEmpty ? _apiBaseUrl : 'http://$_serverHost:8080';
+const _defaultBackendPort = _scene == 'release' ? 46120 : 46110;
+final resolvedApiBaseUrl =
+    _apiBaseUrl.isNotEmpty ? _apiBaseUrl : 'http://$_serverHost:$_defaultBackendPort';
 
 final backendApiClientProvider = Provider<BackendApiClient>((ref) {
   if (_useMock) {

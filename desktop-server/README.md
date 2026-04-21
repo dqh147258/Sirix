@@ -10,6 +10,21 @@ Rust 桌面代理服务，负责：
 
 ## 本地运行
 
+推荐脚本：
+
+```bash
+./scripts/run-desktop-server.sh
+./scripts/run-desktop-server.sh --clear-logs
+./scripts/run-desktop-server.sh --release
+```
+
+说明：
+
+- 默认启动 Debug scene；附带 `--release` 时切到 Release scene。
+- `--clear-logs` 会清理当前 scene 对应的 backend runtime logs，便于重新观察桌面代理联调日志。
+
+若需要直接在 `desktop-server/` 目录手动运行：
+
 ```bash
 cd desktop-server
 CARGO_HOME=/tmp/cargo-home cargo run
@@ -26,7 +41,7 @@ Linux 说明：
 
 关键字段：
 
-- 本地端口范围：`[local_ws].port_range_start` / `port_range_end`（默认 `9700-9710`）
+- 本地端口范围：`[local_ws].port_range_start` / `port_range_end`（默认 Debug `46111-46119`，Release `46121-46129`）
 - 快照刷新：`[capture].snapshot_interval_seconds`（默认 `5`）
 - 默认流参数：`[stream].default_profile`（`p720`）、`default_fps`（`15`）
 - backend 连接：
@@ -39,6 +54,11 @@ Linux 说明：
   - `device_id`
 
 环境变量覆盖前缀：`DESKTOP__`（双下划线分段）。
+
+补充：
+
+- `SIRIX_SCENE=debug|release` 会为 `backend.base_url`、默认 `device_id`、本地 WS 端口段注入 scene 默认值。
+- `SIRIX_HOME` 默认按 scene 选择：Debug `~/.sirix-debug`，Release `~/.sirix`。
 
 ## 本地接口
 

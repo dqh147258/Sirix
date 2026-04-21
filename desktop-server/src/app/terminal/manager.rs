@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::app::ai::config::{
     AiLaunchConfig, SIRIX_CONFIG_OVERRIDES_PATH_ENV, SIRIX_EXEC_POLICY_PATH_ENV,
 };
+use crate::scene::{resolve_scene, SIRIX_SCENE_ENV};
 
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -655,10 +656,21 @@ impl TerminalManager {
         } else {
             format!("{}{}{}", sirix_bin.display(), separator, path)
         };
-        let runtime_executable = resolve_codex_executable()?;
         builder.env("PATH", &augmented_path);
         builder.env("SIRIX_HOME", &self.sirix_home);
-        builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
+        if let Ok(scene) = resolve_scene() {
+            builder.env(SIRIX_SCENE_ENV, scene.as_str());
+        }
+        // Ordinary local shells should still open even when the optional
+        // Sirix AI runtime binary is not bundled on the current machine. The
+        // runtime executable is required for explicit AI-session launch flows,
+        // which already call `resolve_codex_executable()` on their own path.
+        // For a normal dashboard terminal we only inject the variable when the
+        // runtime can actually be resolved, instead of failing terminal
+        // creation before the PTY even starts.
+        if let Ok(runtime_executable) = resolve_codex_executable() {
+            builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
+        }
         if let Some(terminal_id) = terminal_id {
             builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
             builder.env(
@@ -1163,50 +1175,48 @@ pub(crate) fn resolve_codex_executable() -> anyhow::Result<String> {
             return Ok(codex);
         }
     }
+    let scene = crate::scene::resolve_scene()?;
+    let runtime_name = if cfg!(windows) {
+        "sirix-runtime.exe"
+    } else {
+        "sirix-runtime"
+    };
 
     if let Ok(current_exe) = env::current_exe() {
         if let Some(parent) = current_exe.parent() {
-            let runtime_name = if cfg!(windows) {
-                "sirix-runtime.exe"
-            } else {
-                "sirix-runtime"
-            };
             let runtime = parent.join(runtime_name);
-            if runtime.is_file() {
+            if runtime.is_file()
+                && parent
+                    .file_name()
+                    .and_then(|segment| segment.to_str())
+                    .is_some_and(|segment| segment == scene.runtime_profile())
+            {
                 return Ok(runtime.display().to_string());
             }
         }
     }
 
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    for profile in ["debug", "release"] {
-        let runtime = manifest_dir
-            .join("..")
-            .join("third_party")
-            .join("codex-rs")
-            .join("target")
-            .join(profile)
-            .join(if cfg!(windows) {
-                "sirix-runtime.exe"
-            } else {
-                "sirix-runtime"
-            });
-        if runtime.is_file() {
-            return Ok(runtime.display().to_string());
-        }
+    let runtime = manifest_dir
+        .join("..")
+        .join("third_party")
+        .join("codex-rs")
+        .join("target")
+        .join(scene.runtime_profile())
+        .join(runtime_name);
+    if runtime.is_file() {
+        return Ok(runtime.display().to_string());
     }
 
-    let path_entry = if cfg!(windows) {
-        "sirix-runtime.exe"
-    } else {
-        "sirix-runtime"
-    };
-    if executable_in_path(path_entry) {
-        return Ok(path_entry.to_string());
+    if executable_in_path(runtime_name) {
+        return Ok(runtime_name.to_string());
     }
 
     anyhow::bail!(
-        "Sirix AI runtime executable not found. Expected `sirix-runtime` next to the app, in `third_party/codex-rs/target/{{debug,release}}`, or on PATH."
+        "Sirix AI runtime executable not found for scene {}. Expected `{}` next to the matching app profile, in `third_party/codex-rs/target/{}`, or on PATH.",
+        scene.as_str(),
+        runtime_name,
+        scene.runtime_profile()
     )
 }
 

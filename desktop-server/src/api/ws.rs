@@ -75,7 +75,10 @@ enum LocalWsInbound {
         error_message: String,
     },
     #[serde(rename = "ping")]
-    Ping,
+    Ping {
+        #[serde(default)]
+        request_id: Option<String>,
+    },
 }
 
 pub async fn local_ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -437,9 +440,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                 }
                             }
-                            Ok(LocalWsInbound::Ping) => {
+                            Ok(LocalWsInbound::Ping { request_id }) => {
+                                let reply = if let Some(request_id) = request_id.filter(|value| !value.trim().is_empty()) {
+                                    serde_json::json!({
+                                        "type": "pong",
+                                        "request_id": request_id,
+                                    })
+                                } else {
+                                    serde_json::json!({ "type": "pong" })
+                                };
                                 if socket
-                                    .send(Message::Text(serde_json::json!({ "type": "pong" }).to_string()))
+                                    .send(Message::Text(reply.to_string()))
                                     .await
                                     .is_err()
                                 {

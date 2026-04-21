@@ -22,6 +22,7 @@ class TerminalPage extends ConsumerStatefulWidget {
     this.showHeader = true,
     this.compact = false,
     this.fullBleed = false,
+    this.trailingTabActions = const <TerminalToolbarAction>[],
   });
 
   final String accessToken;
@@ -31,9 +32,22 @@ class TerminalPage extends ConsumerStatefulWidget {
   final bool showHeader;
   final bool compact;
   final bool fullBleed;
+  final List<TerminalToolbarAction> trailingTabActions;
 
   @override
   ConsumerState<TerminalPage> createState() => _TerminalPageState();
+}
+
+class TerminalToolbarAction {
+  const TerminalToolbarAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onPressed;
 }
 
 class _TerminalPageState extends ConsumerState<TerminalPage> {
@@ -41,6 +55,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
   final Map<String, TerminalController> _terminalControllers = <String, TerminalController>{};
   late TerminalPageConfig _config;
+  String? _lastFocusedTerminalId;
 
   @override
   void initState() {
@@ -98,8 +113,18 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final approvalRequest = state.activeApprovalRequest;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;
+    final toolbarActions = <TerminalToolbarAction>[
+      if (canCreate)
+        TerminalToolbarAction(
+          icon: Icons.add_rounded,
+          tooltip: l10n.createTerminal,
+          onPressed: () => unawaited(viewModel.createTerminal()),
+        ),
+      ...widget.trailingTabActions,
+    ];
 
     _disposeInactiveTerminalControllers(state.terminals.map((item) => item.id));
+    _syncTerminalFocus(activeTerminalId);
 
     return Column(
       children: [
@@ -174,8 +199,8 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
           ),
         Container(
           margin: EdgeInsets.symmetric(horizontal: horizontalInset),
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          height: 42,
+          padding: const EdgeInsets.all(8),
+          constraints: const BoxConstraints(minHeight: 48),
           decoration: BoxDecoration(
             color: palette.surface.withValues(alpha: 0.88),
             borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
@@ -194,29 +219,44 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                   ),
                 )
               : Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: state.terminals.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 4),
-                        itemBuilder: (context, index) {
-                          final item = state.terminals[index];
-                          return _TerminalTab(
-                            summary: item,
-                            selected: item.id == state.activeTerminalId,
-                            onTap: () => viewModel.attachTerminal(item.id),
-                            onClose: () => unawaited(viewModel.closeTerminal(item.id)),
-                          );
-                        },
+                      child: ConstrainedBox(
+                        // The reviewed dashboard keeps terminal tabs mandatory
+                        // even in narrow layouts. Wrapping avoids hiding tabs
+                        // behind horizontal scrolling once the terminal area is
+                        // resized shorter or narrower.
+                        constraints: const BoxConstraints(maxHeight: 96),
+                        child: SingleChildScrollView(
+                          physics: const ClampingScrollPhysics(),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 6,
+                            children: [
+                              for (final item in state.terminals)
+                                _TerminalTab(
+                                  summary: item,
+                                  selected: item.id == state.activeTerminalId,
+                                  onTap: () => viewModel.attachTerminal(item.id),
+                                  onClose: () => unawaited(viewModel.closeTerminal(item.id)),
+                                ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
-                    if (canCreate)
-                      IconButton(
-                        onPressed: () => unawaited(viewModel.createTerminal()),
-                        icon: const Icon(Icons.add, size: 18),
-                        splashRadius: 18,
+                    if (toolbarActions.isNotEmpty) ...[
+                      const SizedBox(width: 12),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final action in toolbarActions)
+                            _TerminalToolbarButton(action: action),
+                        ],
                       ),
+                    ],
                   ],
                 ),
         ),
@@ -253,21 +293,25 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                             ),
                           ),
                         Positioned.fill(
-                          child: IgnorePointer(
-                            ignoring: state.terminals.isEmpty,
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(14, 16, 14, 8),
-                              child: terminal == null
-                                  ? const SizedBox.shrink()
-                                  : TerminalView(
-                                      terminal,
-                                      key: ValueKey(activeTerminalId),
-                                      controller: terminalController,
-                                      theme: _theme,
-                                      focusNode: _focusNode,
-                                      autofocus: true,
-                                      backgroundOpacity: 0,
-                                    ),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onTapDown: (_) => _requestTerminalFocus(),
+                            child: IgnorePointer(
+                              ignoring: state.terminals.isEmpty,
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(14, 16, 14, 8),
+                                child: terminal == null
+                                    ? const SizedBox.shrink()
+                                    : TerminalView(
+                                        terminal,
+                                        key: ValueKey(activeTerminalId),
+                                        controller: terminalController,
+                                        theme: _theme,
+                                        focusNode: _focusNode,
+                                        autofocus: true,
+                                        backgroundOpacity: 0,
+                                      ),
+                              ),
                             ),
                           ),
                         ),
@@ -362,6 +406,39 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
       // avoid keeping stale anchors alive after the terminal session is closed.
       _terminalControllers.remove(terminalId)?.dispose();
     }
+  }
+
+  void _syncTerminalFocus(String? activeTerminalId) {
+    if (activeTerminalId == null || activeTerminalId.isEmpty) {
+      _lastFocusedTerminalId = null;
+      return;
+    }
+
+    if (_lastFocusedTerminalId == activeTerminalId) {
+      return;
+    }
+
+    _lastFocusedTerminalId = activeTerminalId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      _requestTerminalFocus();
+    });
+  }
+
+  void _requestTerminalFocus() {
+    if (!mounted || _focusNode.hasFocus) {
+      return;
+    }
+
+    // The dashboard redesign embeds TerminalPage inside additional split-panel
+    // chrome. Some desktop builds no longer transfer focus reliably on the
+    // first frame after a tab/terminal switch, so request focus explicitly on
+    // terminal activation and direct viewport clicks. Avoid doing this on
+    // ordinary rebuilds so other controls can keep focus when the user moves
+    // away from the terminal intentionally.
+    FocusScope.of(context).requestFocus(_focusNode);
   }
 
   Future<void> _copySelection({
@@ -607,6 +684,41 @@ class _ActionIconButton extends StatelessWidget {
             border: Border.all(color: palette.glassStroke),
           ),
           child: Icon(icon, size: 20),
+        ),
+      ),
+    );
+  }
+}
+
+class _TerminalToolbarButton extends StatelessWidget {
+  const _TerminalToolbarButton({
+    required this.action,
+  });
+
+  final TerminalToolbarAction action;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.sirix;
+
+    return Tooltip(
+      message: action.tooltip,
+      child: InkWell(
+        onTap: action.onPressed,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: palette.surfaceRaised.withValues(alpha: 0.74),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: palette.glassStroke),
+          ),
+          child: Icon(
+            action.icon,
+            size: 18,
+            color: palette.textPrimary,
+          ),
         ),
       ),
     );

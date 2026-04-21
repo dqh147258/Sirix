@@ -28,8 +28,8 @@ class AppLocalizations {
   bool get isZh => locale.languageCode.toLowerCase().startsWith('zh');
 
   String get sirix => isZh ? 'Sirix' : 'Sirix';
-  String get desktopTitle => isZh ? 'Sirix Console' : 'Sirix Console';
-  String get mobileTitle => isZh ? 'Sirix Remote' : 'Sirix Remote';
+  String get desktopTitle => isZh ? 'Sirix' : 'Sirix';
+  String get mobileTitle => isZh ? 'Sirix' : 'Sirix';
   String get loginPanelTitle => isZh ? '欢迎回来' : 'Welcome back';
   String get loginPanelSubtitle =>
       isZh ? '输入凭据后即可进入远程工作台。' : 'Enter your credentials to access the workspace.';
@@ -66,6 +66,9 @@ class AppLocalizations {
   String get terminalNav => isZh ? 'Terminal' : 'Terminal';
   String get authorizeNav => isZh ? 'Authorize' : 'Authorize';
   String get nodesNav => isZh ? 'Nodes' : 'Nodes';
+  String get runtimeStatusTitle => isZh ? '运行状态' : 'Runtime Status';
+  String get runtimeStatusSubtitle =>
+      isZh ? 'MCP 健康、后端连接与运行时总览' : 'MCP health, backend connectivity, and runtime overview';
   String get desktopConsoleSubtitle =>
       isZh ? '面向桌面设备侧的连接授权与远程终端控制台' : 'Desktop-side console for authorization and remote terminal workflows';
   String get logout => isZh ? '退出' : 'Logout';
@@ -73,10 +76,14 @@ class AppLocalizations {
   String get authorize => isZh ? '授权' : 'Authorize';
   String get terminal => isZh ? '终端' : 'Terminal';
   String get account => isZh ? '账号' : 'Account';
+  String get globalSettingsTitle => isZh ? '全局设置' : 'Global Settings';
+  String get globalSettingsSubtitle =>
+      isZh ? 'CLI、Provider、Skills、MCP、Agent 与权限控制' : 'CLI, Provider, Skills, MCP, Agent, and permission controls';
+  String get workspaceSettingsTitle => isZh ? '工作区设置' : 'Workspace Settings';
+  String get workspaceSettingsSubtitle =>
+      isZh ? '工作区本地的 Skills、MCP、Agents 与权限配置' : 'Workspace-local Skills, MCP, Agents, and Permissions';
   String get desktopOperator => isZh ? '桌面操作员' : 'Desktop operator';
-  String get desktopConnectedNodes => isZh ? 'CONNECTED: 4 NODES' : 'CONNECTED: 4 NODES';
   String get desktopNodeActive => isZh ? 'NODE-04 ACTIVE' : 'NODE-04 ACTIVE';
-  String get primaryDisplayTitle => isZh ? 'PRIMARY DISPLAY' : 'PRIMARY DISPLAY';
   String get awaitingSync => isZh ? '等待同步' : 'Awaiting sync';
   String get standbyLabel => isZh ? 'Standby' : 'Standby';
   String get settingsLabel => isZh ? 'Settings' : 'Settings';
@@ -90,6 +97,23 @@ class AppLocalizations {
   String get localWs => isZh ? '本地 WS' : 'Local WS';
   String get connected => isZh ? '已连接' : 'Connected';
   String get disconnected => isZh ? '未连接' : 'Disconnected';
+  String get dashboardSummaryTitle => isZh ? '桌面状态' : 'Desktop Summary';
+  String dashboardConnectedScreen(String screenId) =>
+      isZh ? '当前连接屏幕：$screenId' : 'Connected screen: $screenId';
+  String get dashboardNoScreenConnected =>
+      isZh ? '当前还没有连接任何屏幕' : 'No screen connected';
+  String get dashboardLoginStatusLabel => isZh ? '登录状态' : 'Login status';
+  String dashboardSignedInAs(String username) =>
+      isZh ? '已登录 · $username' : 'Signed in · $username';
+  String get dashboardConnectionStatusLabel => isZh ? '连接状态' : 'Connection status';
+  String get dashboardRenderRateLabel => isZh ? '渲染帧率' : 'Render';
+  String get dashboardHoverLatencyTitle => isZh ? '延迟明细' : 'Latency detail';
+  String get dashboardHoverLatencyBody => isZh
+      ? '展示从 desktop-server 到当前共享链路的往返时间摘要。后续可以在这里补充更详细的调试信息。'
+      : 'Shows the round-trip summary for the current desktop sharing path. This surface can expand with deeper diagnostics later.';
+  String get dashboardResizeHint => isZh ? '拖动以调整终端高度' : 'Drag to resize terminal';
+  String get terminalExpandTooltip => isZh ? '展开终端工作区' : 'Expand terminal workspace';
+  String get terminalRestoreTooltip => isZh ? '恢复 Dashboard 布局' : 'Restore dashboard layout';
   String get deviceRegistration => isZh ? '设备注册' : 'Device registration';
   String get sharingState => isZh ? '共享状态' : 'Sharing state';
   String get sharing => isZh ? '屏幕共享中' : 'Sharing';
@@ -105,9 +129,6 @@ class AppLocalizations {
   String get latestEvent => isZh ? '最近事件' : 'Latest event';
   String get localPort => isZh ? '本地端口' : 'Local port';
   String get currentUser => isZh ? '当前用户' : 'Current user';
-  String get terminalWorkspace => isZh ? 'Terminal Workspace' : 'Terminal Workspace';
-  String get terminalWorkspaceHint =>
-      isZh ? '真实 PTY 终端会接到这里，与移动端共享同一会话、同一输出和同一输入通道。' : 'A real PTY terminal will appear here and share the same session, output, and input channel with mobile.';
   String get mobileReady => isZh ? '移动端远程工作台已就绪' : 'Mobile remote workspace is ready';
   String currentSessionLabel(String sessionId) =>
       isZh ? '当前会话 $sessionId' : 'Current session $sessionId';
@@ -188,6 +209,12 @@ class AppLocalizations {
   String get currentSharedScreen => isZh ? '当前共享屏幕' : 'Current shared screen';
   String get desktopAuthorizeIntro =>
       isZh ? '桌面端仅负责授权与推流，不再预览本机屏幕。' : 'The desktop client focuses on authorization and publishing instead of local preview.';
+  String get checkingDesktopSession =>
+      isZh ? '正在检查桌面会话...' : 'Checking desktop session...';
+  String get authModeLabel => isZh ? '认证模式' : 'AUTH MODE';
+  String get authModeValue => isZh ? 'AES-256-GCM' : 'AES-256-GCM';
+  String get sessionRoleLabel => isZh ? '会话角色' : 'SESSION ROLE';
+  String get fallbackAvatarInitial => 'S';
   String get autoApproveShare => isZh ? '自动授权屏幕共享' : 'Auto approve screen sharing';
   String get deviceLevelDefaultOff =>
       isZh ? '设备级设置，默认关闭' : 'Device-level setting, disabled by default';
@@ -257,6 +284,8 @@ class AppLocalizations {
       isZh ? '加载终端列表失败: $error' : 'Failed to load terminals: $error';
   String terminalCreateFailed(String error) =>
       isZh ? '创建终端失败: $error' : 'Failed to create terminal: $error';
+  String get terminalCreateUnavailable =>
+      isZh ? '桌面端未成功创建终端，请检查 desktop-server 日志。' : 'Desktop failed to create the terminal. Check desktop-server logs.';
   String terminalCloseFailed(String error) =>
       isZh ? '关闭终端失败: $error' : 'Failed to close terminal: $error';
   String get terminalStreamUnavailable =>

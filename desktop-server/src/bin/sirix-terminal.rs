@@ -1,5 +1,7 @@
 #[path = "../cli_support.rs"]
 mod cli_support;
+#[path = "../scene.rs"]
+mod scene;
 
 use std::{
     env,
@@ -21,6 +23,7 @@ use cli_support::{
     ensure_desktop_server, ensure_login_prompt, local_http_url, local_ws_url, spawn_stdin_reader,
     RawModeGuard, CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
 };
+use scene::{resolve_scene, resolve_sirix_home, SIRIX_SCENE_ENV};
 
 #[derive(Debug, serde::Serialize)]
 struct CreateHostedTerminalSessionRequest<'a> {
@@ -427,12 +430,7 @@ fn spawn_pty_reader(
 }
 
 fn apply_shared_shell_env(builder: &mut CommandBuilder, terminal_id: Uuid) -> anyhow::Result<()> {
-    let sirix_home = env::var("SIRIX_HOME")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".sirix")))
-        .context("failed to resolve SIRIX_HOME")?;
+    let sirix_home = resolve_sirix_home().context("failed to resolve SIRIX_HOME")?;
     let bin_dir = sirix_home.join("bin");
     let path = env::var("PATH").unwrap_or_default();
     let separator = if cfg!(windows) { ';' } else { ':' };
@@ -447,6 +445,7 @@ fn apply_shared_shell_env(builder: &mut CommandBuilder, terminal_id: Uuid) -> an
     // `sirix-terminal` launches can be rejected deterministically.
     builder.env("PATH", augmented_path);
     builder.env("SIRIX_HOME", sirix_home);
+    builder.env(SIRIX_SCENE_ENV, resolve_scene()?.as_str());
     builder.env(CURRENT_TERMINAL_ENV, terminal_id.to_string());
     builder.env(CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL);
     Ok(())

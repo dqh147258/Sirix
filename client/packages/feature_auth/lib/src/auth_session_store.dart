@@ -4,6 +4,9 @@ import 'dart:io';
 import 'package:infra_api/infra_api.dart';
 import 'package:path_provider/path_provider.dart';
 
+const _scene = String.fromEnvironment('SIRIX_SCENE', defaultValue: 'debug');
+const _sceneStorageDirName = _scene == 'release' ? 'sirix' : 'sirix-debug';
+
 class AuthSessionStore {
   Future<AuthSession?> load(String clientType) async {
     final file = await _sessionFile(clientType);
@@ -40,7 +43,7 @@ class AuthSessionStore {
 
   Future<File> _sessionFile(String clientType) async {
     final baseDirectory = await _baseDirectory();
-    return File('${baseDirectory.path}/sirix/auth_session_$clientType.json');
+    return File('${baseDirectory.path}/$_sceneStorageDirName/auth_session_$clientType.json');
   }
 
   Future<Directory> _baseDirectory() async {

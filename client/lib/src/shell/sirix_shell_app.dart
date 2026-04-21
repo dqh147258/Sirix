@@ -22,7 +22,7 @@ class SirixShellApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: _useDesktopShell ? 'Sirix Desktop' : 'Sirix Mobile',
+      title: 'Sirix',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkSirix(),
       supportedLocales: AppLocalizations.supportedLocales,

@@ -350,6 +350,18 @@ class DesktopLocalClient {
     );
   }
 
+  void sendPing({
+    required WebSocketChannel channel,
+    String? requestId,
+  }) {
+    channel.sink.add(
+      jsonEncode({
+        'type': 'ping',
+        if (requestId != null && requestId.trim().isNotEmpty) 'request_id': requestId,
+      }),
+    );
+  }
+
   void sendWebrtcSignal({
     required WebSocketChannel channel,
     required String sessionId,

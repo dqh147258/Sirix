@@ -15,6 +15,7 @@ import 'terminal_state.dart';
 const Duration _terminalInputDebounce = Duration(milliseconds: 12);
 const Duration _terminalResizeDebounce = Duration(milliseconds: 80);
 const Duration _terminalSessionAttachRetryDelay = Duration(milliseconds: 180);
+const Duration _desktopLocalAttachReconcileDelay = Duration(milliseconds: 220);
 const int _terminalImmediateInputThreshold = 128;
 const int _terminalSessionAttachRetryCount = 6;
 
@@ -82,6 +83,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
   bool _hasLoaded = false;
   bool _loadingInFlight = false;
   bool _creatingInFlight = false;
+  bool _disposed = false;
 
   void updateConfig(TerminalPageConfig config) {
     _config = config;
@@ -377,6 +379,9 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
           channel: channel,
           terminalId: terminalId,
         );
+        if (_shouldRetryDesktopLocalAttach(terminalId)) {
+          unawaited(_retryDesktopLocalAttachUntilReady(terminalId));
+        }
         state = state.copyWith(connecting: false);
         return;
       } catch (error, stackTrace) {
@@ -945,6 +950,89 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
     }
   }
 
+  bool _shouldRetryDesktopLocalAttach(String terminalId) {
+    if (_transport != _TerminalTransport.desktopLocal) {
+      return false;
+    }
+
+    for (final terminal in state.terminals) {
+      if (terminal.id == terminalId) {
+        return terminal.state != 'active';
+      }
+    }
+    return false;
+  }
+
+  Future<void> _retryDesktopLocalAttachUntilReady(String terminalId) async {
+    for (var attempt = 0; attempt < _terminalSessionAttachRetryCount; attempt += 1) {
+      await Future<void>.delayed(_terminalSessionAttachRetryDelay);
+      if (_transport != _TerminalTransport.desktopLocal ||
+          state.activeTerminalId != terminalId ||
+          !_shouldUseDesktopLocalTransport ||
+          !_shouldRetryDesktopLocalAttach(terminalId)) {
+        return;
+      }
+
+      final channel = _channel;
+      final localClient = _desktopLocalClient;
+      if (channel == null || localClient == null) {
+        return;
+      }
+
+      // Desktop terminal creation is async on the desktop-server side. The
+      // backend can return an "opening" terminal record before the local PTY
+      // has published its first ready/snapshot event, which leaves the client
+      // stuck with a blank "OPENING" tab and no usable stdin path. Re-sending
+      // attach asks desktop-server to replay terminal.ready + terminal.snapshot
+      // once the PTY actually exists, without changing the underlying terminal
+      // session or transport model.
+      localClient.sendTerminalAttach(
+        channel: channel,
+        terminalId: terminalId,
+      );
+    }
+
+    await _reconcileDesktopLocalTerminalList(activeTerminalIdHint: terminalId);
+  }
+
+  Future<void> _reconcileDesktopLocalTerminalList({
+    String? activeTerminalIdHint,
+  }) async {
+    final localClient = _desktopLocalClient;
+    if (localClient == null || !_shouldUseDesktopLocalTransport) {
+      return;
+    }
+
+    await Future<void>.delayed(_desktopLocalAttachReconcileDelay);
+    if (_disposed || _loadingInFlight) {
+      return;
+    }
+
+    try {
+      final terminals = await localClient.listTerminalSessions();
+      _replaceTerminals(terminals);
+      final requestedTerminalId = activeTerminalIdHint ?? state.activeTerminalId;
+      if (requestedTerminalId == null || requestedTerminalId.isEmpty) {
+        return;
+      }
+
+      final stillPresent = terminals.any((terminal) => terminal.id == requestedTerminalId);
+      if (!stillPresent) {
+        // Desktop-local creation can fail after the backend has already handed
+        // the UI an optimistic "opening" record. Reconcile against the real
+        // desktop-server session list so stale tabs disappear instead of
+        // lingering as blank OPENING terminals.
+        _removeTerminalById(requestedTerminalId);
+        state = state.copyWith(
+          errorMessage: AppLocalizations.current.terminalCreateUnavailable,
+        );
+      }
+    } catch (error, stackTrace) {
+      AppLogger.warn('desktop local terminal reconcile failed error=$error');
+      AppLogger.warn('desktop local terminal reconcile stack: $stackTrace');
+    }
+  }
+
   void _updateTerminalStateById(String terminalId, String nextState) {
     _updateTerminalSummary(
       terminalId,
@@ -1191,6 +1279,7 @@ class TerminalViewModel extends BaseViewModel<TerminalState> {
 
   @override
   void dispose() {
+    _disposed = true;
     unawaited(_detachChannel());
     unawaited(_sessionChannelSubscription?.cancel());
     final cachedTerminalIds = _terminalCache.keys.toList(growable: false);

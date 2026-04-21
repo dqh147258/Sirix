@@ -80,10 +80,8 @@ class _MobileBrandHeader extends StatelessWidget {
               ),
             ],
           ),
-          child: Icon(
-            clientType == 'desktop' ? Icons.terminal_rounded : Icons.monitor_heart_rounded,
-            color: palette.primaryBright,
-            size: 34,
+          child: const Center(
+            child: SirixBrandMark(size: 40),
           ),
         ),
         const SizedBox(height: 18),

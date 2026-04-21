@@ -38,27 +38,17 @@ class _DesktopAuthForm extends StatelessWidget {
                   borderRadius: BorderRadius.circular(18),
                   border: Border.all(color: palette.primaryBright.withValues(alpha: 0.24)),
                 ),
-                child: Icon(
-                  clientType == 'desktop' ? Icons.terminal_rounded : Icons.monitor_rounded,
-                  color: palette.primaryBright,
-                  size: 30,
+                child: const Center(
+                  child: SirixBrandMark(size: 34),
                 ),
               ),
               const SizedBox(height: 18),
-              RichText(
-                text: TextSpan(
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                        fontSize: 34,
-                        letterSpacing: -1.0,
-                      ),
-                  children: [
-                    const TextSpan(text: 'Sirix '),
-                    TextSpan(
-                      text: 'Pro',
-                      style: TextStyle(color: palette.primaryBright),
+              Text(
+                clientType == 'desktop' ? l10n.desktopTitle : l10n.mobileTitle,
+                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                      fontSize: 34,
+                      letterSpacing: -1.0,
                     ),
-                  ],
-                ),
               ),
               const SizedBox(height: 8),
               Text(
@@ -223,10 +213,8 @@ class _AuthForm extends StatelessWidget {
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(color: palette.primaryBright.withValues(alpha: 0.24)),
                   ),
-                  child: Icon(
-                    clientType == 'desktop' ? Icons.terminal_rounded : Icons.monitor_rounded,
-                    color: palette.primaryBright,
-                    size: 28,
+                  child: const Center(
+                    child: SirixBrandMark(size: 30),
                   ),
                 ),
                 const SizedBox(height: 16),

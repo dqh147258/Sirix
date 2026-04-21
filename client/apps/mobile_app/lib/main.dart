@@ -54,7 +54,7 @@ class MobileApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Sirix Mobile',
+      title: 'Sirix',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkSirix(),
       supportedLocales: AppLocalizations.supportedLocales,

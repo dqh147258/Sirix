@@ -655,10 +655,18 @@ impl TerminalManager {
         } else {
             format!("{}{}{}", sirix_bin.display(), separator, path)
         };
-        let runtime_executable = resolve_codex_executable()?;
         builder.env("PATH", &augmented_path);
         builder.env("SIRIX_HOME", &self.sirix_home);
-        builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
+        // Ordinary local shells should still open even when the optional
+        // Sirix AI runtime binary is not bundled on the current machine. The
+        // runtime executable is required for explicit AI-session launch flows,
+        // which already call `resolve_codex_executable()` on their own path.
+        // For a normal dashboard terminal we only inject the variable when the
+        // runtime can actually be resolved, instead of failing terminal
+        // creation before the PTY even starts.
+        if let Ok(runtime_executable) = resolve_codex_executable() {
+            builder.env("SIRIX_CODEX_EXECUTABLE", runtime_executable);
+        }
         if let Some(terminal_id) = terminal_id {
             builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
             builder.env(

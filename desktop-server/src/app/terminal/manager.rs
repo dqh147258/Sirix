@@ -17,8 +17,12 @@ use tokio::sync::{broadcast, mpsc::UnboundedSender, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::app::ai::config::{
-    AiLaunchConfig, SIRIX_CONFIG_OVERRIDES_PATH_ENV, SIRIX_EXEC_POLICY_PATH_ENV,
+use crate::app::{
+    ai::config::{AiLaunchConfig, SIRIX_CONFIG_OVERRIDES_PATH_ENV, SIRIX_EXEC_POLICY_PATH_ENV},
+    terminal::state_cache::{
+        ResizeReplayMetadata, TerminalOutboundEvent, TerminalReadyV2Payload, TerminalSyncState,
+        V2_SYNC_MODE,
+    },
 };
 use crate::scene::{resolve_scene, SIRIX_SCENE_ENV};
 
@@ -26,11 +30,48 @@ type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 type SharedReplayBuffer = Arc<Mutex<TerminalReplayBuffer>>;
+type SharedSyncState = Arc<Mutex<TerminalSyncState>>;
 type SharedHostedControlSender = Arc<Mutex<Option<UnboundedSender<HostedTerminalCommand>>>>;
+type SharedResizePublishFingerprint = Arc<Mutex<Option<ResizePublishFingerprint>>>;
 
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
 const TERMINAL_OUTPUT_MAX_BATCH_BYTES: usize = 16 * 1024;
 const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalClientKind {
+    Unknown,
+    SystemTerminal,
+    DesktopApp,
+    MobileApp,
+}
+
+impl TerminalClientKind {
+    pub fn from_wire(value: Option<&str>) -> Self {
+        match value.unwrap_or_default() {
+            "system_terminal" => Self::SystemTerminal,
+            "desktop_app" => Self::DesktopApp,
+            "mobile_app" => Self::MobileApp,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeometryAuthoritySource {
+    ServerDefault,
+    DesktopApp,
+    SystemTerminal,
+}
+
+impl GeometryAuthoritySource {
+    fn as_api_str(self) -> &'static str {
+        match self {
+            Self::ServerDefault => "server_default",
+            Self::DesktopApp => "desktop_app",
+            Self::SystemTerminal => "system_terminal",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSessionSource {
@@ -55,7 +96,106 @@ struct TerminalSessionHandle {
     endpoint: TerminalSessionEndpoint,
     metadata: Arc<Mutex<TerminalSessionMetadata>>,
     replay_buffer: SharedReplayBuffer,
+    sync_state: SharedSyncState,
+    last_resize_publish: SharedResizePublishFingerprint,
     remote_sync: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResizePublishFingerprint {
+    authority_source: GeometryAuthoritySource,
+    geometry_generation: u64,
+    layout_epoch: u64,
+    buffer_epoch: u64,
+    rows: u16,
+    cols: u16,
+    history_generation: Option<u64>,
+    history_start_line: Option<i64>,
+    history_end_line: Option<i64>,
+}
+
+impl ResizePublishFingerprint {
+    fn from_resize_bundle(
+        events: &[TerminalOutboundEvent],
+        authority_source: GeometryAuthoritySource,
+        geometry_generation: u64,
+        layout_epoch: u64,
+        rows: u16,
+        cols: u16,
+    ) -> Option<Self> {
+        let mut saw_resize_bundle_event = false;
+        let mut buffer_epoch = 0_u64;
+        let mut history_generation = None;
+        let mut history_start_line = None;
+        let mut history_end_line = None;
+
+        for event in events {
+            match event.event_type {
+                "terminal.layout.changed" => {
+                    saw_resize_bundle_event = true;
+                }
+                "terminal.buffer.changed" => {
+                    if let Some(epoch) = event.payload.get("buffer_epoch").and_then(|v| v.as_u64())
+                    {
+                        buffer_epoch = epoch;
+                    }
+                }
+                "terminal.screen.snapshot" => {
+                    saw_resize_bundle_event = true;
+                    if let Some(epoch) = event.payload.get("buffer_epoch").and_then(|v| v.as_u64())
+                    {
+                        buffer_epoch = epoch;
+                    }
+                }
+                "terminal.state.snapshot" => {
+                    saw_resize_bundle_event = true;
+                    if let Some(epoch) = event.payload.get("buffer_epoch").and_then(|v| v.as_u64())
+                    {
+                        buffer_epoch = epoch;
+                    }
+                    if let Some(main) = event.payload.get("main") {
+                        history_generation =
+                            main.get("history_generation").and_then(|v| v.as_u64());
+                        history_start_line =
+                            main.get("history_start_line").and_then(|v| v.as_i64());
+                        history_end_line = main.get("history_end_line").and_then(|v| v.as_i64());
+                    }
+                }
+                "terminal.history.invalidated" => {
+                    saw_resize_bundle_event = true;
+                    history_generation = event
+                        .payload
+                        .get("history_generation")
+                        .and_then(|v| v.as_u64());
+                    history_start_line = event
+                        .payload
+                        .get("history_start_line")
+                        .and_then(|v| v.as_i64());
+                    history_end_line = event
+                        .payload
+                        .get("history_end_line")
+                        .and_then(|v| v.as_i64());
+                }
+                _ => {}
+            }
+        }
+
+        if !saw_resize_bundle_event {
+            return None;
+        }
+
+        Some(Self {
+            authority_source,
+            geometry_generation,
+            layout_epoch,
+            buffer_epoch,
+            rows,
+            cols,
+            history_generation,
+            history_start_line,
+            history_end_line,
+        })
+    }
 }
 
 enum TerminalSessionEndpoint {
@@ -87,6 +227,16 @@ struct TerminalSessionMetadata {
     state: String,
     cols: u16,
     rows: u16,
+    default_cols: u16,
+    default_rows: u16,
+    desktop_app_attached: bool,
+    system_terminal_attached: bool,
+    latest_desktop_app_size: Option<(u16, u16)>,
+    latest_system_terminal_size: Option<(u16, u16)>,
+    desktop_app_presence_epoch: u64,
+    system_terminal_presence_epoch: u64,
+    authority_source: GeometryAuthoritySource,
+    geometry_generation: u64,
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
 }
@@ -104,19 +254,24 @@ struct TerminalOutputContext {
     local_events: broadcast::Sender<String>,
     terminal_id: Uuid,
     replay_buffer: SharedReplayBuffer,
+    sync_state: SharedSyncState,
     remote_sync: bool,
 }
 
 #[derive(Debug, Default)]
 struct TerminalReplayBuffer {
     bytes: VecDeque<u8>,
+    latest_sequence: u64,
+    history_truncated: bool,
 }
 
 impl TerminalReplayBuffer {
-    fn append(&mut self, chunk: &[u8]) {
+    fn append(&mut self, chunk: &[u8]) -> u64 {
         if chunk.is_empty() {
-            return;
+            return self.latest_sequence;
         }
+
+        self.latest_sequence = self.latest_sequence.saturating_add(1);
 
         if chunk.len() >= TERMINAL_OUTPUT_REPLAY_MAX_BYTES {
             self.bytes.clear();
@@ -125,7 +280,8 @@ impl TerminalReplayBuffer {
                     .iter()
                     .copied(),
             );
-            return;
+            self.history_truncated = true;
+            return self.latest_sequence;
         }
 
         let overflow = self
@@ -136,13 +292,32 @@ impl TerminalReplayBuffer {
         for _ in 0..overflow {
             let _ = self.bytes.pop_front();
         }
+        if overflow > 0 {
+            self.history_truncated = true;
+        }
 
         self.bytes.extend(chunk.iter().copied());
+        self.latest_sequence
     }
 
-    fn snapshot(&self) -> Vec<u8> {
-        self.bytes.iter().copied().collect()
+    fn snapshot(&self) -> Option<LocalTerminalOutputSnapshot> {
+        if self.bytes.is_empty() {
+            return None;
+        }
+
+        Some(LocalTerminalOutputSnapshot {
+            bytes: self.bytes.iter().copied().collect(),
+            latest_sequence: self.latest_sequence,
+            history_truncated: self.history_truncated,
+        })
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalTerminalOutputSnapshot {
+    pub bytes: Vec<u8>,
+    pub latest_sequence: u64,
+    pub history_truncated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -158,6 +333,8 @@ pub struct LocalTerminalSnapshot {
     pub rows: i32,
     pub created_at: DateTime<Utc>,
     pub closed_at: Option<DateTime<Utc>>,
+    pub latest_output_sequence: u64,
+    pub history_truncated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -327,44 +504,305 @@ impl TerminalManager {
         Ok(())
     }
 
-    pub async fn resize(&self, terminal_id: Uuid, cols: u16, rows: u16) -> anyhow::Result<()> {
+    pub async fn register_viewer(
+        &self,
+        terminal_id: Uuid,
+        client_kind: TerminalClientKind,
+    ) -> anyhow::Result<u64> {
         let sessions = self.sessions.read().await;
         let handle = sessions
             .get(&terminal_id)
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let mut metadata = handle
+            .metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
+        let epoch = match client_kind {
+            TerminalClientKind::SystemTerminal => {
+                metadata.system_terminal_attached = true;
+                metadata.system_terminal_presence_epoch =
+                    metadata.system_terminal_presence_epoch.saturating_add(1);
+                metadata.system_terminal_presence_epoch
+            }
+            TerminalClientKind::DesktopApp => {
+                metadata.desktop_app_attached = true;
+                metadata.desktop_app_presence_epoch =
+                    metadata.desktop_app_presence_epoch.saturating_add(1);
+                metadata.desktop_app_presence_epoch
+            }
+            TerminalClientKind::MobileApp | TerminalClientKind::Unknown => 0,
+        };
+        Ok(epoch)
+    }
 
-        match &handle.endpoint {
-            TerminalSessionEndpoint::LocalPty { master, .. } => {
-                let master = master
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
-                master.resize(PtySize {
+    pub async fn unregister_viewer(
+        &self,
+        terminal_id: Uuid,
+        client_kind: TerminalClientKind,
+    ) -> anyhow::Result<()> {
+        self.unregister_viewer_if_epoch(terminal_id, client_kind, None)
+            .await
+    }
+
+    pub async fn unregister_viewer_if_epoch(
+        &self,
+        terminal_id: Uuid,
+        client_kind: TerminalClientKind,
+        expected_epoch: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let next_size = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let mut metadata = handle
+                .metadata
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
+            match client_kind {
+                TerminalClientKind::SystemTerminal => {
+                    if expected_epoch
+                        .is_some_and(|epoch| epoch != metadata.system_terminal_presence_epoch)
+                    {
+                        return Ok(());
+                    }
+                    metadata.system_terminal_attached = false;
+                    metadata.latest_system_terminal_size = None;
+                }
+                TerminalClientKind::DesktopApp => {
+                    if expected_epoch
+                        .is_some_and(|epoch| epoch != metadata.desktop_app_presence_epoch)
+                    {
+                        return Ok(());
+                    }
+                    metadata.desktop_app_attached = false;
+                    metadata.latest_desktop_app_size = None;
+                }
+                TerminalClientKind::MobileApp | TerminalClientKind::Unknown => {}
+            }
+            Self::resolve_authority_size(&mut metadata)
+        };
+
+        if let Some((cols, rows)) = next_size {
+            self.resize_internal(terminal_id, cols, rows).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn resize(&self, terminal_id: Uuid, cols: u16, rows: u16) -> anyhow::Result<()> {
+        self.resize_from_client(terminal_id, cols, rows, TerminalClientKind::Unknown)
+            .await
+    }
+
+    pub async fn resize_from_client(
+        &self,
+        terminal_id: Uuid,
+        cols: u16,
+        rows: u16,
+        client_kind: TerminalClientKind,
+    ) -> anyhow::Result<()> {
+        self.resize_from_client_if_epoch(terminal_id, cols, rows, client_kind, None)
+            .await
+    }
+
+    pub async fn resize_from_client_if_epoch(
+        &self,
+        terminal_id: Uuid,
+        cols: u16,
+        rows: u16,
+        client_kind: TerminalClientKind,
+        expected_epoch: Option<u64>,
+    ) -> anyhow::Result<()> {
+        let next_size = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let mut metadata = handle
+                .metadata
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
+            match client_kind {
+                TerminalClientKind::SystemTerminal => {
+                    if expected_epoch
+                        .is_some_and(|epoch| epoch != metadata.system_terminal_presence_epoch)
+                    {
+                        info!(
+                            terminal_id = %terminal_id,
+                            expected_epoch,
+                            current_epoch = metadata.system_terminal_presence_epoch,
+                            client_kind = "system_terminal",
+                            "[TERMINAL_HISTORY_TRACE] ignore stale viewer resize"
+                        );
+                        return Ok(());
+                    }
+                    metadata.system_terminal_attached = true;
+                    metadata.latest_system_terminal_size = Some((cols, rows));
+                }
+                TerminalClientKind::DesktopApp => {
+                    if expected_epoch
+                        .is_some_and(|epoch| epoch != metadata.desktop_app_presence_epoch)
+                    {
+                        info!(
+                            terminal_id = %terminal_id,
+                            expected_epoch,
+                            current_epoch = metadata.desktop_app_presence_epoch,
+                            client_kind = "desktop_app",
+                            "[TERMINAL_HISTORY_TRACE] ignore stale viewer resize"
+                        );
+                        return Ok(());
+                    }
+                    metadata.desktop_app_attached = true;
+                    metadata.latest_desktop_app_size = Some((cols, rows));
+                }
+                TerminalClientKind::MobileApp | TerminalClientKind::Unknown => {}
+            }
+            Self::resolve_authority_size(&mut metadata)
+        };
+
+        if let Some((target_cols, target_rows)) = next_size {
+            self.resize_internal(terminal_id, target_cols, target_rows)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn resize_internal(&self, terminal_id: Uuid, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let (
+            remote_sync,
+            authority_source,
+            geometry_generation,
+            layout_epoch,
+            events,
+            publish_fingerprint,
+            last_resize_publish,
+        ) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let remote_sync = handle.remote_sync;
+            let replay_snapshot = handle
+                .replay_buffer
+                .lock()
+                .ok()
+                .and_then(|replay| replay.snapshot());
+            let mut authority_source = GeometryAuthoritySource::ServerDefault;
+            let mut geometry_generation = 0_u64;
+            if let Ok(metadata) = handle.metadata.lock() {
+                if metadata.cols == cols && metadata.rows == rows {
+                    return Ok(());
+                }
+            }
+
+            match &handle.endpoint {
+                TerminalSessionEndpoint::LocalPty { master, .. } => {
+                    let master = master
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
+                    master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })?;
+                }
+                TerminalSessionEndpoint::Hosted { control_sender, .. } => {
+                    let payload = HostedTerminalCommand::Resize {
+                        terminal_id,
+                        cols,
+                        rows,
+                    };
+                    let sender = control_sender
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
+                    sender
+                        .send(payload)
+                        .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal resize"))?;
+                }
+            }
+            if let Ok(mut metadata) = handle.metadata.lock() {
+                metadata.cols = cols;
+                metadata.rows = rows;
+                metadata.geometry_generation = metadata.geometry_generation.saturating_add(1);
+                authority_source = metadata.authority_source;
+                geometry_generation = metadata.geometry_generation;
+            }
+            let mut sync_state = handle
+                .sync_state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
+            let layout_epoch = sync_state.current_layout_epoch().saturating_add(1);
+            let replay_metadata = ResizeReplayMetadata {
+                history_truncated: replay_snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.history_truncated),
+                replay_byte_len: replay_snapshot
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.bytes.len()),
+                buffer_epoch: sync_state.current_buffer_epoch(),
+                layout_epoch: sync_state.current_layout_epoch(),
+            };
+            let events = sync_state.resize_with_replay_metadata(
+                terminal_id,
+                rows,
+                cols,
+                replay_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.bytes.as_slice()),
+                replay_metadata,
+            );
+            let publish_fingerprint = ResizePublishFingerprint::from_resize_bundle(
+                &events,
+                authority_source,
+                geometry_generation,
+                layout_epoch,
+                rows,
+                cols,
+            );
+            (
+                remote_sync,
+                authority_source,
+                geometry_generation,
+                layout_epoch,
+                events,
+                publish_fingerprint,
+                handle.last_resize_publish.clone(),
+            )
+        };
+        if let Some(fingerprint) = publish_fingerprint {
+            let mut guard = last_resize_publish
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal resize publish fingerprint poisoned"))?;
+            if guard.as_ref() == Some(&fingerprint) {
+                info!(
+                    terminal_id = %terminal_id,
+                    authority_source = authority_source.as_api_str(),
+                    geometry_generation,
+                    layout_epoch,
                     rows,
                     cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })?;
+                    history_generation = fingerprint.history_generation,
+                    "[TERMINAL_HISTORY_TRACE] skip duplicate resize publish bundle"
+                );
+                return Ok(());
             }
-            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
-                let payload = HostedTerminalCommand::Resize {
-                    terminal_id,
-                    cols,
-                    rows,
-                };
-                let sender = control_sender
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
-                sender
-                    .send(payload)
-                    .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal resize"))?;
-            }
+            *guard = Some(fingerprint);
         }
-        if let Ok(mut metadata) = handle.metadata.lock() {
-            metadata.cols = cols;
-            metadata.rows = rows;
-        }
+        self.publish_v2_events(terminal_id, events, remote_sync)
+            .await?;
+        self.publish_geometry_changed(
+            terminal_id,
+            cols,
+            rows,
+            authority_source,
+            geometry_generation,
+            layout_epoch,
+            remote_sync,
+        )
+        .await?;
         Ok(())
     }
 
@@ -391,10 +829,21 @@ impl TerminalManager {
             state: "opening".to_string(),
             cols,
             rows,
+            default_cols: cols,
+            default_rows: rows,
+            desktop_app_attached: false,
+            system_terminal_attached: false,
+            latest_desktop_app_size: None,
+            latest_system_terminal_size: None,
+            desktop_app_presence_epoch: 0,
+            system_terminal_presence_epoch: 0,
+            authority_source: GeometryAuthoritySource::ServerDefault,
+            geometry_generation: 0,
             created_at: Utc::now(),
             closed_at: None,
         }));
         let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
+        let sync_state = Arc::new(Mutex::new(TerminalSyncState::new(rows, cols)));
         self.sessions.write().await.insert(
             terminal_id,
             TerminalSessionHandle {
@@ -404,6 +853,8 @@ impl TerminalManager {
                 },
                 metadata,
                 replay_buffer,
+                sync_state,
+                last_resize_publish: Arc::new(Mutex::new(None)),
                 remote_sync,
             },
         );
@@ -508,7 +959,21 @@ impl TerminalManager {
             Some(rows.into()),
             None,
         )
-        .await
+        .await?;
+        let remote_sync = self.is_remote_sync(terminal_id).await;
+        let events = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let mut sync_state = handle
+                .sync_state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
+            sync_state.resize(terminal_id, rows, cols)
+        };
+        self.publish_v2_events(terminal_id, events, remote_sync)
+            .await
     }
 
     pub async fn complete_hosted_terminal(
@@ -537,6 +1002,7 @@ impl TerminalManager {
         let sessions = self.sessions.read().await;
         let handle = sessions.get(&terminal_id)?;
         let metadata = handle.metadata.lock().ok()?.clone();
+        let replay = handle.replay_buffer.lock().ok()?;
         Some(LocalTerminalSnapshot {
             terminal_id,
             device_id: self.device_id.clone(),
@@ -549,6 +1015,8 @@ impl TerminalManager {
             rows: i32::from(metadata.rows),
             created_at: metadata.created_at,
             closed_at: metadata.closed_at,
+            latest_output_sequence: replay.latest_sequence,
+            history_truncated: replay.history_truncated,
         })
     }
 
@@ -573,6 +1041,16 @@ impl TerminalManager {
                     rows: i32::from(metadata.rows),
                     created_at: metadata.created_at,
                     closed_at: metadata.closed_at,
+                    latest_output_sequence: handle
+                        .replay_buffer
+                        .lock()
+                        .map(|replay| replay.latest_sequence)
+                        .unwrap_or_default(),
+                    history_truncated: handle
+                        .replay_buffer
+                        .lock()
+                        .map(|replay| replay.history_truncated)
+                        .unwrap_or(false),
                 });
             }
         }
@@ -580,15 +1058,115 @@ impl TerminalManager {
         items
     }
 
-    pub async fn get_output_snapshot_base64(&self, terminal_id: Uuid) -> Option<String> {
+    pub async fn get_output_snapshot(
+        &self,
+        terminal_id: Uuid,
+    ) -> Option<LocalTerminalOutputSnapshot> {
         let sessions = self.sessions.read().await;
         let handle = sessions.get(&terminal_id)?;
         let replay = handle.replay_buffer.lock().ok()?;
-        let snapshot = replay.snapshot();
-        if snapshot.is_empty() {
-            return None;
+        replay.snapshot()
+    }
+
+    pub async fn bootstrap_v2(
+        &self,
+        terminal_id: Uuid,
+        viewer_presence_epoch: Option<u64>,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let metadata = handle
+            .metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?
+            .clone();
+        let ready = TerminalReadyV2Payload {
+            terminal_id,
+            device_id: self.device_id.clone(),
+            title: metadata.title.clone(),
+            source: handle.endpoint.source().as_api_str().to_string(),
+            shell: metadata.shell.clone(),
+            cwd: metadata.cwd.clone(),
+            state: metadata.state.clone(),
+            session_state: metadata.state.clone(),
+            cols: i32::from(metadata.cols),
+            rows: i32::from(metadata.rows),
+            created_at: metadata.created_at,
+            closed_at: metadata.closed_at,
+            geometry_generation: metadata.geometry_generation,
+            authority_source: metadata.authority_source.as_api_str().to_string(),
+            viewer_presence_epoch,
+            protocol_version: 2,
+            sync_mode: V2_SYNC_MODE,
+        };
+        let mut sync_state = handle
+            .sync_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
+        let mut messages = sync_state
+            .bootstrap_events(ready)
+            .into_iter()
+            .map(TerminalOutboundEvent::into_message)
+            .collect::<Vec<_>>();
+
+        if let Ok(replay) = handle.replay_buffer.lock() {
+            if let Some(snapshot) = replay.snapshot() {
+                // V2 bootstrap 之前只下发 authority screen snapshot，Flutter 端首次 attach
+                // 到共享终端时只能拿到“当前屏幕”的 76 行左右内容，后续 resize 即使
+                // 不再 replace，也只剩这一小段本地 scrollback 可供 reflow，表现为
+                // 一拖动窗口历史消息就像丢失。这里把完整 replay snapshot 追加到
+                // bootstrap 末尾，让客户端先拿到 authority 元数据，再用原始输出流
+                // 重建完整本地 scrollback，后续 resize 才有足够历史可保留。
+                if !snapshot.history_truncated {
+                    messages.push(serde_json::json!({
+                        "type": "terminal.snapshot",
+                        "payload": {
+                            "terminal_id": terminal_id,
+                            "data_base64": BASE64.encode(&snapshot.bytes),
+                            "stream_sequence": snapshot.latest_sequence,
+                            "history_truncated": false,
+                        }
+                    }));
+                }
+            }
         }
-        Some(BASE64.encode(snapshot))
+
+        Ok(messages)
+    }
+
+    pub async fn history_range_response(
+        &self,
+        terminal_id: Uuid,
+        request_id: String,
+        expected_history_generation: Option<u64>,
+        start_line: i64,
+        end_line: i64,
+    ) -> anyhow::Result<serde_json::Value> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let sync_state = handle
+            .sync_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
+        if let Some(expected_history_generation) = expected_history_generation {
+            let current_generation = sync_state.current_history_generation();
+            if current_generation != expected_history_generation {
+                return Ok(sync_state
+                    .history_generation_mismatch(
+                        terminal_id,
+                        request_id,
+                        expected_history_generation,
+                    )
+                    .into_message());
+            }
+        }
+        Ok(sync_state
+            .history_range_response(terminal_id, request_id, start_line, end_line)
+            .into_message())
     }
 
     pub async fn update_state(
@@ -629,7 +1207,41 @@ impl TerminalManager {
 
     pub async fn publish_local_terminal_ready(&self, terminal_id: Uuid) {
         if let Some(snapshot) = self.get_snapshot(terminal_id).await {
-            self.publish_local_terminal_event("terminal.ready", json!(snapshot));
+            let (geometry_generation, authority_source) = {
+                let sessions = self.sessions.read().await;
+                if let Some(handle) = sessions.get(&terminal_id) {
+                    if let Ok(metadata) = handle.metadata.lock() {
+                        (
+                            metadata.geometry_generation,
+                            metadata.authority_source.as_api_str().to_string(),
+                        )
+                    } else {
+                        (0, "server_default".to_string())
+                    }
+                } else {
+                    (0, "server_default".to_string())
+                }
+            };
+            let ready = TerminalReadyV2Payload {
+                terminal_id,
+                device_id: snapshot.device_id,
+                title: snapshot.title,
+                source: snapshot.source,
+                shell: snapshot.shell,
+                cwd: snapshot.cwd,
+                state: snapshot.state.clone(),
+                session_state: snapshot.state,
+                cols: snapshot.cols,
+                rows: snapshot.rows,
+                created_at: snapshot.created_at,
+                closed_at: snapshot.closed_at,
+                geometry_generation,
+                authority_source,
+                viewer_presence_epoch: None,
+                protocol_version: 2,
+                sync_mode: V2_SYNC_MODE,
+            };
+            self.publish_local_terminal_event("terminal.ready", json!(ready));
         }
     }
 
@@ -641,6 +1253,34 @@ impl TerminalManager {
             })
             .to_string(),
         );
+    }
+
+    async fn publish_geometry_changed(
+        &self,
+        terminal_id: Uuid,
+        cols: u16,
+        rows: u16,
+        authority_source: GeometryAuthoritySource,
+        geometry_generation: u64,
+        layout_epoch: u64,
+        remote_sync: bool,
+    ) -> anyhow::Result<()> {
+        let event = json!({
+            "type": "terminal.geometry.changed",
+            "payload": {
+                "terminal_id": terminal_id,
+                "cols": cols,
+                "rows": rows,
+                "authority_source": authority_source.as_api_str(),
+                "geometry_generation": geometry_generation,
+                "layout_epoch": layout_epoch,
+            }
+        });
+        let _ = self.local_events.send(event.to_string());
+        if remote_sync {
+            self.push_remote_terminal_event(terminal_id, event).await?;
+        }
+        Ok(())
     }
 
     fn apply_sirix_env(
@@ -716,10 +1356,21 @@ impl TerminalManager {
             state: "active".to_string(),
             cols,
             rows,
+            default_cols: cols,
+            default_rows: rows,
+            desktop_app_attached: false,
+            system_terminal_attached: false,
+            latest_desktop_app_size: None,
+            latest_system_terminal_size: None,
+            desktop_app_presence_epoch: 0,
+            system_terminal_presence_epoch: 0,
+            authority_source: GeometryAuthoritySource::ServerDefault,
+            geometry_generation: 0,
             created_at: Utc::now(),
             closed_at: None,
         }));
         let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
+        let sync_state = Arc::new(Mutex::new(TerminalSyncState::new(rows, cols)));
 
         self.sessions.write().await.insert(
             terminal_id,
@@ -731,6 +1382,8 @@ impl TerminalManager {
                 },
                 metadata: metadata.clone(),
                 replay_buffer: replay_buffer.clone(),
+                sync_state: sync_state.clone(),
+                last_resize_publish: Arc::new(Mutex::new(None)),
                 remote_sync,
             },
         );
@@ -754,6 +1407,7 @@ impl TerminalManager {
             local_events: self.local_events.clone(),
             terminal_id,
             replay_buffer: replay_buffer.clone(),
+            sync_state: sync_state.clone(),
             remote_sync,
         };
         let runtime_handle = tokio::runtime::Handle::current();
@@ -850,6 +1504,7 @@ impl TerminalManager {
             local_events: self.local_events.clone(),
             terminal_id,
             replay_buffer: handle.replay_buffer.clone(),
+            sync_state: handle.sync_state.clone(),
             remote_sync: handle.remote_sync,
         })
     }
@@ -862,6 +1517,44 @@ impl TerminalManager {
             anyhow::bail!("terminal session not found");
         };
         push_terminal_output_chunk(&context, chunk).await
+    }
+
+    async fn publish_v2_events(
+        &self,
+        terminal_id: Uuid,
+        events: Vec<TerminalOutboundEvent>,
+        remote_sync: bool,
+    ) -> anyhow::Result<()> {
+        for event in events {
+            let message = event.into_message();
+            let _ = self.local_events.send(message.to_string());
+            if remote_sync {
+                self.push_remote_terminal_event(terminal_id, message)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn push_remote_terminal_event(
+        &self,
+        terminal_id: Uuid,
+        event: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/api/v1/desktop/terminals/{}/events",
+            self.backend_base_url, terminal_id
+        );
+        self.client
+            .post(url)
+            .json(&json!({
+                "device_id": self.device_id,
+                "event": event,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     async fn is_remote_sync(&self, terminal_id: Uuid) -> bool {
@@ -879,6 +1572,34 @@ impl TerminalManager {
             .await
             .get(&terminal_id)
             .map(|handle| handle.endpoint.source())
+    }
+
+    fn resolve_authority_size(metadata: &mut TerminalSessionMetadata) -> Option<(u16, u16)> {
+        let (next_source, next_size) = if metadata.system_terminal_attached {
+            match metadata.latest_system_terminal_size {
+                Some(size) => (GeometryAuthoritySource::SystemTerminal, size),
+                None => (
+                    GeometryAuthoritySource::ServerDefault,
+                    (metadata.default_cols, metadata.default_rows),
+                ),
+            }
+        } else if metadata.desktop_app_attached {
+            match metadata.latest_desktop_app_size {
+                Some(size) => (GeometryAuthoritySource::DesktopApp, size),
+                None => (
+                    GeometryAuthoritySource::ServerDefault,
+                    (metadata.default_cols, metadata.default_rows),
+                ),
+            }
+        } else {
+            (
+                GeometryAuthoritySource::ServerDefault,
+                (metadata.default_cols, metadata.default_rows),
+            )
+        };
+
+        metadata.authority_source = next_source;
+        Some(next_size)
     }
 }
 
@@ -1022,9 +1743,11 @@ fn flush_terminal_output(
     }
 
     let snapshot = pending.clone();
-    if let Ok(mut replay) = context.replay_buffer.lock() {
-        replay.append(&snapshot);
-    }
+    let sequence = if let Ok(mut replay) = context.replay_buffer.lock() {
+        replay.append(&snapshot)
+    } else {
+        0
+    };
 
     let payload = BASE64.encode(&snapshot);
     pending.clear();
@@ -1034,10 +1757,31 @@ fn flush_terminal_output(
             "payload": {
                 "terminal_id": context.terminal_id,
                 "data_base64": payload.clone(),
+                "stream_sequence": sequence,
             }
         })
         .to_string(),
     );
+
+    let v2_events = if let Ok(mut sync_state) = context.sync_state.lock() {
+        sync_state.apply_output(context.terminal_id, &snapshot)
+    } else {
+        Vec::new()
+    };
+    for event in v2_events {
+        let payload = event.into_message();
+        let _ = context.local_events.send(payload.to_string());
+        if context.remote_sync {
+            push_remote_terminal_event(
+                &context.client,
+                &context.backend_base_url,
+                &context.device_id,
+                context.terminal_id,
+                payload.clone(),
+                runtime,
+            )?;
+        }
+    }
 
     if !context.remote_sync {
         return Ok(());
@@ -1054,6 +1798,7 @@ fn flush_terminal_output(
             .json(&json!({
                 "device_id": context.device_id,
                 "data_base64": payload,
+                "stream_sequence": sequence,
                 "timestamp": Utc::now(),
             }))
             .send()
@@ -1067,9 +1812,11 @@ async fn push_terminal_output_chunk(
     context: &TerminalOutputContext,
     chunk: &[u8],
 ) -> anyhow::Result<()> {
-    if let Ok(mut replay) = context.replay_buffer.lock() {
-        replay.append(chunk);
-    }
+    let sequence = if let Ok(mut replay) = context.replay_buffer.lock() {
+        replay.append(chunk)
+    } else {
+        0
+    };
 
     let payload = BASE64.encode(chunk);
     let _ = context.local_events.send(
@@ -1078,10 +1825,37 @@ async fn push_terminal_output_chunk(
             "payload": {
                 "terminal_id": context.terminal_id,
                 "data_base64": payload.clone(),
+                "stream_sequence": sequence,
             }
         })
         .to_string(),
     );
+
+    let v2_events = if let Ok(mut sync_state) = context.sync_state.lock() {
+        sync_state.apply_output(context.terminal_id, chunk)
+    } else {
+        Vec::new()
+    };
+    for event in v2_events {
+        let payload = event.into_message();
+        let _ = context.local_events.send(payload.to_string());
+        if context.remote_sync {
+            let url = format!(
+                "{}/api/v1/desktop/terminals/{}/events",
+                context.backend_base_url, context.terminal_id
+            );
+            context
+                .client
+                .post(url)
+                .json(&json!({
+                    "device_id": context.device_id,
+                    "event": payload,
+                }))
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+    }
 
     if !context.remote_sync {
         return Ok(());
@@ -1097,6 +1871,7 @@ async fn push_terminal_output_chunk(
         .json(&json!({
             "device_id": context.device_id,
             "data_base64": payload,
+            "stream_sequence": sequence,
             "timestamp": Utc::now(),
         }))
         .send()
@@ -1125,6 +1900,32 @@ fn update_terminal_remote_state(
                 "device_id": device_id,
                 "state": state,
                 "error_message": error_message,
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        anyhow::Ok(())
+    })
+}
+
+fn push_remote_terminal_event(
+    client: &reqwest::Client,
+    backend_base_url: &str,
+    device_id: &str,
+    terminal_id: Uuid,
+    event: serde_json::Value,
+    runtime: &tokio::runtime::Handle,
+) -> anyhow::Result<()> {
+    runtime.block_on(async {
+        let url = format!(
+            "{}/api/v1/desktop/terminals/{}/events",
+            backend_base_url, terminal_id
+        );
+        client
+            .post(url)
+            .json(&json!({
+                "device_id": device_id,
+                "event": event,
             }))
             .send()
             .await?
@@ -1261,6 +2062,18 @@ mod tests {
         serde_json::from_str(&payload).expect("event payload should be valid json")
     }
 
+    async fn next_event_of_type(
+        receiver: &mut broadcast::Receiver<String>,
+        event_type: &str,
+    ) -> Value {
+        loop {
+            let event = next_event(receiver).await;
+            if event["type"] == event_type {
+                return event;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn hosted_terminal_relays_input_resize_and_close() {
         let (events, _) = broadcast::channel(16);
@@ -1375,7 +2188,7 @@ mod tests {
         };
         assert_eq!(close_terminal_id, terminal_id);
 
-        let closed_event = next_event(&mut event_receiver).await;
+        let closed_event = next_event_of_type(&mut event_receiver, "terminal.closed").await;
         assert_eq!(closed_event["type"], "terminal.closed");
         assert_eq!(
             closed_event["payload"]["terminal_id"],
@@ -1457,5 +2270,210 @@ mod tests {
             "hosted terminal connection dropped"
         );
         assert!(manager.get_snapshot(terminal_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_v2_includes_socket_local_viewer_presence_epoch() {
+        let (events, _) = broadcast::channel(8);
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        manager
+            .create_hosted_terminal(
+                terminal_id,
+                "shell".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+
+        let messages = manager
+            .bootstrap_v2(terminal_id, Some(7))
+            .await
+            .expect("bootstrap should succeed");
+        let ready = messages
+            .iter()
+            .find(|message| message["type"] == "terminal.ready")
+            .expect("bootstrap should contain terminal.ready");
+
+        assert_eq!(ready["payload"]["viewer_presence_epoch"], 7);
+    }
+
+    #[tokio::test]
+    async fn stale_viewer_resize_epoch_is_ignored() {
+        let (events, _) = broadcast::channel(16);
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        let session = manager
+            .create_hosted_terminal(
+                terminal_id,
+                "shell".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+
+        let (command_sender, mut command_receiver) = unbounded_channel();
+        manager
+            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
+            .await
+            .expect("host should register");
+
+        let epoch = manager
+            .register_viewer(terminal_id, TerminalClientKind::DesktopApp)
+            .await
+            .expect("viewer should register");
+        assert!(epoch > 0);
+
+        manager
+            .resize_from_client_if_epoch(
+                terminal_id,
+                140,
+                40,
+                TerminalClientKind::DesktopApp,
+                Some(epoch.saturating_sub(1)),
+            )
+            .await
+            .expect("stale resize should be ignored without error");
+
+        assert!(
+            timeout(TokioDuration::from_millis(100), command_receiver.recv())
+                .await
+                .is_err(),
+            "stale resize must not forward resize command"
+        );
+
+        let snapshot = manager
+            .get_snapshot(terminal_id)
+            .await
+            .expect("snapshot should exist");
+        assert_eq!((snapshot.cols, snapshot.rows), (120, 32));
+
+        manager
+            .resize_from_client_if_epoch(
+                terminal_id,
+                140,
+                40,
+                TerminalClientKind::DesktopApp,
+                Some(epoch),
+            )
+            .await
+            .expect("current resize should succeed");
+
+        let HostedTerminalCommand::Resize { cols, rows, .. } = command_receiver
+            .recv()
+            .await
+            .expect("current resize should reach hosted terminal")
+        else {
+            panic!("expected hosted resize command");
+        };
+        assert_eq!((cols, rows), (140, 40));
+    }
+
+    #[test]
+    fn resize_publish_fingerprint_changes_when_resize_bundle_changes() {
+        let events = vec![
+            TerminalOutboundEvent::new(
+                "terminal.layout.changed",
+                &json!({
+                    "terminal_id": Uuid::new_v4(),
+                    "layout_epoch": 4,
+                    "rows": 32,
+                    "cols": 120,
+                }),
+            ),
+            TerminalOutboundEvent::new(
+                "terminal.state.snapshot",
+                &json!({
+                    "terminal_id": Uuid::new_v4(),
+                    "active_buffer": "main",
+                    "buffer_epoch": 2,
+                    "layout_epoch": 4,
+                    "main": {
+                        "history_generation": 9,
+                        "history_start_line": 0,
+                        "history_end_line": 400,
+                        "viewport_start_line": 368,
+                        "viewport_end_line": 400,
+                    },
+                    "alt": { "active": false },
+                }),
+            ),
+            TerminalOutboundEvent::new(
+                "terminal.screen.snapshot",
+                &json!({
+                    "terminal_id": Uuid::new_v4(),
+                    "buffer_kind": "main",
+                    "buffer_epoch": 2,
+                    "layout_epoch": 4,
+                    "rows": 32,
+                    "cols": 120,
+                    "cursor_row": 0,
+                    "cursor_col": 0,
+                    "screen_data_base64": "",
+                    "screen_lines": [],
+                }),
+            ),
+        ];
+
+        let first = ResizePublishFingerprint::from_resize_bundle(
+            &events,
+            GeometryAuthoritySource::DesktopApp,
+            3,
+            4,
+            32,
+            120,
+        )
+        .expect("layout bundle should produce fingerprint");
+        let same = ResizePublishFingerprint::from_resize_bundle(
+            &events,
+            GeometryAuthoritySource::DesktopApp,
+            3,
+            4,
+            32,
+            120,
+        )
+        .expect("same bundle should produce fingerprint");
+        let changed = ResizePublishFingerprint::from_resize_bundle(
+            &events,
+            GeometryAuthoritySource::DesktopApp,
+            4,
+            4,
+            32,
+            120,
+        )
+        .expect("changed bundle should produce fingerprint");
+
+        assert_eq!(first, same);
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn replay_buffer_marks_truncation_and_tracks_latest_sequence() {
+        let mut replay = TerminalReplayBuffer::default();
+
+        assert_eq!(replay.append(b"abc"), 1);
+        assert_eq!(replay.latest_sequence, 1);
+        assert!(!replay.history_truncated);
+
+        let oversized = vec![b'x'; TERMINAL_OUTPUT_REPLAY_MAX_BYTES + 4];
+        assert_eq!(replay.append(&oversized), 2);
+        assert!(replay.history_truncated);
+
+        let snapshot = replay
+            .snapshot()
+            .expect("snapshot should exist after append");
+        assert_eq!(snapshot.latest_sequence, 2);
+        assert!(snapshot.history_truncated);
+        assert_eq!(snapshot.bytes.len(), TERMINAL_OUTPUT_REPLAY_MAX_BYTES);
     }
 }

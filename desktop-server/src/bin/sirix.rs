@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+use crossterm::{cursor, execute, style, terminal::LeaveAlternateScreen};
+
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crossterm::terminal;
@@ -280,23 +282,33 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
         }
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = command.exec();
-        return Err(error).context("failed to exec AI runtime in current terminal");
+    let status = command
+        .status()
+        .context("failed to spawn AI runtime in current terminal")?;
+    restore_current_terminal_after_runtime_exit()?;
+    if status.success() {
+        return Ok(());
     }
+    anyhow::bail!("AI runtime exited with status {status}");
+}
 
-    #[cfg(not(unix))]
-    {
-        let status = command
-            .status()
-            .context("failed to spawn AI runtime in current terminal")?;
-        if status.success() {
-            return Ok(());
-        }
-        anyhow::bail!("AI runtime exited with status {status}");
-    }
+fn restore_current_terminal_after_runtime_exit() -> anyhow::Result<()> {
+    let mut stdout = io::stdout();
+    execute!(
+        stdout,
+        LeaveAlternateScreen,
+        cursor::Show,
+        style::ResetColor
+    )
+    .context("failed to restore current terminal after AI runtime exit")?;
+    stdout
+        .write_all(
+            b"[?1l>[?1000l[?1002l[?1003l[?1006l[?2004l[?7h[r[0m[?25h
+",
+        )
+        .context("failed to write current terminal restore sequence")?;
+    stdout.flush().ok();
+    Ok(())
 }
 
 fn resolve_launch_executable(raw: &str) -> anyhow::Result<PathBuf> {
@@ -401,7 +413,12 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
         .send(Message::Text(
             serde_json::json!({
                 "type": "terminal.attach",
-                "terminal_id": terminal_id,
+                "payload": {
+                    "terminal_id": terminal_id,
+                    "protocol_version": 1,
+                    "sync_mode": "raw-v1",
+                    "client_kind": "system_terminal",
+                }
             })
             .to_string()
             .into(),
@@ -409,20 +426,21 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
         .await
         .context("failed to attach terminal session")?;
 
-    let _raw_mode_guard = RawModeGuard::activate()?;
+    let raw_mode_guard = RawModeGuard::activate()?;
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     spawn_stdin_reader(stdin_tx);
 
     let mut stdout = io::stdout();
     let mut last_size = terminal::size().unwrap_or((120, 32));
+    let mut viewer_presence_epoch: Option<u64> = None;
     let mut resize_tick = tokio::time::interval(Duration::from_millis(250));
 
-    write_resize(&mut write, terminal_id, last_size).await?;
+    write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
 
-    loop {
+    let attach_result: anyhow::Result<TerminalDetachReason> = loop {
         tokio::select! {
             Some(bytes) = stdin_rx.recv() => {
-                write
+                if let Err(error) = write
                     .send(Message::Text(
                         serde_json::json!({
                             "type": "terminal.input",
@@ -433,38 +451,66 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                         .into()
                     ))
                     .await
-                    .context("failed to send terminal input")?;
+                {
+                    break Err(anyhow::Error::new(error).context("failed to send terminal input"));
+                }
             }
             _ = resize_tick.tick() => {
                 let current_size = terminal::size().unwrap_or(last_size);
                 if current_size != last_size {
                     last_size = current_size;
-                    write_resize(&mut write, terminal_id, current_size).await?;
+                    if let Err(error) = write_resize(
+                        &mut write,
+                        terminal_id,
+                        current_size,
+                        viewer_presence_epoch,
+                    )
+                    .await
+                    {
+                        break Err(error.context("failed to propagate terminal resize"));
+                    }
                 }
             }
             message = read.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        if handle_terminal_message(&mut stdout, &text)? {
-                            break;
+                        if handle_terminal_message(&mut stdout, &text, &mut viewer_presence_epoch)? {
+                            break Ok(TerminalDetachReason::SessionClosed);
                         }
                     }
                     Some(Ok(Message::Binary(bytes))) => {
-                        stdout.write_all(&bytes).context("failed to write binary websocket frame")?;
+                        if let Err(error) = stdout.write_all(&bytes) {
+                            break Err(anyhow::Error::new(error).context("failed to write binary websocket frame"));
+                        }
                         stdout.flush().ok();
                     }
-                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Close(_))) | None => break Ok(TerminalDetachReason::TransportClosed),
                     Some(Ok(_)) => {}
-                    Some(Err(error)) => return Err(error).context("terminal websocket read failed"),
+                    Some(Err(error)) => break Err(anyhow::Error::new(error).context("terminal websocket read failed")),
                 }
             }
         }
-    }
+    };
 
-    Ok(())
+    let detach_reason = match &attach_result {
+        Ok(reason) => *reason,
+        Err(_) => TerminalDetachReason::TransportClosed,
+    };
+    drop(raw_mode_guard);
+    restore_local_terminal(&mut stdout, detach_reason)?;
+    match attach_result {
+        Ok(_) => Ok(()),
+        Err(error) if is_graceful_terminal_disconnect(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
-async fn write_resize<S>(write: &mut S, terminal_id: &str, size: (u16, u16)) -> anyhow::Result<()>
+async fn write_resize<S>(
+    write: &mut S,
+    terminal_id: &str,
+    size: (u16, u16),
+    viewer_presence_epoch: Option<u64>,
+) -> anyhow::Result<()>
 where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
@@ -475,6 +521,8 @@ where
                 "terminal_id": terminal_id,
                 "cols": size.0,
                 "rows": size.1,
+                "client_kind": "system_terminal",
+                "viewer_presence_epoch": viewer_presence_epoch,
             })
             .to_string()
             .into(),
@@ -483,7 +531,67 @@ where
         .context("failed to send terminal resize")
 }
 
-fn handle_terminal_message(stdout: &mut io::Stdout, raw: &str) -> anyhow::Result<bool> {
+#[derive(Clone, Copy, Debug)]
+enum TerminalDetachReason {
+    SessionClosed,
+    TransportClosed,
+}
+
+fn is_graceful_terminal_disconnect(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("connection reset without closing handshake")
+            || message.contains("broken pipe")
+            || message.contains("connection reset by peer")
+            || message.contains("sending after closing")
+            || message.contains("io error: broken pipe")
+    })
+}
+
+fn restore_local_terminal(
+    stdout: &mut io::Stdout,
+    reason: TerminalDetachReason,
+) -> anyhow::Result<()> {
+    // 共享终端通过 raw-v1 直接把远端 escape stream 镜像到当前系统终端。
+    // 如果 desktop-server 被杀掉，远端可能来不及自行退出 alt screen / 恢复
+    // 光标与颜色状态，导致用户返回本地 shell 后终端仍处于异常模式。
+    // 这里在退出 Sirix 附着态时主动执行一次本地 terminal reset，确保系统
+    // 终端可靠回到可交互状态。
+    execute!(
+        stdout,
+        LeaveAlternateScreen,
+        cursor::Show,
+        style::ResetColor
+    )
+    .context("failed to restore local terminal state")?;
+    stdout
+        .write_all(
+            b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[r\x1b[0m\x1b[?25h\r\n",
+        )
+        .context("failed to write local terminal reset sequence")?;
+    match reason {
+        TerminalDetachReason::SessionClosed => {
+            stdout
+                .write_all(b"[sirix] shared terminal closed.\r\n")
+                .context("failed to write session closed message")?;
+        }
+        TerminalDetachReason::TransportClosed => {
+            stdout
+                .write_all(
+                    b"[sirix] desktop-server disconnected; shared terminal detached safely.\r\n",
+                )
+                .context("failed to write transport closed message")?;
+        }
+    }
+    stdout.flush().ok();
+    Ok(())
+}
+
+fn handle_terminal_message(
+    stdout: &mut io::Stdout,
+    raw: &str,
+    viewer_presence_epoch: &mut Option<u64>,
+) -> anyhow::Result<bool> {
     let decoded = serde_json::from_str::<serde_json::Value>(raw)
         .with_context(|| format!("failed to decode websocket payload: {raw}"))?;
     let message_type = decoded
@@ -492,6 +600,13 @@ fn handle_terminal_message(stdout: &mut io::Stdout, raw: &str) -> anyhow::Result
         .unwrap_or_default();
 
     match message_type {
+        "terminal.ready" => {
+            *viewer_presence_epoch = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("viewer_presence_epoch"))
+                .and_then(serde_json::Value::as_u64);
+            Ok(false)
+        }
         "terminal.output" | "terminal.snapshot" => {
             if let Some(data) = decoded
                 .get("payload")

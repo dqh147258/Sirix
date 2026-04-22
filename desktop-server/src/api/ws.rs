@@ -5,14 +5,53 @@ use axum::{
     },
     response::Response,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::app::{state::AppState, terminal::manager::HostedTerminalCommand};
+use crate::app::{
+    state::AppState,
+    terminal::{
+        manager::{HostedTerminalCommand, TerminalClientKind},
+        state_cache::V2_SYNC_MODE,
+    },
+};
 
 const AUTH_MEDIA_TRACE_TAG: &str = "[MEDIA_AUTH_TRACE]";
+const TERMINAL_VIEWER_DETACH_DEBOUNCE_MS: u64 = 750;
+
+#[derive(Debug, Deserialize)]
+struct TerminalAttachPayload {
+    terminal_id: String,
+    protocol_version: Option<u32>,
+    sync_mode: Option<String>,
+    client_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalBootstrapRequestPayload {
+    terminal_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalHistoryRangeRequestPayload {
+    request_id: String,
+    terminal_id: String,
+    history_generation: Option<u64>,
+    start_line: i64,
+    end_line: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalResizePayload {
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+    client_kind: Option<String>,
+    viewer_presence_epoch: Option<u64>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -37,7 +76,30 @@ enum LocalWsInbound {
     #[serde(rename = "terminal.list", alias = "terminal_list")]
     TerminalList,
     #[serde(rename = "terminal.attach", alias = "terminal_attach")]
-    TerminalAttach { terminal_id: String },
+    TerminalAttach {
+        terminal_id: Option<String>,
+        payload: Option<TerminalAttachPayload>,
+    },
+    #[serde(
+        rename = "terminal.bootstrap.request",
+        alias = "terminal_bootstrap_request"
+    )]
+    TerminalBootstrapRequest {
+        terminal_id: Option<String>,
+        payload: Option<TerminalBootstrapRequestPayload>,
+    },
+    #[serde(
+        rename = "terminal.history.range.request",
+        alias = "terminal_history_range_request"
+    )]
+    TerminalHistoryRangeRequest {
+        request_id: Option<String>,
+        terminal_id: Option<String>,
+        history_generation: Option<u64>,
+        start_line: Option<i64>,
+        end_line: Option<i64>,
+        payload: Option<TerminalHistoryRangeRequestPayload>,
+    },
     #[serde(rename = "terminal.close", alias = "terminal_close")]
     TerminalClose { terminal_id: String },
     #[serde(rename = "terminal.input", alias = "terminal_input")]
@@ -50,6 +112,9 @@ enum LocalWsInbound {
         terminal_id: String,
         cols: u16,
         rows: u16,
+        client_kind: Option<String>,
+        viewer_presence_epoch: Option<u64>,
+        payload: Option<TerminalResizePayload>,
     },
     #[serde(rename = "terminal.host.register", alias = "terminal_host_register")]
     TerminalHostRegister {
@@ -81,12 +146,110 @@ enum LocalWsInbound {
     },
 }
 
+fn attach_payload_terminal_id(
+    terminal_id: Option<String>,
+    payload: Option<TerminalAttachPayload>,
+) -> (Option<String>, u32, Option<String>, TerminalClientKind) {
+    match payload {
+        Some(payload) => (
+            Some(payload.terminal_id),
+            payload.protocol_version.unwrap_or(1),
+            payload.sync_mode,
+            TerminalClientKind::from_wire(payload.client_kind.as_deref()),
+        ),
+        None => (terminal_id, 1, None, TerminalClientKind::Unknown),
+    }
+}
+
+fn bootstrap_terminal_id(
+    terminal_id: Option<String>,
+    payload: Option<TerminalBootstrapRequestPayload>,
+) -> Option<String> {
+    payload.map(|item| item.terminal_id).or(terminal_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalWsOutboundEnvelope {
+    #[serde(rename = "type")]
+    event_type: String,
+    payload: Option<LocalWsOutboundPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalWsOutboundPayload {
+    terminal_id: Option<String>,
+}
+
+fn should_forward_to_raw_terminal_socket(raw: &str, attached_terminal_id: Uuid) -> bool {
+    let Ok(envelope) = serde_json::from_str::<LocalWsOutboundEnvelope>(raw) else {
+        return false;
+    };
+
+    match envelope.payload.and_then(|payload| payload.terminal_id) {
+        Some(terminal_id) => Uuid::parse_str(&terminal_id)
+            .map(|event_terminal_id| event_terminal_id == attached_terminal_id)
+            .unwrap_or(false),
+        None => matches!(
+            envelope.event_type.as_str(),
+            "terminal.error" | "terminal.closed"
+        ),
+    }
+}
+
+fn history_request_parts(
+    request_id: Option<String>,
+    terminal_id: Option<String>,
+    history_generation: Option<u64>,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    payload: Option<TerminalHistoryRangeRequestPayload>,
+) -> Option<(String, String, Option<u64>, i64, i64)> {
+    if let Some(payload) = payload {
+        return Some((
+            payload.request_id,
+            payload.terminal_id,
+            payload.history_generation,
+            payload.start_line,
+            payload.end_line,
+        ));
+    }
+    Some((
+        request_id?,
+        terminal_id?,
+        history_generation,
+        start_line?,
+        end_line?,
+    ))
+}
+
+fn resize_request_parts(
+    terminal_id: String,
+    cols: u16,
+    rows: u16,
+    client_kind: Option<String>,
+    viewer_presence_epoch: Option<u64>,
+    payload: Option<TerminalResizePayload>,
+) -> (String, u16, u16, Option<String>, Option<u64>) {
+    if let Some(payload) = payload {
+        return (
+            payload.terminal_id,
+            payload.cols,
+            payload.rows,
+            payload.client_kind,
+            payload.viewer_presence_epoch,
+        );
+    }
+    (terminal_id, cols, rows, client_kind, viewer_presence_epoch)
+}
+
 pub async fn local_ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut counts_as_desktop_client = true;
+    let mut attached_viewers: std::collections::HashMap<Uuid, (TerminalClientKind, u64)> =
+        std::collections::HashMap::new();
     {
         let mut runtime = state.runtime.write().await;
         runtime.desktop_client_connections += 1;
@@ -94,6 +257,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let mut local_receiver = state.local_events.subscribe();
     let mut hosted_terminal_id: Option<Uuid> = None;
+    let mut raw_attached_terminal_id: Option<Uuid> = None;
     let mut hosted_control_receiver: Option<
         tokio::sync::mpsc::UnboundedReceiver<HostedTerminalCommand>,
     > = None;
@@ -223,32 +387,99 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     break;
                                 }
                             }
-                            Ok(LocalWsInbound::TerminalAttach { terminal_id }) => {
+                            Ok(LocalWsInbound::TerminalAttach { terminal_id, payload }) => {
+                                let (terminal_id, protocol_version, sync_mode, client_kind) =
+                                    attach_payload_terminal_id(terminal_id, payload);
+                                let Some(terminal_id) = terminal_id else {
+                                    state.logger.warn(
+                                        "terminal attach missing terminal_id".to_string()
+                                    );
+                                    continue;
+                                };
                                 match Uuid::parse_str(&terminal_id) {
                                     Ok(terminal_id) => {
+                                        if client_kind != TerminalClientKind::Unknown {
+                                            if client_kind == TerminalClientKind::SystemTerminal
+                                                && counts_as_desktop_client
+                                            {
+                                                let mut runtime = state.runtime.write().await;
+                                                runtime.desktop_client_connections = runtime.desktop_client_connections.saturating_sub(1);
+                                                counts_as_desktop_client = false;
+                                            }
+                                            let epoch = state
+                                                .terminal_manager
+                                                .register_viewer(terminal_id, client_kind)
+                                                .await
+                                                .unwrap_or_default();
+                                            if let Some((previous_kind, _)) = attached_viewers.insert(terminal_id, (client_kind, epoch)) {
+                                                if previous_kind != client_kind {
+                                                    let _ = state.terminal_manager.unregister_viewer(terminal_id, previous_kind).await;
+                                                }
+                                            }
+                                        }
+                                        if protocol_version == 2
+                                            && sync_mode.as_deref() == Some(V2_SYNC_MODE)
+                                        {
+                                            if client_kind == TerminalClientKind::SystemTerminal {
+                                                raw_attached_terminal_id = None;
+                                            }
+                                            continue;
+                                        }
+                                        if client_kind == TerminalClientKind::SystemTerminal {
+                                            raw_attached_terminal_id = Some(terminal_id);
+                                        }
                                         if let Some(snapshot) = state.terminal_manager.get_snapshot(terminal_id).await {
+                                            let viewer_presence_epoch = attached_viewers
+                                                .get(&terminal_id)
+                                                .map(|(_, epoch)| *epoch)
+                                                .filter(|epoch| *epoch > 0);
                                             let reply = serde_json::json!({
                                                 "type": "terminal.ready",
-                                                "payload": snapshot,
+                                                "payload": {
+                                                    "terminal_id": snapshot.terminal_id,
+                                                    "device_id": snapshot.device_id,
+                                                    "title": snapshot.title,
+                                                    "source": snapshot.source,
+                                                    "shell": snapshot.shell,
+                                                    "cwd": snapshot.cwd,
+                                                    "state": snapshot.state,
+                                                    "cols": snapshot.cols,
+                                                    "rows": snapshot.rows,
+                                                    "created_at": snapshot.created_at,
+                                                    "closed_at": snapshot.closed_at,
+                                                    "latest_output_sequence": snapshot.latest_output_sequence,
+                                                    "history_truncated": snapshot.history_truncated,
+                                                    "viewer_presence_epoch": viewer_presence_epoch,
+                                                },
                                             });
                                             if socket.send(Message::Text(reply.to_string())).await.is_err() {
                                                 break;
                                             }
 
-                                            if let Some(data_base64) = state
+                                            if let Some(snapshot) = state
                                                 .terminal_manager
-                                                .get_output_snapshot_base64(terminal_id)
+                                                .get_output_snapshot(terminal_id)
                                                 .await
                                             {
-                                                let reply = serde_json::json!({
-                                                    "type": "terminal.snapshot",
-                                                    "payload": {
-                                                        "terminal_id": terminal_id,
-                                                        "data_base64": data_base64,
+                                                if snapshot.history_truncated {
+                                                    state.logger.info(format!(
+                                                        "[TERMINAL_STREAM_TRACE] skipped truncated terminal snapshot terminal_id={} latest_output_sequence={}",
+                                                        terminal_id,
+                                                        snapshot.latest_sequence,
+                                                    ));
+                                                } else {
+                                                    let reply = serde_json::json!({
+                                                        "type": "terminal.snapshot",
+                                                        "payload": {
+                                                            "terminal_id": terminal_id,
+                                                            "data_base64": BASE64.encode(&snapshot.bytes),
+                                                            "stream_sequence": snapshot.latest_sequence,
+                                                            "history_truncated": false,
+                                                        }
+                                                    });
+                                                    if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                                        break;
                                                     }
-                                                });
-                                                if socket.send(Message::Text(reply.to_string())).await.is_err() {
-                                                    break;
                                                 }
                                             }
                                         }
@@ -256,6 +487,98 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     Err(error) => {
                                         state.logger.warn(format!(
                                             "invalid terminal attach id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalBootstrapRequest { terminal_id, payload }) => {
+                                let Some(terminal_id) = bootstrap_terminal_id(terminal_id, payload) else {
+                                    state.logger.warn(
+                                        "terminal bootstrap request missing terminal_id".to_string()
+                                    );
+                                    continue;
+                                };
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        let viewer_presence_epoch = attached_viewers
+                                            .get(&terminal_id)
+                                            .map(|(_, epoch)| *epoch)
+                                            .filter(|epoch| *epoch > 0);
+                                        match state
+                                            .terminal_manager
+                                            .bootstrap_v2(terminal_id, viewer_presence_epoch)
+                                            .await
+                                        {
+                                            Ok(messages) => {
+                                                for message in messages {
+                                                    if socket.send(Message::Text(message.to_string())).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            Err(error) => {
+                                                warn!(terminal_id = %terminal_id, error = %error, "local terminal bootstrap failed");
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal bootstrap id terminal_id={} error={error}",
+                                            terminal_id
+                                        ));
+                                    }
+                                }
+                            }
+                            Ok(LocalWsInbound::TerminalHistoryRangeRequest {
+                                request_id,
+                                terminal_id,
+                                history_generation,
+                                start_line,
+                                end_line,
+                                payload,
+                            }) => {
+                                let Some((request_id, terminal_id, history_generation, start_line, end_line)) =
+                                    history_request_parts(
+                                        request_id,
+                                        terminal_id,
+                                        history_generation,
+                                        start_line,
+                                        end_line,
+                                        payload,
+                                    )
+                                else {
+                                    state.logger.warn(
+                                        "terminal history range request missing fields".to_string()
+                                    );
+                                    continue;
+                                };
+                                match Uuid::parse_str(&terminal_id) {
+                                    Ok(terminal_id) => {
+                                        match state
+                                            .terminal_manager
+                                            .history_range_response(
+                                                terminal_id,
+                                                request_id,
+                                                history_generation,
+                                                start_line,
+                                                end_line,
+                                            )
+                                            .await
+                                        {
+                                            Ok(message) => {
+                                                if socket.send(Message::Text(message.to_string())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(error) => {
+                                                warn!(terminal_id = %terminal_id, error = %error, "local history range request failed");
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        state.logger.warn(format!(
+                                            "invalid terminal history range id terminal_id={} error={error}",
                                             terminal_id
                                         ));
                                     }
@@ -291,10 +614,37 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                     }
                                 }
                             }
-                            Ok(LocalWsInbound::TerminalResize { terminal_id, cols, rows }) => {
+                            Ok(LocalWsInbound::TerminalResize {
+                                terminal_id,
+                                cols,
+                                rows,
+                                client_kind,
+                                viewer_presence_epoch,
+                                payload,
+                            }) => {
+                                let (terminal_id, cols, rows, client_kind, viewer_presence_epoch) =
+                                    resize_request_parts(
+                                        terminal_id,
+                                        cols,
+                                        rows,
+                                        client_kind,
+                                        viewer_presence_epoch,
+                                        payload,
+                                    );
                                 match Uuid::parse_str(&terminal_id) {
                                     Ok(terminal_id) => {
-                                        if let Err(error) = state.terminal_manager.resize(terminal_id, cols, rows).await {
+                                        let client_kind = TerminalClientKind::from_wire(client_kind.as_deref());
+                                        if let Err(error) = state
+                                            .terminal_manager
+                                            .resize_from_client_if_epoch(
+                                                terminal_id,
+                                                cols,
+                                                rows,
+                                                client_kind,
+                                                viewer_presence_epoch,
+                                            )
+                                            .await
+                                        {
                                             warn!(terminal_id = %terminal_id, error = %error, "local terminal resize failed");
                                         }
                                     }
@@ -513,6 +863,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
                 match outbound {
                     Ok(payload) => {
+                        if let Some(attached_terminal_id) = raw_attached_terminal_id {
+                            if !should_forward_to_raw_terminal_socket(&payload, attached_terminal_id) {
+                                continue;
+                            }
+                        }
                         if socket.send(Message::Text(payload)).await.is_err() {
                             break;
                         }
@@ -537,6 +892,28 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         {
             warn!(terminal_id = %terminal_id, error = %error, "hosted terminal disconnect cleanup failed");
         }
+    }
+
+    for (terminal_id, (client_kind, epoch)) in attached_viewers {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if matches!(
+                client_kind,
+                TerminalClientKind::SystemTerminal | TerminalClientKind::DesktopApp
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    TERMINAL_VIEWER_DETACH_DEBOUNCE_MS,
+                ))
+                .await;
+            }
+            if let Err(error) = state
+                .terminal_manager
+                .unregister_viewer_if_epoch(terminal_id, client_kind, Some(epoch))
+                .await
+            {
+                warn!(terminal_id = %terminal_id, error = %error, "terminal viewer disconnect cleanup failed");
+            }
+        });
     }
 
     if counts_as_desktop_client {

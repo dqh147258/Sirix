@@ -383,11 +383,55 @@ class DesktopLocalClient {
   void sendTerminalAttach({
     required WebSocketChannel channel,
     required String terminalId,
+    int protocolVersion = 2,
+    String syncMode = 'state-cache-v2',
+    String clientKind = 'desktop_app',
   }) {
     channel.sink.add(
       jsonEncode({
         'type': 'terminal.attach',
-        'terminal_id': terminalId,
+        'payload': {
+          'terminal_id': terminalId,
+          'protocol_version': protocolVersion,
+          'sync_mode': syncMode,
+          'client_kind': clientKind,
+        },
+      }),
+    );
+  }
+
+  void sendTerminalBootstrapRequest({
+    required WebSocketChannel channel,
+    required String terminalId,
+  }) {
+    channel.sink.add(
+      jsonEncode({
+        'type': 'terminal.bootstrap.request',
+        'payload': {
+          'terminal_id': terminalId,
+        },
+      }),
+    );
+  }
+
+  void sendTerminalHistoryRangeRequest({
+    required WebSocketChannel channel,
+    required String requestId,
+    required String terminalId,
+    int? historyGeneration,
+    required int startLine,
+    required int endLine,
+  }) {
+    channel.sink.add(
+      jsonEncode({
+        'type': 'terminal.history.range.request',
+        'payload': {
+          'request_id': requestId,
+          'terminal_id': terminalId,
+          'history_generation': historyGeneration,
+          'start_line': startLine,
+          'end_line': endLine,
+        },
       }),
     );
   }
@@ -423,6 +467,8 @@ class DesktopLocalClient {
     required String terminalId,
     required int cols,
     required int rows,
+    String clientKind = 'desktop_app',
+    int? viewerPresenceEpoch,
   }) {
     channel.sink.add(
       jsonEncode({
@@ -430,6 +476,8 @@ class DesktopLocalClient {
         'terminal_id': terminalId,
         'cols': cols,
         'rows': rows,
+        'client_kind': clientKind,
+        'viewer_presence_epoch': viewerPresenceEpoch,
       }),
     );
   }

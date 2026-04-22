@@ -21,6 +21,7 @@ use std::{fs, process::Command};
 use xcap::Monitor;
 
 const AUTH_MEDIA_TRACE_TAG: &str = "[MEDIA_AUTH_TRACE]";
+const REMOTE_CONNECT_TRACE_TAG: &str = "[REMOTE_CONNECT_TRACE]";
 
 pub fn spawn_background_tasks(state: AppState) {
     spawn_screen_capture_permission_probe(state.clone());
@@ -316,6 +317,17 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         | "webrtc.offer"
         | "webrtc.answer"
         | "webrtc.ice_candidate" => {
+            if event.event_type == "webrtc.offer" {
+                let session_id = event
+                    .payload
+                    .get("session_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("-");
+                state.logger.info(format!(
+                    "{REMOTE_CONNECT_TRACE_TAG} session_id={} stage=desktop_backend_offer_forwarded",
+                    session_id
+                ));
+            }
             let _ = state.local_events.send(raw.to_string());
             debug!(event_type = %event.event_type, "forwarded backend event to desktop client");
         }
@@ -338,6 +350,12 @@ async fn handle_backend_event(state: &AppState, raw: &str) {
         }
         "terminal.resize" => {
             handle_terminal_resize(state, event.payload).await;
+        }
+        "terminal.bootstrap.request" => {
+            handle_terminal_bootstrap_request(state, event.payload).await;
+        }
+        "terminal.history.range.request" => {
+            handle_terminal_history_range_request(state, event.payload).await;
         }
         "terminal.close" => {
             handle_terminal_close(state, event.payload).await;
@@ -677,22 +695,60 @@ async fn handle_session_requested(state: &AppState, payload: serde_json::Value) 
     let desktop_connections = runtime.desktop_client_connections;
     drop(runtime);
 
-    let should_auto_approve = backend_auto_approved || local_auto_approved;
-    if should_auto_approve {
+    if backend_auto_approved {
+        // backend 已经把 session 直接推进到 connecting，并且 mobile 侧也已经
+        // 收到了 accepted 事件。这里若再同步提交一次 approve，不仅没有功能
+        // 收益，还会阻塞当前 backend event 主循环，使紧随其后的 webrtc.offer /
+        // ice_candidate 不能及时转发到本地桌面端，最终把 auto-approve 场景拖慢。
         info!(
             session_id = %session_id,
             backend_auto_approved,
             local_auto_approved,
-            "auto approve enabled, approving session"
+            "backend already auto approved session; skipping redundant desktop decision"
         );
-        if let Err(error) = submit_session_decision_with_retry(state, &session_id, true, None).await
-        {
-            warn!(session_id = %session_id, error = %error, "failed to approve session");
-            state.logger.warn(format!(
-                "failed to approve session session_id={} error={error}",
-                session_id
+        state.logger.info(format!(
+            "{REMOTE_CONNECT_TRACE_TAG} session_id={} stage=desktop_auto_approve_bypassed backend_auto_approved=true desktop_connections={desktop_connections}",
+            session_id
+        ));
+        return;
+    }
+
+    if local_auto_approved {
+        // 本地桌面端自动授权仍需要把 decision 提交给 backend，mobile 才会收到
+        // accepted 事件并继续发 offer；但这次提交不应该卡住当前事件循环，
+        // 否则后续实时信令会被管理类请求串行阻塞。
+        info!(
+            session_id = %session_id,
+            desktop_connections,
+            "local desktop auto approve enabled, submitting decision in background"
+        );
+        state.logger.info(format!(
+            "{REMOTE_CONNECT_TRACE_TAG} session_id={} stage=desktop_local_auto_approve_start desktop_connections={desktop_connections}",
+            session_id
+        ));
+        let state = state.clone();
+        let session_id_for_task = session_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                submit_session_decision_with_retry(&state, &session_id_for_task, true, None).await
+            {
+                warn!(
+                    session_id = %session_id_for_task,
+                    error = %error,
+                    "failed to approve session in background"
+                );
+                state.logger.warn(format!(
+                    "failed to approve session session_id={} error={error}",
+                    session_id_for_task
+                ));
+                return;
+            }
+
+            state.logger.info(format!(
+                "{REMOTE_CONNECT_TRACE_TAG} session_id={} stage=desktop_local_auto_approve_done",
+                session_id_for_task
             ));
-        }
+        });
         return;
     }
 
@@ -957,6 +1013,101 @@ async fn handle_terminal_close(state: &AppState, payload: serde_json::Value) {
     if let Err(error) = state.terminal_manager.close(terminal_id).await {
         warn!(terminal_id = %terminal_id, error = %error, "terminal close failed");
     }
+}
+
+async fn handle_terminal_bootstrap_request(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let Some(terminal_id) = terminal_id else {
+        return;
+    };
+
+    match state.terminal_manager.bootstrap_v2(terminal_id, None).await {
+        Ok(events) => {
+            for event in events {
+                if let Err(error) =
+                    publish_terminal_event_to_backend(state, terminal_id, event).await
+                {
+                    warn!(terminal_id = %terminal_id, error = %error, "terminal bootstrap relay failed");
+                    break;
+                }
+            }
+        }
+        Err(error) => {
+            warn!(terminal_id = %terminal_id, error = %error, "terminal bootstrap request failed");
+        }
+    }
+}
+
+async fn handle_terminal_history_range_request(state: &AppState, payload: serde_json::Value) {
+    let terminal_id = payload
+        .get("terminal_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let request_id = payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let start_line = payload
+        .get("start_line")
+        .and_then(serde_json::Value::as_i64);
+    let history_generation = payload
+        .get("history_generation")
+        .and_then(serde_json::Value::as_u64);
+    let end_line = payload.get("end_line").and_then(serde_json::Value::as_i64);
+    let (Some(terminal_id), Some(request_id), Some(start_line), Some(end_line)) =
+        (terminal_id, request_id, start_line, end_line)
+    else {
+        return;
+    };
+
+    match state
+        .terminal_manager
+        .history_range_response(
+            terminal_id,
+            request_id,
+            history_generation,
+            start_line,
+            end_line,
+        )
+        .await
+    {
+        Ok(event) => {
+            if let Err(error) = publish_terminal_event_to_backend(state, terminal_id, event).await {
+                warn!(terminal_id = %terminal_id, error = %error, "terminal history range relay failed");
+            }
+        }
+        Err(error) => {
+            warn!(terminal_id = %terminal_id, error = %error, "terminal history range request failed");
+        }
+    }
+}
+
+async fn publish_terminal_event_to_backend(
+    state: &AppState,
+    terminal_id: Uuid,
+    event: serde_json::Value,
+) -> anyhow::Result<()> {
+    let endpoint = build_http_url(
+        &state.config.backend.base_url,
+        &format!("/api/v1/desktop/terminals/{terminal_id}/events"),
+    );
+    let response = reqwest::Client::new()
+        .post(endpoint)
+        .json(&serde_json::json!({
+            "device_id": state.config.backend.device_id,
+            "event": event,
+        }))
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("backend returned status {}", response.status());
+    }
+
+    Ok(())
 }
 
 async fn submit_session_decision_with_retry(

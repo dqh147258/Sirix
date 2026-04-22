@@ -29,6 +29,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "fmt"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+vt100 = "0.16.2"
 codex-config = { path = "../third_party/codex-rs/config" }
 codex-core = { path = "../third_party/codex-rs/core" }
 codex-login = { path = "../third_party/codex-rs/login" }

@@ -34,12 +34,15 @@ Sirix/
 ./scripts/dev-up.sh
 ./scripts/dev-up.sh --clear-logs
 ./scripts/dev-up.sh --release
+./scripts/dev-tui.sh
 ```
 
 说明：
 
 - 默认启动 Debug 场景；附带 `--release` 时切到 Release 场景。
 - `--clear-logs` 会清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`，方便重新观察本轮联调日志。
+- `dev-up.sh` / `dev-restart.sh` 默认不再强制 rebuild / pull；需要时再显式附带 `--build`、`--pull`。
+- `dev-tui.sh` 提供一个统一的本地联调控制台，可并行启动/停止 backend、desktop-server、CLI build、desktop client、mobile client，并支持上下键回看历史指令、颜色状态、失败提示，以及按 `V` 查看最近失败任务日志。
 
 查看后端日志：
 

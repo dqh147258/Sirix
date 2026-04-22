@@ -54,13 +54,13 @@ echo "[sirix-build] building sirix-runtime (${SCENE})"
 (
   cd "${ROOT_DIR}/third_party/codex-rs"
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-  cargo build "${CARGO_PROFILE_FLAG[@]}" -p sirix-runtime
+  cargo build "${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"}" -p sirix-runtime
 )
 
 echo "[sirix-build] building desktop-server, sirix and sirix-terminal (${SCENE})"
 (
   cd "${ROOT_DIR}/desktop-server"
-  cargo build "${CARGO_PROFILE_FLAG[@]}"
+  cargo build "${CARGO_PROFILE_FLAG[@]+"${CARGO_PROFILE_FLAG[@]}"}"
 )
 
 BIN_DIR="${SIRIX_HOME}/bin"

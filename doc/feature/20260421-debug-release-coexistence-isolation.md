@@ -43,6 +43,7 @@
 - `backend-server/deploy/scripts/dev-*.sh`
   - 增加 scene 感知、`--release`、`--expose-deps`
   - `dev-up.sh` / `dev-restart.sh` 支持 `--clear-logs`
+  - `dev-up.sh` / `dev-restart.sh` 默认不再强制 rebuild / pull，必要时再显式 `--build` / `--pull`
 - `scripts/run-desktop-server.sh`
   - scene-aware 构建并启动 `desktop-server` / `sirix` / `sirix-runtime`
 - `scripts/run-desktop-client.sh`
@@ -53,6 +54,12 @@
   - 兼容原 positional `debug|release`，同时支持 `--release`
 - `scripts/run-e2e-smoke.sh`
   - scene-aware 默认 API / desktop WS 地址
+- `scripts/dev-tui.sh`
+  - 统一管理 backend / desktop-server / CLI build / desktop client / mobile client
+  - 支持并行启停、状态查看、冲突检测、日志清理、全开全关、移动端缺席自动跳过
+  - 支持上下键回看历史输入指令
+  - 支持状态/操作颜色区分，并在脚本失败时直接显示失败状态与说明
+  - 支持列出最近失败的 10 个任务，并按序号查看对应日志快照
 - `backend-server/deploy/docker-compose.yml`
   - 去掉固定 compose project name
   - runtime logs host 路径改为 scene-aware

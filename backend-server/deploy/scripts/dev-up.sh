@@ -8,15 +8,19 @@ source "${DEPLOY_DIR}/../../scripts/lib/sirix-scene.sh"
 SCENE=$(sirix_resolve_scene_from_env)
 EXPOSE_DEPS=false
 CLEAR_LOGS=false
+FORCE_BUILD=false
+FORCE_PULL=false
 
 usage() {
   cat <<'EOF'
-Usage: ./backend-server/deploy/scripts/dev-up.sh [--release] [--expose-deps] [--clear-logs]
+Usage: ./backend-server/deploy/scripts/dev-up.sh [--release] [--expose-deps] [--clear-logs] [--build] [--pull]
 
 Options:
   --release      Use the Release Sirix scene.
   --expose-deps  Publish Postgres/Redis/Coturn host ports for the chosen scene.
   --clear-logs   Clear backend runtime logs for the chosen scene before startup.
+  --build        Force rebuilding the backend-server image before startup.
+  --pull         Explicitly pull dependency images / newer base layers before startup.
 EOF
 }
 
@@ -32,6 +36,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --clear-logs)
       CLEAR_LOGS=true
+      shift
+      ;;
+    --build)
+      FORCE_BUILD=true
+      shift
+      ;;
+    --pull)
+      FORCE_PULL=true
       shift
       ;;
     -h|--help)
@@ -65,5 +77,19 @@ if [[ "${EXPOSE_DEPS}" == true ]]; then
 fi
 
 cd "${DEPLOY_DIR}"
-"${compose_args[@]}" up -d --build
+if [[ "${FORCE_PULL}" == true ]]; then
+  # 默认联调不主动走网络，只有显式要求时才刷新依赖镜像或 backend 构建基底。
+  "${compose_args[@]}" pull postgres redis coturn
+fi
+
+if [[ "${FORCE_BUILD}" == true ]]; then
+  build_args=("${compose_args[@]}" build)
+  if [[ "${FORCE_PULL}" == true ]]; then
+    build_args+=(--pull)
+  fi
+  build_args+=(backend-server)
+  "${build_args[@]}"
+fi
+
+"${compose_args[@]}" up -d
 "${compose_args[@]}" ps

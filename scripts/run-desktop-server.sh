@@ -70,11 +70,11 @@ echo "[sirix] building desktop-server, sirix, sirix-terminal, and sirix-runtime 
 (
   cd "${REPO_DIR}/third_party/codex-rs"
   export RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}"
-  cargo build "${BUILD_ARGS[@]}" -p sirix-runtime
+  cargo build "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}" -p sirix-runtime
 )
 (
   cd "${DESKTOP_SERVER_DIR}"
-  cargo build "${BUILD_ARGS[@]}" --bin desktop-server --bin sirix --bin sirix-terminal
+  cargo build "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}" --bin desktop-server --bin sirix --bin sirix-terminal
 )
 
 BIN_DIR="${SIRIX_HOME}/bin"

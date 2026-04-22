@@ -94,6 +94,23 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
   final SessionTerminalChannelController _terminalChannelController;
   String? _sharedScreenId;
   QualityProfile _preferredQualityProfile = QualityProfile.p720;
+  final List<Map<String, dynamic>> _pendingLocalIceCandidates = <Map<String, dynamic>>[];
+  final Set<String> _pendingLocalIceKeys = <String>{};
+  Future<void>? _rtcWarmupFuture;
+  bool _bufferLocalIceCandidates = false;
+  bool _drainingLocalIceCandidates = false;
+  String? _localIceSessionId;
+
+  Future<void> warmUpRtc() {
+    final existing = _rtcWarmupFuture;
+    if (existing != null) {
+      return existing;
+    }
+
+    final future = _performRtcWarmUp();
+    _rtcWarmupFuture = future;
+    return future;
+  }
 
   Future<void> startAnswering({
     required String sessionId,
@@ -108,10 +125,17 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
       lastUpdated: DateTime.now(),
     );
     _localSignalCallback = onLocalSignal;
+    _beginBufferingLocalIceCandidates(sessionId);
 
+    // Desktop 端首个 PeerConnection 常有明显冷启动开销（底层工厂/编解码器/
+    // 线程池初始化都可能发生在这里）。提前预热后，这里的真实建连路径只需
+    // 等待一次已完成的 warmup future，可显著降低首连抖动。
+    await warmUpRtc();
+    final createPeerConnectionStopwatch = Stopwatch()..start();
     final peerConnection = await createPeerConnection(defaultRtcConfiguration());
+    createPeerConnectionStopwatch.stop();
     AppLogger.info(
-      '$_mediaStreamTraceTag desktop peer connection created sessionId=$sessionId',
+      '$_mediaStreamTraceTag desktop peer connection created sessionId=$sessionId elapsed_ms=${createPeerConnectionStopwatch.elapsedMilliseconds}',
     );
     _terminalChannelController.bindDesktopPeerConnection(
       sessionId: sessionId,
@@ -122,17 +146,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
         return;
       }
 
-      final callback = _localSignalCallback;
-      if (callback == null) {
-        return;
-      }
-
-      unawaited(
-        callback(
-          WebrtcSignalType.iceCandidate,
-          candidate: iceCandidateToMap(candidate),
-        ),
-      );
+      _enqueueOrDispatchLocalIceCandidate(iceCandidateToMap(candidate));
       AppLogger.trace(
         '$_mediaStreamTraceTag desktop local ice candidate emitted sessionId=$sessionId mid=${candidate.sdpMid} mline=${candidate.sdpMLineIndex}',
       );
@@ -189,6 +203,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
 
     _peerConnection = peerConnection;
     await onLocalSignal(WebrtcSignalType.answer, sdp: answer.sdp ?? '');
+    await _releaseBufferedLocalIceCandidates();
     AppLogger.info(
       '$_mediaStreamTraceTag desktop local answer created sessionId=$sessionId length=${answer.sdp?.length ?? 0}',
     );
@@ -315,6 +330,7 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
   }
 
   Future<void> stop() async {
+    _resetLocalIceDispatchState();
     final stream = _displayStream;
     _displayStream = null;
     _videoSender = null;
@@ -488,12 +504,112 @@ class DesktopMediaController extends BaseViewModel<DesktopMediaState> {
     await stream.dispose();
   }
 
+  Future<void> _performRtcWarmUp() async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      // 这里只做一次最小化的 create/close 预热，主动把 flutter_webrtc
+      // 的惰性初始化搬到“桌面端空闲阶段”，避免首次真实远控连接时再承受
+      // 这段冷启动成本。
+      final peerConnection = await createPeerConnection(defaultRtcConfiguration());
+      await peerConnection.close();
+      stopwatch.stop();
+      AppLogger.info(
+        '$_mediaStreamTraceTag desktop rtc warmup completed elapsed_ms=${stopwatch.elapsedMilliseconds}',
+      );
+    } catch (error) {
+      stopwatch.stop();
+      // 预热失败不能影响后续真实建连，因此只记录并允许下次重试。
+      _rtcWarmupFuture = null;
+      AppLogger.warn(
+        '$_mediaStreamTraceTag desktop rtc warmup failed elapsed_ms=${stopwatch.elapsedMilliseconds} error=$error',
+      );
+      rethrow;
+    }
+  }
+
   @override
   void dispose() {
     unawaited(() async {
       await stop();
     }());
     super.dispose();
+  }
+}
+
+extension on DesktopMediaController {
+  void _beginBufferingLocalIceCandidates(String sessionId) {
+    // 先缓存本地 candidate，确保 desktop 侧的 answer 先送到 mobile；
+    // 否则 candidate 先抢占链路，会让 answer/offer 主信令被拖慢。
+    _bufferLocalIceCandidates = true;
+    _localIceSessionId = sessionId;
+    _pendingLocalIceCandidates.clear();
+    _pendingLocalIceKeys.clear();
+  }
+
+  void _resetLocalIceDispatchState() {
+    _bufferLocalIceCandidates = false;
+    _drainingLocalIceCandidates = false;
+    _localIceSessionId = null;
+    _pendingLocalIceCandidates.clear();
+    _pendingLocalIceKeys.clear();
+  }
+
+  void _enqueueOrDispatchLocalIceCandidate(Map<String, dynamic> candidate) {
+    final callback = _localSignalCallback;
+    final sessionId = _localIceSessionId;
+    if (callback == null || sessionId == null) {
+      return;
+    }
+
+    final key = _localIceCandidateKey(candidate);
+    if (!_pendingLocalIceKeys.add(key)) {
+      return;
+    }
+    _pendingLocalIceCandidates.add(candidate);
+    if (_bufferLocalIceCandidates || _drainingLocalIceCandidates) {
+      return;
+    }
+    unawaited(_drainPendingLocalIceCandidates());
+  }
+
+  Future<void> _releaseBufferedLocalIceCandidates() async {
+    _bufferLocalIceCandidates = false;
+    await _drainPendingLocalIceCandidates();
+  }
+
+  Future<void> _drainPendingLocalIceCandidates() async {
+    final callback = _localSignalCallback;
+    final sessionId = _localIceSessionId;
+    if (callback == null || sessionId == null || _drainingLocalIceCandidates) {
+      return;
+    }
+
+    _drainingLocalIceCandidates = true;
+    try {
+      // 串行发送 candidate，避免一次性并发打到 backend/mobile，
+      // 造成事件流堆积和 offer/answer 被后续 candidate 噪音淹没。
+      while (!_bufferLocalIceCandidates && _pendingLocalIceCandidates.isNotEmpty) {
+        final candidate = _pendingLocalIceCandidates.removeAt(0);
+        _pendingLocalIceKeys.remove(_localIceCandidateKey(candidate));
+        await callback(
+          WebrtcSignalType.iceCandidate,
+          candidate: candidate,
+        );
+      }
+    } finally {
+      _drainingLocalIceCandidates = false;
+      if (!_bufferLocalIceCandidates && _pendingLocalIceCandidates.isNotEmpty) {
+        unawaited(_drainPendingLocalIceCandidates());
+      }
+    }
+  }
+
+  String _localIceCandidateKey(Map<String, dynamic> candidate) {
+    return [
+      candidate['candidate'] ?? '',
+      candidate['sdpMid'] ?? '',
+      candidate['sdpMLineIndex'] ?? '',
+    ].join('|');
   }
 }
 

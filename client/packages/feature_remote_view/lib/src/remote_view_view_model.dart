@@ -11,6 +11,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'remote_view_state.dart';
 
 const _mediaStreamTraceTag = '[MEDIA_STREAM_TRACE]';
+const _remoteConnectTraceTag = '[REMOTE_CONNECT_TRACE]';
 
 class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
   RemoteViewViewModel({
@@ -32,6 +33,8 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
   StreamSubscription<dynamic>? _eventSubscription;
   String? _boundAccessToken;
   bool _initialOfferSent = false;
+  Stopwatch? _connectTraceStopwatch;
+  String? _connectTraceSessionId;
 
   Future<void> attachSession({
     required String sessionId,
@@ -39,6 +42,11 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     required String accessToken,
     required String initialState,
   }) async {
+    _startConnectTrace(
+      sessionId: sessionId,
+      deviceId: deviceId,
+      initialState: initialState,
+    );
     AppLogger.info(
       'attach remote session sessionId=$sessionId deviceId=$deviceId initialState=$initialState',
     );
@@ -70,14 +78,19 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         );
       },
     );
+    _logConnectTrace(sessionId, 'mobile_stream_ready');
     _bindEventStream(accessToken: accessToken);
-    await loadSnapshots(accessToken: accessToken);
-    _startSnapshotRefreshTimer(accessToken);
     if (initialState != 'pending_approval') {
+      // 自动授权场景下，session 在后端已经进入 connecting。这里若继续等待
+      // snapshots HTTP 拉取完成后再发 offer，会把非核心 UI 预热放进
+      // WebRTC 建连关键路径，直接拉长“点击连接 -> 首帧”的耗时。
       await _sendInitialOffer(accessToken);
     }
+    _startSnapshotRefreshTimer(accessToken);
+    _warmUpRemoteWorkspace(accessToken: accessToken, sessionId: sessionId);
 
     state = state.copyWith(loading: false, clearError: true);
+    _logConnectTrace(sessionId, 'attach_session_ready');
   }
 
   Future<void> loadSnapshots({
@@ -363,6 +376,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     try {
+      _logConnectTrace(sessionId, 'initial_offer_start');
       final offer = await _streamController.createOffer(sessionId: sessionId);
       await _apiClient.sendMobileWebrtcSignal(
         accessToken: accessToken,
@@ -370,12 +384,19 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         signalType: WebrtcSignalType.offer,
         sdp: offer,
       );
+      await _streamController.releaseBufferedLocalIceCandidates();
       _initialOfferSent = true;
+      _logConnectTrace(
+        sessionId,
+        'initial_offer_sent',
+        detail: 'sdp_length=${offer.length}',
+      );
       AppLogger.info(
         '$_mediaStreamTraceTag mobile initial offer sent sessionId=$sessionId length=${offer.length}',
       );
       AppLogger.info('initial mobile offer sent sessionId=$sessionId');
     } catch (error) {
+      _logConnectTrace(sessionId, 'initial_offer_failed', detail: 'error=$error');
       AppLogger.error('initial mobile offer failed sessionId=$sessionId error=$error');
       state = state.copyWith(errorMessage: AppLocalizations.current.initWebrtcFailed('$error'));
     }
@@ -392,6 +413,10 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
       clearError: true,
     );
     AppLogger.info('connection accepted sessionId=${state.sessionId}');
+    final currentSessionId = state.sessionId;
+    if (currentSessionId != null) {
+      _logConnectTrace(currentSessionId, 'connection_request_accepted');
+    }
 
     final accessToken = _boundAccessToken;
     if (accessToken != null) {
@@ -433,6 +458,10 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     AppLogger.info(
       'session state changed sessionId=${state.sessionId} nextState=${nextState ?? 'unknown'}',
     );
+    final currentSessionId = state.sessionId;
+    if (nextState == 'streaming' && currentSessionId != null) {
+      _logConnectTrace(currentSessionId, 'session_streaming');
+    }
 
     if (nextState == 'terminated') {
       await _handleRemoteSessionEnded(
@@ -465,6 +494,7 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
         signalType: WebrtcSignalType.answer,
         sdp: answer,
       );
+      await _streamController.releaseBufferedLocalIceCandidates();
       AppLogger.info(
         '$_mediaStreamTraceTag mobile answer sent sessionId=$sessionId length=${answer.length}',
       );
@@ -489,6 +519,10 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     }
 
     await _streamController.applyRemoteAnswer(sdp);
+    final currentSessionId = state.sessionId;
+    if (currentSessionId != null) {
+      _logConnectTrace(currentSessionId, 'remote_answer_applied');
+    }
     AppLogger.info(
       '$_mediaStreamTraceTag mobile remote answer applied sessionId=${state.sessionId} length=${sdp.length}',
     );
@@ -528,6 +562,54 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
 
     final eventSessionId = payload['session_id'] as String?;
     return eventSessionId == currentSessionId;
+  }
+
+  void _warmUpRemoteWorkspace({
+    required String accessToken,
+    required String sessionId,
+  }) {
+    unawaited(() async {
+      final warmupStopwatch = Stopwatch()..start();
+      _logConnectTrace(sessionId, 'snapshot_warmup_start');
+      await loadSnapshots(accessToken: accessToken);
+      _logConnectTrace(
+        sessionId,
+        'snapshot_warmup_done',
+        detail: 'elapsed_ms=${warmupStopwatch.elapsedMilliseconds}',
+      );
+    }());
+  }
+
+  void _startConnectTrace({
+    required String sessionId,
+    required String deviceId,
+    required String initialState,
+  }) {
+    _connectTraceStopwatch
+      ?..stop()
+      ..reset();
+    _connectTraceStopwatch = Stopwatch()..start();
+    _connectTraceSessionId = sessionId;
+    _logConnectTrace(
+      sessionId,
+      'attach_session_start',
+      detail: 'deviceId=$deviceId initialState=$initialState',
+    );
+  }
+
+  void _logConnectTrace(
+    String sessionId,
+    String stage, {
+    String? detail,
+  }) {
+    if (_connectTraceSessionId != sessionId) {
+      return;
+    }
+    final elapsedMs = _connectTraceStopwatch?.elapsedMilliseconds ?? -1;
+    final detailSuffix = detail == null || detail.isEmpty ? '' : ' $detail';
+    AppLogger.info(
+      '$_remoteConnectTraceTag sessionId=$sessionId stage=$stage elapsed_ms=$elapsedMs$detailSuffix',
+    );
   }
 
   void _startSnapshotRefreshTimer(String accessToken) {
@@ -571,6 +653,11 @@ class RemoteViewViewModel extends BaseViewModel<RemoteViewState> {
     _snapshotRefreshTimer?.cancel();
     _snapshotRefreshTimer = null;
     _initialOfferSent = false;
+    _connectTraceStopwatch
+      ?..stop()
+      ..reset();
+    _connectTraceStopwatch = null;
+    _connectTraceSessionId = null;
 
     state = state.copyWith(
       sessionId: null,

@@ -4,7 +4,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:xterm/xterm.dart'
-    show Terminal, TerminalController, TerminalTheme, TerminalThemes, TerminalView;
+    show
+        Terminal,
+        TerminalController,
+        TerminalStyle,
+        TerminalTheme,
+        TerminalThemes,
+        TerminalView;
 
 import 'package:app_core/app_core.dart';
 import 'package:infra_api/infra_api.dart';
@@ -54,8 +60,11 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   final TerminalTheme _theme = TerminalThemes.defaultTheme;
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
   final Map<String, TerminalController> _terminalControllers = <String, TerminalController>{};
+  final Map<String, ScrollController> _terminalScrollControllers = <String, ScrollController>{};
+  final Set<String> _pendingControllerCleanupIds = <String>{};
   late TerminalPageConfig _config;
-  String? _lastFocusedTerminalId;
+  String? _lastAutoFocusedTerminalId;
+  bool _controllerCleanupScheduled = false;
 
   @override
   void initState() {
@@ -87,6 +96,9 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     for (final controller in _terminalControllers.values) {
       controller.dispose();
     }
+    for (final controller in _terminalScrollControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -109,7 +121,13 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final activeTerminal = state.activeTerminal;
     final activeTerminalId = state.activeTerminalId;
     final terminal = viewModel.terminalFor(activeTerminalId);
+    final authority = viewModel.authorityFor(activeTerminalId);
     final terminalController = _terminalControllerFor(activeTerminalId);
+    final terminalScrollController = _terminalScrollControllerFor(
+      terminalId: activeTerminalId,
+      viewModel: viewModel,
+    );
+    final terminalStyle = _terminalStyleForContext(context);
     final approvalRequest = state.activeApprovalRequest;
     final statusLabel = activeTerminal?.state.toUpperCase() ?? l10n.idle.toUpperCase();
     final canCreate = widget.allowCreate && widget.deviceId != null;
@@ -124,7 +142,10 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     ];
 
     _disposeInactiveTerminalControllers(state.terminals.map((item) => item.id));
-    _syncTerminalFocus(activeTerminalId);
+    _maybeRequestTerminalFocus(
+      activeTerminalId: activeTerminalId,
+      hasTerminal: terminal != null,
+    );
 
     return Column(
       children: [
@@ -293,23 +314,67 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                             ),
                           ),
                         Positioned.fill(
-                          child: GestureDetector(
+                          child: Listener(
                             behavior: HitTestBehavior.translucent,
-                            onTapDown: (_) => _requestTerminalFocus(),
+                            onPointerDown: (_) => _requestTerminalFocus(),
                             child: IgnorePointer(
                               ignoring: state.terminals.isEmpty,
                               child: Padding(
                                 padding: const EdgeInsets.fromLTRB(14, 16, 14, 8),
                                 child: terminal == null
                                     ? const SizedBox.shrink()
-                                    : TerminalView(
-                                        terminal,
-                                        key: ValueKey(activeTerminalId),
-                                        controller: terminalController,
-                                        theme: _theme,
-                                        focusNode: _focusNode,
-                                        autofocus: true,
-                                        backgroundOpacity: 0,
+                                    : LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          _maybeReportViewportGeometry(
+                                            viewModel: viewModel,
+                                            terminalId: activeTerminalId,
+                                            constraints: constraints,
+                                            terminalStyle: terminalStyle,
+                                          );
+                                          final authorityCols = authority?.cols ?? 0;
+                                          final terminalWidth = _terminalContentWidth(
+                                            context: context,
+                                            terminalStyle: terminalStyle,
+                                            cols: authorityCols > 0
+                                                ? authorityCols
+                                                : activeTerminal?.cols ?? 120,
+                                            minWidth: constraints.maxWidth,
+                                          );
+                                          return ScrollConfiguration(
+                                            behavior: const MaterialScrollBehavior(),
+                                            child: SingleChildScrollView(
+                                              scrollDirection: Axis.horizontal,
+                                              child: SizedBox(
+                                                width: terminalWidth,
+                                                height: constraints.maxHeight,
+                                                child: RepaintBoundary(
+                                                  // 远端桌面画面和 Terminal 会同时刷新；将
+                                                  // xterm 视图包进独立的 repaint boundary，
+                                                  // 可减少父布局重建时对终端栅格的连带重绘，
+                                                  // 降低移动端“闪一下 / 重叠一下”的体感。
+                                                  child: TerminalView(
+                                                    terminal,
+                                                    key: ValueKey(activeTerminalId),
+                                                    controller: terminalController,
+                                                    scrollController: terminalScrollController,
+                                                    theme: _theme,
+                                                    textStyle: terminalStyle,
+                                                    focusNode: _focusNode,
+                                                    autofocus: true,
+                                                    autoResize: false,
+                                                    // Keep the viewport background owned by
+                                                    // the surrounding workspace panel. CLI
+                                                    // color blocks (including Codex/Sirix
+                                                    // TUI highlights) should come from the
+                                                    // terminal escape stream itself rather
+                                                    // than from a forced global fill color.
+                                                    backgroundOpacity: 0,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        },
                                       ),
                               ),
                             ),
@@ -387,38 +452,18 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     );
   }
 
-  TerminalController? _terminalControllerFor(String? terminalId) {
-    if (terminalId == null || terminalId.isEmpty) {
-      return null;
-    }
-
-    return _terminalControllers.putIfAbsent(terminalId, TerminalController.new);
-  }
-
-  void _disposeInactiveTerminalControllers(Iterable<String> terminalIds) {
-    final activeIds = terminalIds.toSet();
-    final staleIds = _terminalControllers.keys
-        .where((terminalId) => !activeIds.contains(terminalId))
-        .toList(growable: false);
-    for (final terminalId in staleIds) {
-      // Each terminal tab owns an independent controller so selection ranges
-      // cannot leak across buffers. Dispose controllers as tabs disappear to
-      // avoid keeping stale anchors alive after the terminal session is closed.
-      _terminalControllers.remove(terminalId)?.dispose();
-    }
-  }
-
-  void _syncTerminalFocus(String? activeTerminalId) {
-    if (activeTerminalId == null || activeTerminalId.isEmpty) {
-      _lastFocusedTerminalId = null;
+  void _maybeRequestTerminalFocus({
+    required String? activeTerminalId,
+    required bool hasTerminal,
+  }) {
+    if (!hasTerminal || activeTerminalId == null || activeTerminalId.isEmpty) {
+      _lastAutoFocusedTerminalId = null;
       return;
     }
-
-    if (_lastFocusedTerminalId == activeTerminalId) {
+    if (_lastAutoFocusedTerminalId == activeTerminalId && _focusNode.hasFocus) {
       return;
     }
-
-    _lastFocusedTerminalId = activeTerminalId;
+    _lastAutoFocusedTerminalId = activeTerminalId;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -427,8 +472,148 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     });
   }
 
+  TerminalStyle _terminalStyleForContext(BuildContext context) {
+    final isMobile = switch (Theme.of(context).platform) {
+      TargetPlatform.android || TargetPlatform.iOS => true,
+      TargetPlatform.macOS ||
+      TargetPlatform.linux ||
+      TargetPlatform.windows ||
+      TargetPlatform.fuchsia => false,
+    };
+    return TerminalStyle(
+      fontSize: isMobile ? 12 : 13,
+      height: 1.15,
+    );
+  }
+
+  double _terminalContentWidth({
+    required BuildContext context,
+    required TerminalStyle terminalStyle,
+    required int cols,
+    required double minWidth,
+  }) {
+    final painter = TextPainter(
+      text: TextSpan(
+        text: 'W',
+        style: TextStyle(
+          fontSize: terminalStyle.fontSize,
+          height: terminalStyle.height,
+          fontFamily: terminalStyle.fontFamily,
+          fontFamilyFallback: terminalStyle.fontFamilyFallback,
+        ),
+      ),
+      textDirection: Directionality.of(context),
+    )..layout();
+    final cellWidth = painter.width <= 0 ? 8.0 : painter.width;
+    return ((cols * cellWidth + 12).clamp(minWidth, double.infinity) as num).toDouble();
+  }
+
+  void _maybeReportViewportGeometry({
+    required TerminalViewModel viewModel,
+    required String? terminalId,
+    required BoxConstraints constraints,
+    required TerminalStyle terminalStyle,
+  }) {
+    if (terminalId == null || !constraints.hasBoundedWidth || !constraints.hasBoundedHeight) {
+      return;
+    }
+    final probe = TextPainter(
+      text: TextSpan(
+        text: 'W',
+        style: TextStyle(
+          fontSize: terminalStyle.fontSize,
+          height: terminalStyle.height,
+          fontFamily: terminalStyle.fontFamily,
+          fontFamilyFallback: terminalStyle.fontFamilyFallback,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final cellWidth = probe.width <= 0 ? 8.0 : probe.width;
+    final cellHeight = probe.height <= 0 ? terminalStyle.fontSize : probe.height;
+    final cols = ((constraints.maxWidth / cellWidth).floor().clamp(20, 400) as num).toInt();
+    final rows = ((constraints.maxHeight / cellHeight).floor().clamp(10, 200) as num).toInt();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      viewModel.queueResize(
+        terminalId: terminalId,
+        cols: cols,
+        rows: rows,
+      );
+    });
+  }
+
+  TerminalController? _terminalControllerFor(String? terminalId) {
+    if (terminalId == null || terminalId.isEmpty) {
+      return null;
+    }
+
+    return _terminalControllers.putIfAbsent(terminalId, TerminalController.new);
+  }
+
+  ScrollController? _terminalScrollControllerFor({
+    required String? terminalId,
+    required TerminalViewModel viewModel,
+  }) {
+    if (terminalId == null || terminalId.isEmpty) {
+      return null;
+    }
+
+    return _terminalScrollControllers.putIfAbsent(terminalId, () {
+      final controller = ScrollController();
+      controller.addListener(() {
+        if (!controller.hasClients) {
+          return;
+        }
+        viewModel.onTerminalVerticalScroll(
+          terminalId: terminalId,
+          extentBefore: controller.position.extentBefore,
+        );
+      });
+      return controller;
+    });
+  }
+
+  void _disposeInactiveTerminalControllers(Iterable<String> terminalIds) {
+    final activeIds = terminalIds.toSet();
+    final staleIds = _terminalControllers.keys
+        .where((terminalId) => !activeIds.contains(terminalId))
+        .toList(growable: false);
+    if (staleIds.isEmpty) {
+      return;
+    }
+    _pendingControllerCleanupIds.addAll(staleIds);
+    if (_controllerCleanupScheduled) {
+      return;
+    }
+    _controllerCleanupScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _controllerCleanupScheduled = false;
+      if (!mounted || _pendingControllerCleanupIds.isEmpty) {
+        _pendingControllerCleanupIds.clear();
+        return;
+      }
+
+      final currentState = ref.read(terminalViewModelProvider(_config));
+      final activeIds = currentState.terminals.map((terminal) => terminal.id).toSet();
+      final cleanupIds = _pendingControllerCleanupIds.toList(growable: false);
+      _pendingControllerCleanupIds.clear();
+      for (final terminalId in cleanupIds) {
+        if (activeIds.contains(terminalId)) {
+          continue;
+        }
+        // TerminalView 在本帧完成前仍可能持有旧 controller；延后到 post-frame
+        // 再释放，避免 render object 还在 attach 时读到已 dispose 的 controller。
+        _terminalControllers.remove(terminalId)?.dispose();
+        _terminalScrollControllers.remove(terminalId)?.dispose();
+      }
+    });
+  }
+
   void _requestTerminalFocus() {
-    if (!mounted || _focusNode.hasFocus) {
+    if (!mounted || _focusNode.hasFocus || !_focusNode.canRequestFocus) {
       return;
     }
 
@@ -929,38 +1114,93 @@ class _TerminalFooter extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final l10n = context.l10n;
+    final metricsText = activeTerminal == null
+        ? '--'
+        : 'COL ${activeTerminal!.cols}  ROW ${activeTerminal!.rows}';
+    final copyLabel = compact ? 'COPY' : 'COPY SELECTION';
 
     return Container(
-      height: compact ? 28 : 24,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
+      constraints: BoxConstraints(minHeight: compact ? 32 : 24),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: const Color(0xFF11161C),
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(18)),
         border: Border(top: BorderSide(color: palette.glassStroke)),
       ),
-      child: Row(
-        children: [
-          _StatusText(
-            color: palette.primaryBright,
-            text: l10n.terminalStable,
-          ),
-          const SizedBox(width: 16),
-          const _StatusText(text: 'UTF-8'),
-          const SizedBox(width: 16),
-          _StatusText(
-            text: activeTerminal == null
-                ? '--'
-                : 'COL ${activeTerminal!.cols}  ROW ${activeTerminal!.rows}',
-          ),
-          const Spacer(),
-          _FooterActionText(
-            label: compact ? 'COPY' : 'COPY SELECTION',
-            enabled: hasSelection && onCopySelection != null,
-            onTap: onCopySelection,
-          ),
-          const SizedBox(width: 16),
-          _StatusText(text: statusLabel),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final narrowCompact = compact && constraints.maxWidth < 430;
+          if (narrowCompact) {
+            // 移动端 workspace 模式宽度较窄，底栏若仍然一行塞下全部状态文案，
+            // 会在右下角产生 overflow 警告条。窄宽度时改成双行信息布局，
+            // 保留关键状态，同时避免 footer 把终端可用高度继续压缩得抖动。
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: _StatusText(
+                        color: palette.primaryBright,
+                        text: l10n.terminalStable,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const _StatusText(text: 'UTF-8'),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: _StatusText(text: statusLabel),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Expanded(child: _StatusText(text: metricsText)),
+                    const SizedBox(width: 8),
+                    _FooterActionText(
+                      label: copyLabel,
+                      enabled: hasSelection && onCopySelection != null,
+                      onTap: onCopySelection,
+                    ),
+                  ],
+                ),
+              ],
+            );
+          }
+
+          return Row(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: _StatusText(
+                        color: palette.primaryBright,
+                        text: l10n.terminalStable,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    const _StatusText(text: 'UTF-8'),
+                    const SizedBox(width: 16),
+                    Expanded(child: _StatusText(text: metricsText)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              _FooterActionText(
+                label: copyLabel,
+                enabled: hasSelection && onCopySelection != null,
+                onTap: onCopySelection,
+              ),
+              const SizedBox(width: 16),
+              Flexible(child: _StatusText(text: statusLabel)),
+            ],
+          );
+        },
       ),
     );
   }
@@ -1014,6 +1254,9 @@ class _StatusText extends StatelessWidget {
     final palette = context.sirix;
     return Text(
       text,
+      maxLines: 1,
+      softWrap: false,
+      overflow: TextOverflow.ellipsis,
       style: TextStyle(
         color: color ?? palette.textMuted,
         fontSize: 10,

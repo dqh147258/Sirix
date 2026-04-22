@@ -52,6 +52,21 @@
 - Flutter 侧增加 duplicate screen snapshot、pending visible snapshot、flushed visible snapshot、history invalidated 的去重。
 - Flutter 侧保留 authority cols，同时用 viewer rows 控制本地 viewport，尽量降低空白闪烁与重复 refresh。
 
+### 4. Terminal 页面与 xterm 渲染层稳定性补强
+
+相关文件：
+- `client/packages/feature_terminal/lib/src/terminal_page.dart`
+- `client/third_party/xterm/lib/src/terminal_view.dart`
+- `client/third_party/xterm/lib/src/ui/render.dart`
+
+实现方式：
+- `terminal_page.dart` 新增 `_maybeReportViewportGeometry()`，在 `LayoutBuilder` 内按当前字体实际 cell 尺寸计算 cols/rows，并通过 `queueResize()` 回传 viewer 视口几何，减少移动端/窄窗口下的错配。
+- `terminal_page.dart` 为每个 terminal 单独维护 `ScrollController`，通过 `_terminalScrollControllerFor()` 把垂直滚动位置持续回传给 `TerminalViewModel.onTerminalVerticalScroll()`，便于 authority cache 与当前视口联动。
+- `terminal_page.dart` 通过 `_disposeInactiveTerminalControllers()` 的 post-frame 延迟释放，避免 render object 仍在 attach 时读到已 dispose 的 controller。
+- `terminal_page.dart` 把 `TerminalView` 包进 `SingleChildScrollView + SizedBox + RepaintBoundary`，让 authority cols 决定真实内容宽度，减少父布局变化时对终端栅格的连带重绘。
+- `terminal_view.dart` 新增 `_TerminalViewportScrollBehavior`，关闭 overscroll glow/stretch，避免软键盘 resize 与 scroll extent 修正期间触发额外 build。
+- `render.dart` 调整 `RenderTerminal._onTerminalChange()`：仅当 buffer line 数变化时 `markNeedsLayout()`，否则只 `markNeedsPaint()`，降低高频输出时的不必要 layout 抖动。
+
 ## 已完成验证
 
 ### Rust
@@ -65,6 +80,8 @@
 
 ### Flutter
 - `flutter analyze client/packages/feature_terminal/lib/src/terminal_view_model.dart client/packages/infra_api/lib/src/desktop_local_client.dart`
+- `flutter analyze client/packages/feature_terminal/lib/src/terminal_page.dart client/third_party/xterm/lib/src/terminal_view.dart client/third_party/xterm/lib/src/ui/render.dart`
+- `flutter test client/packages/feature_terminal/test/terminal_stream_state_test.dart`
 
 ## 当前明确搁置的遗留问题
 

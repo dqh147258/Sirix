@@ -11,12 +11,12 @@ use crate::config::Config;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::build_track_events_context;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SkillScope;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputResponse;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::WarningEvent;
 use tracing::info;
 use tracing::warn;
 
@@ -139,7 +139,11 @@ pub(crate) async fn filter_skills_by_sirix_approval(
 }
 
 fn sirix_skill_capability_key(config: &Config, skill: &SkillMetadata) -> Option<String> {
-    let configured_skill_dir = skill.path_to_skills_md.parent()?.to_string_lossy().to_string();
+    let configured_skill_dir = skill
+        .path_to_skills_md
+        .parent()?
+        .to_string_lossy()
+        .to_string();
     let effective_config = config.config_layer_stack.effective_config();
     let table = effective_config.as_table()?;
     let skills_table = table.get("skills")?.as_table()?;
@@ -157,7 +161,10 @@ fn sirix_skill_capability_key(config: &Config, skill: &SkillMetadata) -> Option<
             .filter(|value| !value.is_empty())
             .map(ToString::to_string)
             .unwrap_or_else(|| skill.name.trim().to_ascii_lowercase().replace(' ', "-"));
-        info!("resolved Sirix skill approval key for {} -> skill.{skill_id}", skill.name);
+        info!(
+            "resolved Sirix skill approval key for {} -> skill.{skill_id}",
+            skill.name
+        );
         return Some(format!("skill.{skill_id}"));
     }
     None

@@ -55,6 +55,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     if (_terminal == terminal) return;
     if (attached) _terminal.removeListener(_onTerminalChange);
     _terminal = terminal;
+    _lastKnownLineCount = _terminal.buffer.lines.length;
     if (attached) _terminal.addListener(_onTerminalChange);
     _resizeTerminalIfNeeded();
     markNeedsLayout();
@@ -152,6 +153,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   final TerminalPainter _painter;
 
   var _stickToBottom = true;
+  int _lastKnownLineCount = 0;
 
   void _onScroll() {
     _stickToBottom = _scrollOffset >= _maxScrollExtent;
@@ -164,7 +166,13 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   }
 
   void _onTerminalChange() {
-    markNeedsLayout();
+    final nextLineCount = _terminal.buffer.lines.length;
+    if (nextLineCount != _lastKnownLineCount) {
+      _lastKnownLineCount = nextLineCount;
+      markNeedsLayout();
+    } else {
+      markNeedsPaint();
+    }
     _notifyEditableRect();
   }
 
@@ -178,6 +186,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   @override
   void attach(PipelineOwner owner) {
     super.attach(owner);
+    _lastKnownLineCount = _terminal.buffer.lines.length;
     _offset.addListener(_onScroll);
     _terminal.addListener(_onTerminalChange);
     _controller.addListener(_onControllerUpdate);

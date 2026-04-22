@@ -14,6 +14,7 @@ import 'desktop_authorize_state.dart';
 
 const _authMediaTraceTag = '[MEDIA_AUTH_TRACE]';
 const Duration _latencyProbeTimeout = Duration(seconds: 3);
+const _remoteConnectTraceTag = '[REMOTE_CONNECT_TRACE]';
 
 class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   DesktopAuthorizeViewModel(
@@ -68,6 +69,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
       state = state.copyWith(connecting: false, connected: true, clearError: true);
       AppLogger.info('desktop local websocket connected');
       _startLatencyProbe();
+      // 远控首连时 desktop 侧的 WebRTC 工厂惰性初始化会明显放大 offer->answer
+      // 时延，因此在本地 WS 已连上、桌面端空闲时就后台预热一次。
+      unawaited(_warmUpDesktopRtc());
       await _syncDeviceRegistration();
     } catch (error) {
       AppLogger.error('connect desktop local websocket failed: $error');
@@ -294,6 +298,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
     }
 
     try {
+      AppLogger.info(
+        '$_remoteConnectTraceTag sessionId=$sessionId stage=desktop_offer_received sdp_length=${sdp.length}',
+      );
       await _mediaController.startAnswering(
         sessionId: sessionId,
         remoteOfferSdp: sdp,
@@ -306,6 +313,9 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
             candidate: candidate,
           );
         },
+      );
+      AppLogger.info(
+        '$_remoteConnectTraceTag sessionId=$sessionId stage=desktop_answer_ready',
       );
       await _terminalBridge.bindSession(sessionId);
       state = state.copyWith(clearError: true);
@@ -551,6 +561,14 @@ class DesktopAuthorizeViewModel extends BaseViewModel<DesktopAuthorizeState> {
   void _cancelReconnect() {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+  }
+
+  Future<void> _warmUpDesktopRtc() async {
+    try {
+      await _mediaController.warmUpRtc();
+    } catch (error) {
+      AppLogger.warn('desktop rtc warmup skipped error=$error');
+    }
   }
 
   @override

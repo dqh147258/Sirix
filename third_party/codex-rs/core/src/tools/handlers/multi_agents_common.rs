@@ -284,10 +284,7 @@ pub(crate) async fn apply_requested_spawn_agent_reasoning_override(
     let effective_model_info = session
         .services
         .models_manager
-        .get_model_info(
-            effective_model.as_str(),
-            &config.to_models_manager_config(),
-        )
+        .get_model_info(effective_model.as_str(), &config.to_models_manager_config())
         .await;
 
     if let Some(reasoning_effort) = requested_reasoning_effort {

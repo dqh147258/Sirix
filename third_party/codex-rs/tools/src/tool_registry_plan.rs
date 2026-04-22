@@ -369,10 +369,11 @@ pub fn build_tool_registry_plan(
 
     if config.allows_builtin_tool("web_search")
         && let Some(web_search_tool) = create_web_search_tool(WebSearchToolOptions {
-        web_search_mode: config.web_search_mode,
-        web_search_config: config.web_search_config.as_ref(),
-        web_search_tool_type: config.web_search_tool_type,
-    }) {
+            web_search_mode: config.web_search_mode,
+            web_search_config: config.web_search_config.as_ref(),
+            web_search_tool_type: config.web_search_tool_type,
+        })
+    {
         plan.push_spec(
             web_search_tool,
             /*supports_parallel_tool_calls*/ false,

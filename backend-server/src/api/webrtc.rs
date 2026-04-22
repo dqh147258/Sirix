@@ -144,22 +144,24 @@ pub async fn relay_signal(
         }
     }
 
-    state
-        .postgres
-        .execute(
-            "INSERT INTO session_events (session_id, event_type, created_at, payload) VALUES ($1, $2, $3, $4)",
-            &[
-                &payload.session_id,
-                &"webrtc.signal.relayed",
-                &Utc::now(),
-                &serde_json::json!({
-                    "role": payload.role,
-                    "signal_type": payload.signal_type,
-                }),
-            ],
-        )
-        .await
-        .map_err(internal_error)?;
+    if should_persist_signal_event(&payload.signal_type) {
+        state
+            .postgres
+            .execute(
+                "INSERT INTO session_events (session_id, event_type, created_at, payload) VALUES ($1, $2, $3, $4)",
+                &[
+                    &payload.session_id,
+                    &"webrtc.signal.relayed",
+                    &Utc::now(),
+                    &serde_json::json!({
+                        "role": payload.role,
+                        "signal_type": payload.signal_type,
+                    }),
+                ],
+            )
+            .await
+            .map_err(internal_error)?;
+    }
 
     if matches!(payload.role, SignalRole::Desktop)
         && matches!(payload.signal_type, SignalType::Answer)
@@ -247,6 +249,17 @@ fn signal_type_to_event(signal_type: &SignalType) -> &'static str {
         SignalType::Offer => "webrtc.offer",
         SignalType::Answer => "webrtc.answer",
         SignalType::IceCandidate => "webrtc.ice_candidate",
+    }
+}
+
+fn should_persist_signal_event(signal_type: &SignalType) -> bool {
+    match signal_type {
+        // ICE candidate 数量高、生命周期短，而且同一 session 内经常成批出现。
+        // 把每个 candidate 都落到 session_events 会让热路径多一次数据库写入，
+        // 在自动授权和首连阶段尤其容易把真正关键的 offer/answer 转发链路拖慢。
+        // 这里保留 offer/answer 的审计价值，主动跳过 candidate 的逐条持久化。
+        SignalType::Offer | SignalType::Answer => true,
+        SignalType::IceCandidate => false,
     }
 }
 

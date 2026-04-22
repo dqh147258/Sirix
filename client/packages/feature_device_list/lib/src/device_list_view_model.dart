@@ -5,6 +5,8 @@ import 'package:infra_api/infra_api.dart';
 
 import 'device_list_state.dart';
 
+const _remoteConnectTraceTag = '[REMOTE_CONNECT_TRACE]';
+
 class DeviceListViewModel extends BaseViewModel<DeviceListState> {
   DeviceListViewModel(this._apiClient) : super(const DeviceListState());
 
@@ -56,10 +58,17 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
     required String accessToken,
     required String deviceId,
   }) async {
+    final stopwatch = Stopwatch()..start();
+    AppLogger.info(
+      '$_remoteConnectTraceTag deviceId=$deviceId stage=create_connection_request_start',
+    );
     try {
       final session = await _apiClient.createConnectionRequest(
         accessToken: accessToken,
         targetDeviceId: deviceId,
+      );
+      AppLogger.info(
+        '$_remoteConnectTraceTag deviceId=$deviceId sessionId=${session.sessionId} stage=create_connection_request_done elapsed_ms=${stopwatch.elapsedMilliseconds} state=${session.state}',
       );
       if (session.state == 'terminated') {
         AppLogger.warn('connect request terminated before attach: ${session.sessionId}');
@@ -71,6 +80,9 @@ class DeviceListViewModel extends BaseViewModel<DeviceListState> {
       AppLogger.info('connect requested: ${session.sessionId} targetDeviceId=$deviceId');
       return session;
     } catch (error) {
+      AppLogger.error(
+        '$_remoteConnectTraceTag deviceId=$deviceId stage=create_connection_request_failed elapsed_ms=${stopwatch.elapsedMilliseconds} error=$error',
+      );
       AppLogger.error('connect request failed targetDeviceId=$deviceId error=$error');
       state = state.copyWith(
         errorMessage: '${AppLocalizations.current.connectRequestFailed}: $error',

@@ -331,7 +331,12 @@ async fn run_hosted_terminal(
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         kill_child(&child);
-                        return Err(error).context("host websocket read failed");
+                        let error = anyhow::Error::new(error).context("host websocket read failed");
+                        if is_graceful_host_disconnect(&error) {
+                            eprintln!("[sirix-terminal] desktop-server disconnected; hosted shell detached safely.");
+                            break;
+                        }
+                        return Err(error);
                     }
                 }
             }
@@ -427,6 +432,16 @@ fn spawn_pty_reader(
             }
         }
     });
+}
+
+fn is_graceful_host_disconnect(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("connection reset without closing handshake")
+            || message.contains("broken pipe")
+            || message.contains("connection reset by peer")
+            || message.contains("sending after closing")
+    })
 }
 
 fn apply_shared_shell_env(builder: &mut CommandBuilder, terminal_id: Uuid) -> anyhow::Result<()> {

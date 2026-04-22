@@ -66,6 +66,13 @@ pub struct DesktopTerminalStateRequest {
 pub struct TerminalOutputRequest {
     pub device_id: Uuid,
     pub data_base64: String,
+    pub stream_sequence: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DesktopTerminalEventRequest {
+    pub device_id: Uuid,
+    pub event: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,8 +86,46 @@ pub struct CreateLocalDesktopTerminalRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct TerminalAttachPayload {
+    terminal_id: Option<Uuid>,
+    protocol_version: Option<u32>,
+    sync_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalBootstrapRequestPayload {
+    terminal_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminalHistoryRangeRequestPayload {
+    request_id: String,
+    terminal_id: Option<Uuid>,
+    start_line: i64,
+    end_line: i64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum TerminalInboundMessage {
+    #[serde(rename = "terminal.attach")]
+    Attach {
+        payload: Option<TerminalAttachPayload>,
+        terminal_id: Option<Uuid>,
+    },
+    #[serde(rename = "terminal.bootstrap.request")]
+    BootstrapRequest {
+        payload: Option<TerminalBootstrapRequestPayload>,
+        terminal_id: Option<Uuid>,
+    },
+    #[serde(rename = "terminal.history.range.request")]
+    HistoryRangeRequest {
+        payload: Option<TerminalHistoryRangeRequestPayload>,
+        request_id: Option<String>,
+        terminal_id: Option<Uuid>,
+        start_line: Option<i64>,
+        end_line: Option<i64>,
+    },
     #[serde(rename = "terminal.input")]
     Input { data_base64: String },
     #[serde(rename = "terminal.resize")]
@@ -89,6 +134,49 @@ enum TerminalInboundMessage {
     Close,
     #[serde(rename = "terminal.ping")]
     Ping,
+}
+
+const V2_SYNC_MODE: &str = "state-cache-v2";
+
+fn resolve_attach_protocol(
+    payload: Option<TerminalAttachPayload>,
+    fallback_terminal_id: Option<Uuid>,
+) -> (Option<Uuid>, u32, Option<String>) {
+    match payload {
+        Some(payload) => (
+            payload.terminal_id.or(fallback_terminal_id),
+            payload.protocol_version.unwrap_or(1),
+            payload.sync_mode,
+        ),
+        None => (fallback_terminal_id, 1, None),
+    }
+}
+
+fn resolve_bootstrap_terminal_id(
+    payload: Option<TerminalBootstrapRequestPayload>,
+    fallback_terminal_id: Option<Uuid>,
+) -> Option<Uuid> {
+    payload
+        .and_then(|item| item.terminal_id)
+        .or(fallback_terminal_id)
+}
+
+fn resolve_history_request(
+    payload: Option<TerminalHistoryRangeRequestPayload>,
+    request_id: Option<String>,
+    terminal_id: Option<Uuid>,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+) -> Option<(String, Uuid, i64, i64)> {
+    if let Some(payload) = payload {
+        return Some((
+            payload.request_id,
+            payload.terminal_id.or(terminal_id)?,
+            payload.start_line,
+            payload.end_line,
+        ));
+    }
+    Some((request_id?, terminal_id?, start_line?, end_line?))
 }
 
 pub async fn create_terminal(
@@ -481,7 +569,7 @@ pub async fn update_terminal_state(
         &state,
         terminal_id,
         match payload.state.as_str() {
-            "active" => "terminal.ready",
+            "active" => "terminal.updated",
             "closed" => "terminal.closed",
             "error" => "terminal.error",
             _ => "terminal.updated",
@@ -535,9 +623,74 @@ pub async fn ingest_terminal_output(
         "terminal.output",
         serde_json::json!({
             "data_base64": payload.data_base64,
+            "stream_sequence": payload.stream_sequence,
         }),
     )
     .await;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn ingest_terminal_event(
+    State(state): State<AppState>,
+    Path(terminal_id): Path<Uuid>,
+    Json(payload): Json<DesktopTerminalEventRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = state
+        .postgres
+        .query_opt(
+            "SELECT device_id FROM terminal_sessions WHERE id = $1",
+            &[&terminal_id],
+        )
+        .await
+        .map_err(internal_error)?;
+
+    let Some(row) = row else {
+        return Err(ApiError::not_found(
+            "TERMINAL_NOT_FOUND",
+            "terminal session not found",
+        ));
+    };
+    let device_id: Uuid = row.get("device_id");
+    if payload.device_id != device_id {
+        return Err(ApiError::forbidden(
+            "TERMINAL_NOT_FOUND",
+            "device mismatch for terminal session",
+        ));
+    }
+
+    let event_type = payload
+        .event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("TERMINAL_EVENT_INVALID", "event.type is required"))?;
+    let body = payload
+        .event
+        .get("payload")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            ApiError::bad_request("TERMINAL_EVENT_INVALID", "event.payload must be an object")
+        })?;
+
+    let mut event_payload = serde_json::Map::new();
+    event_payload.insert(
+        "terminal_id".to_string(),
+        serde_json::Value::String(terminal_id.to_string()),
+    );
+    for (key, value) in body {
+        event_payload.insert(key.clone(), value.clone());
+    }
+
+    let event = serde_json::json!({
+        "type": event_type,
+        "event_id": Uuid::new_v4().to_string(),
+        "timestamp": Utc::now(),
+        "payload": event_payload,
+    });
+
+    state
+        .publish_terminal_event(terminal_id, event.to_string())
+        .await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -572,34 +725,6 @@ async fn serve_terminal_socket(
     let mut receiver = state.subscribe_terminal_events(terminal_id).await;
     info!(terminal_id = %terminal_id, device_id = %device_id, "terminal websocket connected");
 
-    if let Ok(row) = state
-        .postgres
-        .query_one(
-            "SELECT title, shell, cwd, state, cols, rows, created_at, closed_at FROM terminal_sessions WHERE id = $1",
-            &[&terminal_id],
-        )
-        .await
-    {
-        let ready = serde_json::json!({
-            "type": "terminal.ready",
-            "payload": {
-                "terminal_id": terminal_id,
-                "device_id": device_id,
-                "title": row.get::<_, String>("title"),
-                "shell": row.get::<_, String>("shell"),
-                "cwd": row.get::<_, String>("cwd"),
-                "state": row.get::<_, String>("state"),
-                "cols": row.get::<_, i32>("cols"),
-                "rows": row.get::<_, i32>("rows"),
-                "created_at": row.get::<_, DateTime<Utc>>("created_at"),
-                "closed_at": row.get::<_, Option<DateTime<Utc>>>("closed_at"),
-            }
-        });
-        if socket.send(Message::Text(ready.to_string())).await.is_err() {
-            return;
-        }
-    }
-
     loop {
         tokio::select! {
             inbound = socket.next() => {
@@ -607,6 +732,86 @@ async fn serve_terminal_socket(
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(message) = serde_json::from_str::<TerminalInboundMessage>(&text) {
                             match message {
+                                TerminalInboundMessage::Attach { payload, terminal_id: fallback_terminal_id } => {
+                                    let (requested_terminal_id, protocol_version, sync_mode) =
+                                        resolve_attach_protocol(payload, fallback_terminal_id);
+                                    if requested_terminal_id != Some(terminal_id) {
+                                        continue;
+                                    }
+                                    if protocol_version == 2 && sync_mode.as_deref() == Some(V2_SYNC_MODE) {
+                                        continue;
+                                    }
+                                    if let Ok(row) = state
+                                        .postgres
+                                        .query_one(
+                                            "SELECT title, shell, cwd, state, cols, rows, created_at, closed_at FROM terminal_sessions WHERE id = $1",
+                                            &[&terminal_id],
+                                        )
+                                        .await
+                                    {
+                                        let ready = serde_json::json!({
+                                            "type": "terminal.ready",
+                                            "payload": {
+                                                "terminal_id": terminal_id,
+                                                "device_id": device_id,
+                                                "title": row.get::<_, String>("title"),
+                                                "shell": row.get::<_, String>("shell"),
+                                                "cwd": row.get::<_, String>("cwd"),
+                                                "state": row.get::<_, String>("state"),
+                                                "cols": row.get::<_, i32>("cols"),
+                                                "rows": row.get::<_, i32>("rows"),
+                                                "created_at": row.get::<_, DateTime<Utc>>("created_at"),
+                                                "closed_at": row.get::<_, Option<DateTime<Utc>>>("closed_at"),
+                                            }
+                                        });
+                                        if socket.send(Message::Text(ready.to_string())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                                TerminalInboundMessage::BootstrapRequest { payload, terminal_id: fallback_terminal_id } => {
+                                    let Some(request_terminal_id) =
+                                        resolve_bootstrap_terminal_id(payload, fallback_terminal_id)
+                                    else {
+                                        continue;
+                                    };
+                                    if request_terminal_id != terminal_id {
+                                        continue;
+                                    }
+                                    let event = serde_json::json!({
+                                        "type": "terminal.bootstrap.request",
+                                        "event_id": Uuid::new_v4().to_string(),
+                                        "timestamp": Utc::now(),
+                                        "payload": {
+                                            "terminal_id": terminal_id,
+                                            "target_device_id": device_id,
+                                        }
+                                    });
+                                    state.publish_desktop_event(device_id, event.to_string()).await;
+                                }
+                                TerminalInboundMessage::HistoryRangeRequest { payload, request_id, terminal_id: fallback_terminal_id, start_line, end_line } => {
+                                    let Some((request_id, request_terminal_id, start_line, end_line)) =
+                                        resolve_history_request(payload, request_id, fallback_terminal_id, start_line, end_line)
+                                    else {
+                                        continue;
+                                    };
+                                    if request_terminal_id != terminal_id {
+                                        continue;
+                                    }
+                                    let event = serde_json::json!({
+                                        "type": "terminal.history.range.request",
+                                        "event_id": Uuid::new_v4().to_string(),
+                                        "timestamp": Utc::now(),
+                                        "payload": {
+                                            "request_id": request_id,
+                                            "terminal_id": terminal_id,
+                                            "target_device_id": device_id,
+                                            "start_line": start_line,
+                                            "end_line": end_line,
+                                        }
+                                    });
+                                    state.publish_desktop_event(device_id, event.to_string()).await;
+                                }
                                 TerminalInboundMessage::Input { data_base64 } => {
                                     let event = serde_json::json!({
                                         "type": "terminal.input",

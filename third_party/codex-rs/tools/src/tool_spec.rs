@@ -264,9 +264,7 @@ fn local_shell_chat_parameters() -> JsonSchema {
             ),
             (
                 "timeout_ms".to_string(),
-                JsonSchema::number(Some(
-                    "Optional timeout in milliseconds.".to_string(),
-                )),
+                JsonSchema::number(Some("Optional timeout in milliseconds.".to_string())),
             ),
         ]),
         Some(vec!["command".to_string()]),

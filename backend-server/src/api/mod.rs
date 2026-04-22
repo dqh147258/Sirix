@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::application::state::AppState;
 
-pub mod auth;
 pub mod ai_sessions;
+pub mod auth;
 pub mod connections;
 pub mod desktop_control;
 pub mod desktop_events;
@@ -136,6 +136,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/desktop/terminals/:terminal_id/output",
             post(terminals::ingest_terminal_output),
+        )
+        .route(
+            "/api/v1/desktop/terminals/:terminal_id/events",
+            post(terminals::ingest_terminal_event),
         )
         .route("/api/v1/webrtc/signal", post(webrtc::relay_signal))
         .with_state(state)

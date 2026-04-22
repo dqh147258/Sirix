@@ -70,6 +70,11 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
   RTCVideoRenderer? _remoteRenderer;
   LocalSignalCallback? _localSignalCallback;
   final SessionTerminalChannelController _terminalChannelController;
+  final List<Map<String, dynamic>> _pendingLocalIceCandidates = <Map<String, dynamic>>[];
+  final Set<String> _pendingLocalIceKeys = <String>{};
+  bool _bufferLocalIceCandidates = false;
+  bool _drainingLocalIceCandidates = false;
+  String? _localIceSessionId;
 
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
 
@@ -101,17 +106,7 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
         return;
       }
 
-      final callback = _localSignalCallback;
-      if (callback == null) {
-        return;
-      }
-
-      unawaited(
-        callback(
-          WebrtcSignalType.iceCandidate,
-          candidate: iceCandidateToMap(candidate),
-        ),
-      );
+      _enqueueOrDispatchLocalIceCandidate(iceCandidateToMap(candidate));
       AppLogger.trace(
         '$_mediaStreamTraceTag mobile local ice candidate emitted mid=${candidate.sdpMid} mline=${candidate.sdpMLineIndex}',
       );
@@ -157,6 +152,7 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
     if (renderer != null) {
       renderer.srcObject = null;
     }
+    _resetLocalIceDispatchState();
 
     final peerConnection = _peerConnection;
     _peerConnection = null;
@@ -192,6 +188,7 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
       throw StateError('peer connection is not ready');
     }
 
+    _beginBufferingLocalIceCandidates(sessionId);
     await _terminalChannelController.bindMobilePeerConnection(
       sessionId: sessionId,
       peerConnection: peerConnection,
@@ -215,6 +212,7 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
       throw StateError('peer connection is not ready');
     }
 
+    _beginBufferingLocalIceCandidates(sessionId);
     await _terminalChannelController.bindMobilePeerConnection(
       sessionId: sessionId,
       peerConnection: peerConnection,
@@ -231,6 +229,11 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
 
     state = state.copyWith(lastSignalType: 'answer.local.created', lastUpdated: DateTime.now());
     return answer.sdp ?? '';
+  }
+
+  Future<void> releaseBufferedLocalIceCandidates() async {
+    _bufferLocalIceCandidates = false;
+    await _drainPendingLocalIceCandidates();
   }
 
   Future<void> applyRemoteAnswer(String sdp) async {
@@ -279,6 +282,79 @@ class RemoteStreamController extends BaseViewModel<RemoteStreamState> {
       _remoteRenderer = null;
     }());
     super.dispose();
+  }
+}
+
+extension on RemoteStreamController {
+  void _beginBufferingLocalIceCandidates(String sessionId) {
+    // 先缓存本地 candidate，确保 offer/answer 这个主 SDP 信令先成功发到
+    // 后端；否则几十个 candidate 会并发抢占 HTTP 通道，把真正决定建连
+    // 方向的 offer/answer 拖慢。
+    _bufferLocalIceCandidates = true;
+    _localIceSessionId = sessionId;
+    _pendingLocalIceCandidates.clear();
+    _pendingLocalIceKeys.clear();
+  }
+
+  void _resetLocalIceDispatchState() {
+    _bufferLocalIceCandidates = false;
+    _drainingLocalIceCandidates = false;
+    _localIceSessionId = null;
+    _pendingLocalIceCandidates.clear();
+    _pendingLocalIceKeys.clear();
+  }
+
+  void _enqueueOrDispatchLocalIceCandidate(Map<String, dynamic> candidate) {
+    final callback = _localSignalCallback;
+    final sessionId = _localIceSessionId;
+    if (callback == null || sessionId == null) {
+      return;
+    }
+
+    final key = _localIceCandidateKey(candidate);
+    if (!_pendingLocalIceKeys.add(key)) {
+      return;
+    }
+    _pendingLocalIceCandidates.add(candidate);
+    if (_bufferLocalIceCandidates || _drainingLocalIceCandidates) {
+      return;
+    }
+    unawaited(_drainPendingLocalIceCandidates());
+  }
+
+  Future<void> _drainPendingLocalIceCandidates() async {
+    final callback = _localSignalCallback;
+    final sessionId = _localIceSessionId;
+    if (callback == null || sessionId == null || _drainingLocalIceCandidates) {
+      return;
+    }
+
+    _drainingLocalIceCandidates = true;
+    try {
+      // 串行发送而不是并发倾倒，避免 candidate 风暴继续把 backend/desktop
+      // 的事件链打爆，同时保证 offer/answer 之后的 candidate 顺序稳定。
+      while (!_bufferLocalIceCandidates && _pendingLocalIceCandidates.isNotEmpty) {
+        final candidate = _pendingLocalIceCandidates.removeAt(0);
+        _pendingLocalIceKeys.remove(_localIceCandidateKey(candidate));
+        await callback(
+          WebrtcSignalType.iceCandidate,
+          candidate: candidate,
+        );
+      }
+    } finally {
+      _drainingLocalIceCandidates = false;
+      if (!_bufferLocalIceCandidates && _pendingLocalIceCandidates.isNotEmpty) {
+        unawaited(_drainPendingLocalIceCandidates());
+      }
+    }
+  }
+
+  String _localIceCandidateKey(Map<String, dynamic> candidate) {
+    return [
+      candidate['candidate'] ?? '',
+      candidate['sdpMid'] ?? '',
+      candidate['sdpMLineIndex'] ?? '',
+    ].join('|');
   }
 }
 

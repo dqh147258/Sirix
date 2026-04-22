@@ -7697,8 +7697,10 @@ impl ChatWidget {
         let switch_model_for_events = switch_model.clone();
         let default_effort: ReasoningEffortConfig = preset.default_reasoning_effort;
         let target_effective_context_window = preset.effective_context_window;
-        let block_message =
-            self.model_switch_block_message(switch_model_for_events.as_str(), target_effective_context_window);
+        let block_message = self.model_switch_block_message(
+            switch_model_for_events.as_str(),
+            target_effective_context_window,
+        );
 
         let switch_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
             if let Some(message) = block_message.clone() {
@@ -7723,7 +7725,9 @@ impl ChatWidget {
                 .into_core(),
             ));
             tx.send(AppEvent::UpdateModel(switch_model_for_events.clone()));
-            tx.send(AppEvent::UpdateModelContextWindow(target_effective_context_window));
+            tx.send(AppEvent::UpdateModelContextWindow(
+                target_effective_context_window,
+            ));
             tx.send(AppEvent::UpdateReasoningEffort(Some(default_effort)));
         })];
 
@@ -8353,7 +8357,9 @@ impl ChatWidget {
             }
 
             tx.send(AppEvent::UpdateModel(model_for_action.clone()));
-            tx.send(AppEvent::UpdateModelContextWindow(target_effective_context_window));
+            tx.send(AppEvent::UpdateModelContextWindow(
+                target_effective_context_window,
+            ));
             tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
             tx.send(AppEvent::PersistModelSelection {
                 model: model_for_action.clone(),
@@ -8428,14 +8434,18 @@ impl ChatWidget {
             let model = model.clone();
             move |tx| {
                 tx.send(AppEvent::UpdateModel(model.clone()));
-                tx.send(AppEvent::UpdateModelContextWindow(target_effective_context_window));
+                tx.send(AppEvent::UpdateModelContextWindow(
+                    target_effective_context_window,
+                ));
                 tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort));
                 tx.send(AppEvent::PersistPlanModeReasoningEffort(effort));
             }
         })];
         let all_modes_actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
             tx.send(AppEvent::UpdateModel(model.clone()));
-            tx.send(AppEvent::UpdateModelContextWindow(target_effective_context_window));
+            tx.send(AppEvent::UpdateModelContextWindow(
+                target_effective_context_window,
+            ));
             tx.send(AppEvent::UpdateReasoningEffort(effort));
             tx.send(AppEvent::UpdatePlanModeReasoningEffort(effort));
             tx.send(AppEvent::PersistPlanModeReasoningEffort(effort));
@@ -8531,10 +8541,11 @@ impl ChatWidget {
                 self.add_error_message(message);
             } else if self.should_prompt_plan_mode_reasoning_scope(&selected_model, selected_effort)
             {
-                self.app_event_tx.send(AppEvent::OpenPlanReasoningScopePrompt {
-                    model: selected_model,
-                    effort: selected_effort,
-                });
+                self.app_event_tx
+                    .send(AppEvent::OpenPlanReasoningScopePrompt {
+                        model: selected_model,
+                        effort: selected_effort,
+                    });
             } else {
                 self.apply_model_and_effort(
                     selected_model,
@@ -8658,8 +8669,9 @@ impl ChatWidget {
         target_effective_context_window: Option<i64>,
     ) {
         self.app_event_tx.send(AppEvent::UpdateModel(model));
-        self.app_event_tx
-            .send(AppEvent::UpdateModelContextWindow(target_effective_context_window));
+        self.app_event_tx.send(AppEvent::UpdateModelContextWindow(
+            target_effective_context_window,
+        ));
         self.app_event_tx
             .send(AppEvent::UpdateReasoningEffort(effort));
     }

@@ -87,6 +87,8 @@ class DesktopTerminalChannelBridge {
     switch (type) {
       case 'terminal.list':
       case 'terminal.attach':
+      case 'terminal.bootstrap.request':
+      case 'terminal.history.range.request':
       case 'terminal.close':
       case 'terminal.input':
       case 'terminal.resize':

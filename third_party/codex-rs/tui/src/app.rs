@@ -4640,7 +4640,8 @@ impl App {
                     return Ok(AppRunControl::Continue);
                 }
                 if sync_resolution {
-                    self.locally_resolved_sirix_shell_approvals.insert(id.clone());
+                    self.locally_resolved_sirix_shell_approvals
+                        .insert(id.clone());
                     let decision_text = match decision {
                         ReviewDecision::Approved => "allow",
                         ReviewDecision::Denied => "deny",
@@ -5688,11 +5689,8 @@ impl App {
             AppEvent::SwitchSirixAgent(agent_id) => {
                 let current_tokens_in_context =
                     self.chat_widget.current_tokens_in_context_if_known();
-                match sirix_local_api::switch_session_agent(
-                    &agent_id,
-                    current_tokens_in_context,
-                )
-                .await
+                match sirix_local_api::switch_session_agent(&agent_id, current_tokens_in_context)
+                    .await
                 {
                     Ok(response) => {
                         if let Err(err) = app_server.reload_user_config().await {

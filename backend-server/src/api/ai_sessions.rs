@@ -251,21 +251,22 @@ pub async fn list_ai_sessions(
     }
     .map_err(internal_error)?;
 
-    Ok(Json(rows
-        .into_iter()
-        .map(|row| AiSessionSummary {
-            id: row.get("id"),
-            terminal_id: row.get("terminal_id"),
-            device_id: row.get("device_id"),
-            workspace_root: row.get("workspace_root"),
-            agent_id: row.get("agent_id"),
-            model_id: row.get("model_id"),
-            status: row.get("status"),
-            entrypoint: row.get("entrypoint"),
-            created_at: row.get("created_at"),
-            closed_at: row.get("closed_at"),
-        })
-        .collect::<Vec<_>>()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|row| AiSessionSummary {
+                id: row.get("id"),
+                terminal_id: row.get("terminal_id"),
+                device_id: row.get("device_id"),
+                workspace_root: row.get("workspace_root"),
+                agent_id: row.get("agent_id"),
+                model_id: row.get("model_id"),
+                status: row.get("status"),
+                entrypoint: row.get("entrypoint"),
+                created_at: row.get("created_at"),
+                closed_at: row.get("closed_at"),
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 pub async fn create_ai_approval(
@@ -316,7 +317,8 @@ pub async fn create_ai_approval_request(
     Path(ai_session_id): Path<Uuid>,
     Json(payload): Json<CreateAiApprovalEventRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (owner_id, device_id, terminal_id) = resolve_owned_ai_session(&state, &headers, ai_session_id).await?;
+    let (owner_id, device_id, terminal_id) =
+        resolve_owned_ai_session(&state, &headers, ai_session_id).await?;
     let event = serde_json::json!({
             "type": "ai.approval.request",
         "payload": {
@@ -351,7 +353,8 @@ pub async fn resolve_ai_approval(
     Path(ai_session_id): Path<Uuid>,
     Json(payload): Json<ResolveAiApprovalRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let (owner_id, device_id, terminal_id) = resolve_owned_ai_session(&state, &headers, ai_session_id).await?;
+    let (owner_id, device_id, terminal_id) =
+        resolve_owned_ai_session(&state, &headers, ai_session_id).await?;
     let now = Utc::now();
     state
         .postgres

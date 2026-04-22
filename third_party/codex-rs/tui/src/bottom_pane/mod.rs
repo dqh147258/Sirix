@@ -1266,6 +1266,8 @@ mod tests {
             ],
             network_approval_context: None,
             additional_permissions: None,
+            sirix_supported_scopes: None,
+            sirix_prefix_candidates: None,
         }
     }
 

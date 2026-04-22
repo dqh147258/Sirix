@@ -219,7 +219,10 @@ impl ApprovalOverlay {
         if self.current_complete {
             return;
         }
-        let Some(option_decision) = self.options.get(actual_idx).map(|option| option.decision.clone())
+        let Some(option_decision) = self
+            .options
+            .get(actual_idx)
+            .map(|option| option.decision.clone())
         else {
             return;
         };
@@ -294,7 +297,10 @@ impl ApprovalOverlay {
                 }
                 (
                     ApprovalRequest::Exec {
-                        thread_id, id, command, ..
+                        thread_id,
+                        id,
+                        command,
+                        ..
                     },
                     ApprovalDecision::SirixPersistedExecPrefix {
                         review_decision,
@@ -1402,6 +1408,7 @@ mod tests {
             ],
             Some(&network_context),
             /*additional_permissions*/ None,
+            /*sirix_supported_scopes*/ None,
         );
 
         let labels: Vec<String> = options.into_iter().map(|option| option.label).collect();
@@ -1426,6 +1433,7 @@ mod tests {
             ],
             /*network_approval_context*/ None,
             /*additional_permissions*/ None,
+            /*sirix_supported_scopes*/ None,
         );
 
         let labels: Vec<String> = options.into_iter().map(|option| option.label).collect();
@@ -1452,6 +1460,7 @@ mod tests {
             &[ReviewDecision::Approved, ReviewDecision::Abort],
             /*network_approval_context*/ None,
             Some(&additional_permissions),
+            /*sirix_supported_scopes*/ None,
         );
 
         let labels: Vec<String> = options.into_iter().map(|option| option.label).collect();

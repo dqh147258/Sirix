@@ -8,21 +8,23 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
 };
 
-use crossterm::{cursor, execute, style, terminal::LeaveAlternateScreen};
+use crossterm::{
+    cursor, execute, style,
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+};
 
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use crossterm::terminal;
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use cli_support::{
-    ensure_desktop_server, ensure_login_prompt, local_http_url, local_ws_url, spawn_stdin_reader,
-    RawModeGuard, CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
+    current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
+    local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
+    CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
 };
 
 #[tokio::main]
@@ -140,7 +142,8 @@ async fn launch_session(
     reuse_terminal_id: Option<&str>,
 ) -> anyhow::Result<LaunchSessionResult> {
     let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let (cols, rows) = terminal::size().unwrap_or((120, 32));
+    let initial_size = current_terminal_size(TerminalSize::new(120, 32));
+    let (cols, rows) = initial_size.as_tuple();
     let client = reqwest::Client::new();
     let mut request_body = serde_json::json!({
         "cwd": cwd,
@@ -426,14 +429,34 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
         .await
         .context("failed to attach terminal session")?;
 
+    let mut stdout = io::stdout();
+    // 共享终端附着到当前系统 Terminal 时，应该像 tmux 一样先切到一块干净的
+    // 可视画布，避免把用户原来 shell 里的提示符/输出和 Sirix 的远端终端
+    // 混在同一屏上。当前退出路径已经始终执行 LeaveAlternateScreen，但进入
+    // 时漏掉了 EnterAlternateScreen，所以用户会看到“旧内容还留在当前屏幕，
+    // Sirix 直接在后面继续画”的问题。
+    //
+    // 这里在进入 raw-v1 附着态前主动切到 alternate screen，并清空当前画布。
+    // 这样：
+    // 1. 旧 shell 内容仍然保留在 main screen/scrollback；
+    // 2. Sirix 从一块干净屏幕开始渲染；
+    // 3. detach 时 restore_local_terminal() 会把用户带回原先 shell 画面。
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        Clear(ClearType::All),
+        cursor::MoveTo(0, 0),
+        cursor::Hide
+    )
+    .context("failed to prepare local terminal screen")?;
+
     let raw_mode_guard = RawModeGuard::activate()?;
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     spawn_stdin_reader(stdin_tx);
 
-    let mut stdout = io::stdout();
-    let mut last_size = terminal::size().unwrap_or((120, 32));
+    let last_size = current_terminal_size(TerminalSize::new(120, 32));
     let mut viewer_presence_epoch: Option<u64> = None;
-    let mut resize_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut size_rx = spawn_terminal_size_watcher(last_size);
 
     write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
 
@@ -455,20 +478,16 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                     break Err(anyhow::Error::new(error).context("failed to send terminal input"));
                 }
             }
-            _ = resize_tick.tick() => {
-                let current_size = terminal::size().unwrap_or(last_size);
-                if current_size != last_size {
-                    last_size = current_size;
-                    if let Err(error) = write_resize(
-                        &mut write,
-                        terminal_id,
-                        current_size,
-                        viewer_presence_epoch,
-                    )
-                    .await
-                    {
-                        break Err(error.context("failed to propagate terminal resize"));
-                    }
+            Some(current_size) = size_rx.recv() => {
+                if let Err(error) = write_resize(
+                    &mut write,
+                    terminal_id,
+                    current_size,
+                    viewer_presence_epoch,
+                )
+                .await
+                {
+                    break Err(error.context("failed to propagate terminal resize"));
                 }
             }
             message = read.next() => {
@@ -508,7 +527,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
 async fn write_resize<S>(
     write: &mut S,
     terminal_id: &str,
-    size: (u16, u16),
+    size: TerminalSize,
     viewer_presence_epoch: Option<u64>,
 ) -> anyhow::Result<()>
 where
@@ -519,8 +538,8 @@ where
             serde_json::json!({
                 "type": "terminal.resize",
                 "terminal_id": terminal_id,
-                "cols": size.0,
-                "rows": size.1,
+                "cols": size.cols,
+                "rows": size.rows,
                 "client_kind": "system_terminal",
                 "viewer_presence_epoch": viewer_presence_epoch,
             })

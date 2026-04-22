@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::app::{
     state::AppState,
     terminal::{
-        manager::{HostedTerminalCommand, TerminalClientKind},
+        geometry_arbiter::TerminalClientKind, manager::HostedTerminalCommand,
         state_cache::V2_SYNC_MODE,
     },
 };

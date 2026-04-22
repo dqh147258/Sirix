@@ -33,6 +33,8 @@
 - `desktop-server/src/app/tasks.rs`
 - `desktop-server/src/bin/sirix.rs`
 - `client/packages/feature_terminal/lib/src/terminal_view_model.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart`
 - `client/packages/infra_api/lib/src/desktop_local_client.dart`
 
 实现方式：
@@ -46,6 +48,8 @@
 相关文件：
 - `desktop-server/src/app/terminal/manager.rs`
 - `client/packages/feature_terminal/lib/src/terminal_view_model.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart`
 
 实现方式：
 - server 侧新增 `ResizePublishFingerprint`，跳过重复 resize publish bundle。
@@ -97,6 +101,8 @@
 
 代码内已加注释位置：
 - `desktop-server/src/app/terminal/vt_authority.rs`
+- `desktop-server/src/app/terminal/state_cache.rs`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart`
 
 ### 遗留问题 2：Desktop App 的当前命令行定位仍可能错误
 
@@ -108,7 +114,8 @@
 - 为了先保证多端共享稳定性，暂未继续推进更高风险的 cursor/viewport 语义重构。
 
 代码内已加注释位置：
-- `client/packages/feature_terminal/lib/src/terminal_view_model.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart`
 
 ## 结论
 

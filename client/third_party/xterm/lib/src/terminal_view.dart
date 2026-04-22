@@ -71,6 +71,8 @@ class TerminalView extends StatefulWidget {
     this.readOnly = false,
     this.hardwareKeyboardOnly = false,
     this.simulateScroll = true,
+    this.autoScrollToBottomOnUserInput = true,
+    this.autoStickToBottomOnBufferChange = true,
   });
 
   /// The underlying terminal that this widget renders.
@@ -163,6 +165,21 @@ class TerminalView extends StatefulWidget {
   /// keys to the application. This is standard behavior for most terminal
   /// emulators. True by default.
   final bool simulateScroll;
+
+  /// Whether user-generated input should force the viewport to jump to the
+  /// bottom. This is convenient for local shell terminals, but shared
+  /// terminals may intentionally keep the viewport pinned to a leader-chosen
+  /// window instead of following the local user's keystrokes.
+  final bool autoScrollToBottomOnUserInput;
+
+  /// Whether terminal buffer/layout growth should keep the viewport pinned to
+  /// the bottom automatically.
+  ///
+  /// Local shell terminals usually want this behavior so new output is always
+  /// visible. Shared terminals do not: they may intentionally render only a
+  /// leader-selected visible window, and forcing the Scrollable to the bottom
+  /// would override that alignment on the first frame or after a resize.
+  final bool autoStickToBottomOnBufferChange;
 
   @override
   State<TerminalView> createState() => TerminalViewState();
@@ -260,6 +277,8 @@ class TerminalViewState extends State<TerminalView> {
             focusNode: _focusNode,
             cursorType: widget.cursorType,
             alwaysShowCursor: widget.alwaysShowCursor,
+            autoStickToBottomOnBufferChange:
+                widget.autoStickToBottomOnBufferChange,
             onEditableRect: _onEditableRect,
             composingText: _composingText,
           );
@@ -285,12 +304,16 @@ class TerminalViewState extends State<TerminalView> {
         deleteDetection: widget.deleteDetection,
         onInsert: _onInsert,
         onDelete: () {
-          _scrollToBottom();
+          if (widget.autoScrollToBottomOnUserInput) {
+            _scrollToBottom();
+          }
           widget.terminal.keyInput(TerminalKey.backspace);
         },
         onComposing: _onComposing,
         onAction: (action) {
-          _scrollToBottom();
+          if (widget.autoScrollToBottomOnUserInput) {
+            _scrollToBottom();
+          }
           if (action == TextInputAction.done) {
             widget.terminal.keyInput(TerminalKey.enter);
           }
@@ -409,7 +432,9 @@ class TerminalViewState extends State<TerminalView> {
       widget.terminal.textInput(text);
     }
 
-    _scrollToBottom();
+    if (widget.autoScrollToBottomOnUserInput) {
+      _scrollToBottom();
+    }
   }
 
   void _onComposing(String? text) {
@@ -462,7 +487,9 @@ class TerminalViewState extends State<TerminalView> {
     );
 
     if (handled) {
-      _scrollToBottom();
+      if (widget.autoScrollToBottomOnUserInput) {
+        _scrollToBottom();
+      }
     }
 
     return handled ? KeyEventResult.handled : KeyEventResult.ignored;
@@ -486,7 +513,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _onKeyboardShow() {
-    if (_focusNode.hasFocus) {
+    if (_focusNode.hasFocus && widget.autoScrollToBottomOnUserInput) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _scrollToBottom();
       });
@@ -519,6 +546,7 @@ class _TerminalView extends LeafRenderObjectWidget {
     required this.focusNode,
     required this.cursorType,
     required this.alwaysShowCursor,
+    required this.autoStickToBottomOnBufferChange,
     this.onEditableRect,
     this.composingText,
   });
@@ -545,6 +573,8 @@ class _TerminalView extends LeafRenderObjectWidget {
 
   final bool alwaysShowCursor;
 
+  final bool autoStickToBottomOnBufferChange;
+
   final EditableRectCallback? onEditableRect;
 
   final String? composingText;
@@ -563,6 +593,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       focusNode: focusNode,
       cursorType: cursorType,
       alwaysShowCursor: alwaysShowCursor,
+      autoStickToBottomOnBufferChange: autoStickToBottomOnBufferChange,
       onEditableRect: onEditableRect,
       composingText: composingText,
     );
@@ -582,6 +613,7 @@ class _TerminalView extends LeafRenderObjectWidget {
       ..focusNode = focusNode
       ..cursorType = cursorType
       ..alwaysShowCursor = alwaysShowCursor
+      ..autoStickToBottomOnBufferChange = autoStickToBottomOnBufferChange
       ..onEditableRect = onEditableRect
       ..composingText = composingText;
   }

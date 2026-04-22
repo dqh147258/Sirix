@@ -19,6 +19,9 @@ use uuid::Uuid;
 
 use crate::app::{
     ai::config::{AiLaunchConfig, SIRIX_CONFIG_OVERRIDES_PATH_ENV, SIRIX_EXEC_POLICY_PATH_ENV},
+    terminal::geometry_arbiter::{
+        GeometryAuthoritySource, GeometryUpdate, TerminalClientKind, TerminalGeometryArbiter,
+    },
     terminal::state_cache::{
         ResizeReplayMetadata, TerminalOutboundEvent, TerminalReadyV2Payload, TerminalSyncState,
         V2_SYNC_MODE,
@@ -37,41 +40,6 @@ type SharedResizePublishFingerprint = Arc<Mutex<Option<ResizePublishFingerprint>
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
 const TERMINAL_OUTPUT_MAX_BATCH_BYTES: usize = 16 * 1024;
 const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalClientKind {
-    Unknown,
-    SystemTerminal,
-    DesktopApp,
-    MobileApp,
-}
-
-impl TerminalClientKind {
-    pub fn from_wire(value: Option<&str>) -> Self {
-        match value.unwrap_or_default() {
-            "system_terminal" => Self::SystemTerminal,
-            "desktop_app" => Self::DesktopApp,
-            "mobile_app" => Self::MobileApp,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GeometryAuthoritySource {
-    ServerDefault,
-    DesktopApp,
-    SystemTerminal,
-}
-
-impl GeometryAuthoritySource {
-    fn as_api_str(self) -> &'static str {
-        match self {
-            Self::ServerDefault => "server_default",
-            Self::DesktopApp => "desktop_app",
-            Self::SystemTerminal => "system_terminal",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSessionSource {
@@ -225,18 +193,7 @@ struct TerminalSessionMetadata {
     shell: String,
     cwd: String,
     state: String,
-    cols: u16,
-    rows: u16,
-    default_cols: u16,
-    default_rows: u16,
-    desktop_app_attached: bool,
-    system_terminal_attached: bool,
-    latest_desktop_app_size: Option<(u16, u16)>,
-    latest_system_terminal_size: Option<(u16, u16)>,
-    desktop_app_presence_epoch: u64,
-    system_terminal_presence_epoch: u64,
-    authority_source: GeometryAuthoritySource,
-    geometry_generation: u64,
+    geometry: TerminalGeometryArbiter,
     created_at: DateTime<Utc>,
     closed_at: Option<DateTime<Utc>>,
 }
@@ -517,22 +474,7 @@ impl TerminalManager {
             .metadata
             .lock()
             .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
-        let epoch = match client_kind {
-            TerminalClientKind::SystemTerminal => {
-                metadata.system_terminal_attached = true;
-                metadata.system_terminal_presence_epoch =
-                    metadata.system_terminal_presence_epoch.saturating_add(1);
-                metadata.system_terminal_presence_epoch
-            }
-            TerminalClientKind::DesktopApp => {
-                metadata.desktop_app_attached = true;
-                metadata.desktop_app_presence_epoch =
-                    metadata.desktop_app_presence_epoch.saturating_add(1);
-                metadata.desktop_app_presence_epoch
-            }
-            TerminalClientKind::MobileApp | TerminalClientKind::Unknown => 0,
-        };
-        Ok(epoch)
+        Ok(metadata.geometry.register_viewer(client_kind))
     }
 
     pub async fn unregister_viewer(
@@ -550,7 +492,7 @@ impl TerminalManager {
         client_kind: TerminalClientKind,
         expected_epoch: Option<u64>,
     ) -> anyhow::Result<()> {
-        let next_size = {
+        let geometry_update = {
             let sessions = self.sessions.read().await;
             let handle = sessions
                 .get(&terminal_id)
@@ -559,32 +501,17 @@ impl TerminalManager {
                 .metadata
                 .lock()
                 .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
-            match client_kind {
-                TerminalClientKind::SystemTerminal => {
-                    if expected_epoch
-                        .is_some_and(|epoch| epoch != metadata.system_terminal_presence_epoch)
-                    {
-                        return Ok(());
-                    }
-                    metadata.system_terminal_attached = false;
-                    metadata.latest_system_terminal_size = None;
-                }
-                TerminalClientKind::DesktopApp => {
-                    if expected_epoch
-                        .is_some_and(|epoch| epoch != metadata.desktop_app_presence_epoch)
-                    {
-                        return Ok(());
-                    }
-                    metadata.desktop_app_attached = false;
-                    metadata.latest_desktop_app_size = None;
-                }
-                TerminalClientKind::MobileApp | TerminalClientKind::Unknown => {}
+            match metadata
+                .geometry
+                .unregister_viewer(client_kind, expected_epoch)
+            {
+                Ok(update) => update,
+                Err(_) => return Ok(()),
             }
-            Self::resolve_authority_size(&mut metadata)
         };
 
-        if let Some((cols, rows)) = next_size {
-            self.resize_internal(terminal_id, cols, rows).await?;
+        if let Some(update) = geometry_update {
+            self.apply_geometry_update(terminal_id, update).await?;
         }
         Ok(())
     }
@@ -613,7 +540,7 @@ impl TerminalManager {
         client_kind: TerminalClientKind,
         expected_epoch: Option<u64>,
     ) -> anyhow::Result<()> {
-        let next_size = {
+        let geometry_update = {
             let sessions = self.sessions.read().await;
             let handle = sessions
                 .get(&terminal_id)
@@ -622,61 +549,89 @@ impl TerminalManager {
                 .metadata
                 .lock()
                 .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
-            match client_kind {
-                TerminalClientKind::SystemTerminal => {
-                    if expected_epoch
-                        .is_some_and(|epoch| epoch != metadata.system_terminal_presence_epoch)
-                    {
-                        info!(
-                            terminal_id = %terminal_id,
-                            expected_epoch,
-                            current_epoch = metadata.system_terminal_presence_epoch,
-                            client_kind = "system_terminal",
-                            "[TERMINAL_HISTORY_TRACE] ignore stale viewer resize"
-                        );
-                        return Ok(());
-                    }
-                    metadata.system_terminal_attached = true;
-                    metadata.latest_system_terminal_size = Some((cols, rows));
+            match metadata
+                .geometry
+                .update_viewer_size(client_kind, cols, rows, expected_epoch)
+            {
+                Ok(update) => update,
+                Err(current_epoch) => {
+                    info!(
+                        terminal_id = %terminal_id,
+                        expected_epoch,
+                        current_epoch,
+                        client_kind = match client_kind {
+                            TerminalClientKind::SystemTerminal => "system_terminal",
+                            TerminalClientKind::DesktopApp => "desktop_app",
+                            TerminalClientKind::MobileApp => "mobile_app",
+                            TerminalClientKind::Unknown => "unknown",
+                        },
+                        "[TERMINAL_HISTORY_TRACE] ignore stale viewer resize"
+                    );
+                    return Ok(());
                 }
-                TerminalClientKind::DesktopApp => {
-                    if expected_epoch
-                        .is_some_and(|epoch| epoch != metadata.desktop_app_presence_epoch)
-                    {
-                        info!(
-                            terminal_id = %terminal_id,
-                            expected_epoch,
-                            current_epoch = metadata.desktop_app_presence_epoch,
-                            client_kind = "desktop_app",
-                            "[TERMINAL_HISTORY_TRACE] ignore stale viewer resize"
-                        );
-                        return Ok(());
-                    }
-                    metadata.desktop_app_attached = true;
-                    metadata.latest_desktop_app_size = Some((cols, rows));
-                }
-                TerminalClientKind::MobileApp | TerminalClientKind::Unknown => {}
             }
-            Self::resolve_authority_size(&mut metadata)
         };
 
-        if let Some((target_cols, target_rows)) = next_size {
-            self.resize_internal(terminal_id, target_cols, target_rows)
-                .await?;
+        if let Some(update) = geometry_update {
+            self.apply_geometry_update(terminal_id, update).await?;
         }
         Ok(())
     }
 
-    async fn resize_internal(&self, terminal_id: Uuid, cols: u16, rows: u16) -> anyhow::Result<()> {
-        let (
-            remote_sync,
-            authority_source,
-            geometry_generation,
+    async fn apply_geometry_update(
+        &self,
+        terminal_id: Uuid,
+        update: GeometryUpdate,
+    ) -> anyhow::Result<()> {
+        info!(
+            terminal_id = %terminal_id,
+            previous_cols = update.previous_size.cols,
+            previous_rows = update.previous_size.rows,
+            cols = update.size.cols,
+            rows = update.size.rows,
+            previous_source = update.previous_source.as_api_str(),
+            authority_source = update.authority_source.as_api_str(),
+            geometry_generation = update.geometry_generation,
+            pty_size_changed = update.pty_size_changed(),
+            "[TERMINAL_HISTORY_TRACE] apply geometry update"
+        );
+        if update.pty_size_changed() {
+            return self.resize_internal(terminal_id, update).await;
+        }
+
+        let (remote_sync, layout_epoch) = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let layout_epoch = handle
+                .sync_state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?
+                .current_layout_epoch();
+            (handle.remote_sync, layout_epoch)
+        };
+
+        self.publish_geometry_changed(
+            terminal_id,
+            update.size.cols,
+            update.size.rows,
+            update.authority_source,
+            update.geometry_generation,
             layout_epoch,
-            events,
-            publish_fingerprint,
-            last_resize_publish,
-        ) = {
+            remote_sync,
+        )
+        .await
+    }
+
+    async fn resize_internal(
+        &self,
+        terminal_id: Uuid,
+        update: GeometryUpdate,
+    ) -> anyhow::Result<()> {
+        let cols = update.size.cols;
+        let rows = update.size.rows;
+        let (remote_sync, layout_epoch, events, publish_fingerprint, last_resize_publish) = {
             let sessions = self.sessions.read().await;
             let handle = sessions
                 .get(&terminal_id)
@@ -687,13 +642,6 @@ impl TerminalManager {
                 .lock()
                 .ok()
                 .and_then(|replay| replay.snapshot());
-            let mut authority_source = GeometryAuthoritySource::ServerDefault;
-            let mut geometry_generation = 0_u64;
-            if let Ok(metadata) = handle.metadata.lock() {
-                if metadata.cols == cols && metadata.rows == rows {
-                    return Ok(());
-                }
-            }
 
             match &handle.endpoint {
                 TerminalSessionEndpoint::LocalPty { master, .. } => {
@@ -723,13 +671,6 @@ impl TerminalManager {
                         .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal resize"))?;
                 }
             }
-            if let Ok(mut metadata) = handle.metadata.lock() {
-                metadata.cols = cols;
-                metadata.rows = rows;
-                metadata.geometry_generation = metadata.geometry_generation.saturating_add(1);
-                authority_source = metadata.authority_source;
-                geometry_generation = metadata.geometry_generation;
-            }
             let mut sync_state = handle
                 .sync_state
                 .lock()
@@ -756,16 +697,14 @@ impl TerminalManager {
             );
             let publish_fingerprint = ResizePublishFingerprint::from_resize_bundle(
                 &events,
-                authority_source,
-                geometry_generation,
+                update.authority_source,
+                update.geometry_generation,
                 layout_epoch,
                 rows,
                 cols,
             );
             (
                 remote_sync,
-                authority_source,
-                geometry_generation,
                 layout_epoch,
                 events,
                 publish_fingerprint,
@@ -779,8 +718,8 @@ impl TerminalManager {
             if guard.as_ref() == Some(&fingerprint) {
                 info!(
                     terminal_id = %terminal_id,
-                    authority_source = authority_source.as_api_str(),
-                    geometry_generation,
+                    authority_source = update.authority_source.as_api_str(),
+                    geometry_generation = update.geometry_generation,
                     layout_epoch,
                     rows,
                     cols,
@@ -797,8 +736,8 @@ impl TerminalManager {
             terminal_id,
             cols,
             rows,
-            authority_source,
-            geometry_generation,
+            update.authority_source,
+            update.geometry_generation,
             layout_epoch,
             remote_sync,
         )
@@ -827,18 +766,7 @@ impl TerminalManager {
             shell: shell.clone(),
             cwd: cwd.clone(),
             state: "opening".to_string(),
-            cols,
-            rows,
-            default_cols: cols,
-            default_rows: rows,
-            desktop_app_attached: false,
-            system_terminal_attached: false,
-            latest_desktop_app_size: None,
-            latest_system_terminal_size: None,
-            desktop_app_presence_epoch: 0,
-            system_terminal_presence_epoch: 0,
-            authority_source: GeometryAuthoritySource::ServerDefault,
-            geometry_generation: 0,
+            geometry: TerminalGeometryArbiter::new_host_authority(cols, rows),
             created_at: Utc::now(),
             closed_at: None,
         }));
@@ -936,18 +864,26 @@ impl TerminalManager {
         cols: u16,
         rows: u16,
     ) -> anyhow::Result<()> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(&terminal_id)
-            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-        let TerminalSessionEndpoint::Hosted { .. } = &handle.endpoint else {
-            anyhow::bail!("terminal session is not hosted");
+        info!(
+            terminal_id = %terminal_id,
+            cols,
+            rows,
+            "[TERMINAL_HISTORY_TRACE] hosted terminal reported system resize"
+        );
+        let geometry_update = {
+            let sessions = self.sessions.read().await;
+            let handle = sessions
+                .get(&terminal_id)
+                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+            let TerminalSessionEndpoint::Hosted { .. } = &handle.endpoint else {
+                anyhow::bail!("terminal session is not hosted");
+            };
+            let mut metadata = handle
+                .metadata
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
+            metadata.geometry.update_host_size(cols, rows)
         };
-        if let Ok(mut metadata) = handle.metadata.lock() {
-            metadata.cols = cols;
-            metadata.rows = rows;
-        }
-        drop(sessions);
 
         self.update_state(
             terminal_id,
@@ -960,20 +896,10 @@ impl TerminalManager {
             None,
         )
         .await?;
-        let remote_sync = self.is_remote_sync(terminal_id).await;
-        let events = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(&terminal_id)
-                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-            let mut sync_state = handle
-                .sync_state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
-            sync_state.resize(terminal_id, rows, cols)
-        };
-        self.publish_v2_events(terminal_id, events, remote_sync)
-            .await
+        if let Some(update) = geometry_update {
+            self.apply_geometry_update(terminal_id, update).await?;
+        }
+        Ok(())
     }
 
     pub async fn complete_hosted_terminal(
@@ -1011,8 +937,8 @@ impl TerminalManager {
             shell: metadata.shell,
             cwd: metadata.cwd,
             state: metadata.state,
-            cols: i32::from(metadata.cols),
-            rows: i32::from(metadata.rows),
+            cols: i32::from(metadata.geometry.cols()),
+            rows: i32::from(metadata.geometry.rows()),
             created_at: metadata.created_at,
             closed_at: metadata.closed_at,
             latest_output_sequence: replay.latest_sequence,
@@ -1037,8 +963,8 @@ impl TerminalManager {
                     shell: metadata.shell,
                     cwd: metadata.cwd,
                     state: metadata.state,
-                    cols: i32::from(metadata.cols),
-                    rows: i32::from(metadata.rows),
+                    cols: i32::from(metadata.geometry.cols()),
+                    rows: i32::from(metadata.geometry.rows()),
                     created_at: metadata.created_at,
                     closed_at: metadata.closed_at,
                     latest_output_sequence: handle
@@ -1091,12 +1017,16 @@ impl TerminalManager {
             cwd: metadata.cwd.clone(),
             state: metadata.state.clone(),
             session_state: metadata.state.clone(),
-            cols: i32::from(metadata.cols),
-            rows: i32::from(metadata.rows),
+            cols: i32::from(metadata.geometry.cols()),
+            rows: i32::from(metadata.geometry.rows()),
             created_at: metadata.created_at,
             closed_at: metadata.closed_at,
-            geometry_generation: metadata.geometry_generation,
-            authority_source: metadata.authority_source.as_api_str().to_string(),
+            geometry_generation: metadata.geometry.geometry_generation(),
+            authority_source: metadata
+                .geometry
+                .authority_source()
+                .as_api_str()
+                .to_string(),
             viewer_presence_epoch,
             protocol_version: 2,
             sync_mode: V2_SYNC_MODE,
@@ -1212,8 +1142,12 @@ impl TerminalManager {
                 if let Some(handle) = sessions.get(&terminal_id) {
                     if let Ok(metadata) = handle.metadata.lock() {
                         (
-                            metadata.geometry_generation,
-                            metadata.authority_source.as_api_str().to_string(),
+                            metadata.geometry.geometry_generation(),
+                            metadata
+                                .geometry
+                                .authority_source()
+                                .as_api_str()
+                                .to_string(),
                         )
                     } else {
                         (0, "server_default".to_string())
@@ -1354,18 +1288,7 @@ impl TerminalManager {
             shell: shell.clone(),
             cwd: cwd.clone(),
             state: "active".to_string(),
-            cols,
-            rows,
-            default_cols: cols,
-            default_rows: rows,
-            desktop_app_attached: false,
-            system_terminal_attached: false,
-            latest_desktop_app_size: None,
-            latest_system_terminal_size: None,
-            desktop_app_presence_epoch: 0,
-            system_terminal_presence_epoch: 0,
-            authority_source: GeometryAuthoritySource::ServerDefault,
-            geometry_generation: 0,
+            geometry: TerminalGeometryArbiter::new(cols, rows),
             created_at: Utc::now(),
             closed_at: None,
         }));
@@ -1572,34 +1495,6 @@ impl TerminalManager {
             .await
             .get(&terminal_id)
             .map(|handle| handle.endpoint.source())
-    }
-
-    fn resolve_authority_size(metadata: &mut TerminalSessionMetadata) -> Option<(u16, u16)> {
-        let (next_source, next_size) = if metadata.system_terminal_attached {
-            match metadata.latest_system_terminal_size {
-                Some(size) => (GeometryAuthoritySource::SystemTerminal, size),
-                None => (
-                    GeometryAuthoritySource::ServerDefault,
-                    (metadata.default_cols, metadata.default_rows),
-                ),
-            }
-        } else if metadata.desktop_app_attached {
-            match metadata.latest_desktop_app_size {
-                Some(size) => (GeometryAuthoritySource::DesktopApp, size),
-                None => (
-                    GeometryAuthoritySource::ServerDefault,
-                    (metadata.default_cols, metadata.default_rows),
-                ),
-            }
-        } else {
-            (
-                GeometryAuthoritySource::ServerDefault,
-                (metadata.default_cols, metadata.default_rows),
-            )
-        };
-
-        metadata.authority_source = next_source;
-        Some(next_size)
     }
 }
 
@@ -2304,7 +2199,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_viewer_resize_epoch_is_ignored() {
+    async fn bootstrap_v2_includes_canonical_history_preview_for_existing_output() {
+        let (events, _) = broadcast::channel(8);
+        let manager = test_manager(events);
+        let terminal_id = Uuid::new_v4();
+
+        let session = manager
+            .create_hosted_terminal(
+                terminal_id,
+                "shell".to_string(),
+                "/tmp".to_string(),
+                "Sirix Terminal".to_string(),
+                120,
+                32,
+                false,
+            )
+            .await
+            .expect("hosted terminal should be created");
+        let (command_sender, _) = unbounded_channel();
+        manager
+            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
+            .await
+            .expect("host should register");
+        manager
+            .ingest_hosted_output(
+                terminal_id,
+                &BASE64.encode("alpha\r\nbeta\r\ngamma\r\ndelta\r\n"),
+            )
+            .await
+            .expect("hosted output should ingest");
+
+        let messages = manager
+            .bootstrap_v2(terminal_id, Some(9))
+            .await
+            .expect("bootstrap should succeed");
+        let preview = messages
+            .iter()
+            .find(|message| message["type"] == "terminal.history.invalidated")
+            .expect("bootstrap should include canonical history preview");
+        let lines = preview["payload"]["lines"]
+            .as_array()
+            .expect("preview lines should be an array");
+
+        assert_eq!(preview["payload"]["reason"], "bootstrap");
+        assert!(!lines.is_empty());
+    }
+
+    #[tokio::test]
+    async fn desktop_viewer_resize_is_ignored_while_hosted_terminal_has_system_authority() {
         let (events, _) = broadcast::channel(16);
         let manager = test_manager(events);
         let terminal_id = Uuid::new_v4();
@@ -2369,14 +2311,17 @@ mod tests {
             .await
             .expect("current resize should succeed");
 
-        let HostedTerminalCommand::Resize { cols, rows, .. } = command_receiver
-            .recv()
+        assert!(
+            timeout(TokioDuration::from_millis(100), command_receiver.recv())
+                .await
+                .is_err(),
+            "desktop viewer resize must not override the hosted system terminal authority"
+        );
+        let snapshot = manager
+            .get_snapshot(terminal_id)
             .await
-            .expect("current resize should reach hosted terminal")
-        else {
-            panic!("expected hosted resize command");
-        };
-        assert_eq!((cols, rows), (140, 40));
+            .expect("snapshot should continue using hosted size");
+        assert_eq!((snapshot.cols, snapshot.rows), (120, 32));
     }
 
     #[test]

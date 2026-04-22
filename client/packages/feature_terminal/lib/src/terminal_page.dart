@@ -369,6 +369,8 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                                                     // terminal escape stream itself rather
                                                     // than from a forced global fill color.
                                                     backgroundOpacity: 0,
+                                                    autoScrollToBottomOnUserInput: false,
+                                                    autoStickToBottomOnBufferChange: false,
                                                   ),
                                                 ),
                                               ),

@@ -32,6 +32,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     required FocusNode focusNode,
     required TerminalCursorType cursorType,
     required bool alwaysShowCursor,
+    required bool autoStickToBottomOnBufferChange,
     EditableRectCallback? onEditableRect,
     String? composingText,
   })  : _terminal = terminal,
@@ -42,6 +43,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
         _focusNode = focusNode,
         _cursorType = cursorType,
         _alwaysShowCursor = alwaysShowCursor,
+        _autoStickToBottomOnBufferChange = autoStickToBottomOnBufferChange,
         _onEditableRect = onEditableRect,
         _composingText = composingText,
         _painter = TerminalPainter(
@@ -134,6 +136,18 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
     markNeedsPaint();
   }
 
+  bool _autoStickToBottomOnBufferChange;
+  set autoStickToBottomOnBufferChange(bool value) {
+    if (value == _autoStickToBottomOnBufferChange) return;
+    _autoStickToBottomOnBufferChange = value;
+    if (!value) {
+      _stickToBottom = false;
+    } else {
+      _stickToBottom = _scrollOffset >= _maxScrollExtent;
+    }
+    markNeedsLayout();
+  }
+
   EditableRectCallback? _onEditableRect;
   set onEditableRect(EditableRectCallback? value) {
     if (value == _onEditableRect) return;
@@ -156,7 +170,8 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
   int _lastKnownLineCount = 0;
 
   void _onScroll() {
-    _stickToBottom = _scrollOffset >= _maxScrollExtent;
+    _stickToBottom =
+        _autoStickToBottomOnBufferChange && _scrollOffset >= _maxScrollExtent;
     markNeedsLayout();
     _notifyEditableRect();
   }
@@ -221,7 +236,7 @@ class RenderTerminal extends RenderBox with RelayoutWhenSystemFontsChangeMixin {
 
     _updateScrollOffset();
 
-    if (_stickToBottom) {
+    if (_autoStickToBottomOnBufferChange && _stickToBottom) {
       _offset.correctBy(_maxScrollExtent - _scrollOffset);
     }
   }

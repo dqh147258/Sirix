@@ -11,7 +11,7 @@ use crate::app::terminal::vt_authority::{
 };
 
 const TERMINAL_STATE_CACHE_MAX_LINES: usize = 20_000;
-const TERMINAL_HISTORY_RESET_PREVIEW_LINES: usize = 200;
+const TERMINAL_HISTORY_PREVIEW_MAX_LINES: usize = 2_000;
 pub const V2_SYNC_MODE: &str = "state-cache-v2";
 
 #[derive(Debug, Clone, Serialize)]
@@ -244,6 +244,8 @@ impl TerminalSyncState {
             active_buffer = %self.active_buffer.as_api_str(),
             rows,
             cols,
+            canonical_main_line_count = self.main_lines.len(),
+            current_screen_line_count = self.current_screen_lines.len(),
             history_truncated = replay_metadata.history_truncated,
             replay_byte_len = replay_metadata.replay_byte_len,
             replay_buffer_epoch = replay_metadata.buffer_epoch,
@@ -275,7 +277,7 @@ impl TerminalSyncState {
         ready: TerminalReadyV2Payload,
     ) -> Vec<TerminalOutboundEvent> {
         let terminal_id = ready.terminal_id;
-        vec![
+        let mut events = vec![
             TerminalOutboundEvent::new("terminal.ready", &ready),
             TerminalOutboundEvent::new(
                 "terminal.state.snapshot",
@@ -285,7 +287,16 @@ impl TerminalSyncState {
                 "terminal.screen.snapshot",
                 &self.screen_snapshot_payload(terminal_id),
             ),
-        ]
+        ];
+
+        if let Some(preview) = self.bootstrap_history_preview_payload(terminal_id) {
+            events.push(TerminalOutboundEvent::new(
+                "terminal.history.invalidated",
+                &preview,
+            ));
+        }
+
+        events
     }
 
     pub fn history_range_response(
@@ -503,8 +514,31 @@ impl TerminalSyncState {
             } else {
                 snapshot.main_lines.clone()
             };
+            let layout_collapsed_to_viewport = snapshot.layout_changed
+                && !snapshot.clear_scrollback
+                && next_main_lines.len() <= snapshot.screen_lines.len()
+                && old_main_len > snapshot.screen_lines.len();
 
-            if snapshot.layout_changed {
+            if layout_collapsed_to_viewport {
+                // 已知遗留问题：当系统 Terminal 持续拖动窗口时，当前
+                // state-cache 仍可能只能观测到 viewport 级别的数据，
+                // 所以这里只能尽量保住 canonical history，不代表已经
+                // 彻底解决 resize 过程中的历史丢失/错位。后续需要更
+                // 完整的 grid/reflow 语义再继续处理。
+                info!(
+                    terminal_id = %terminal_id,
+                    previous_main_len = old_main_len,
+                    previous_history_start = old_history_start,
+                    previous_history_end = previous_history_end,
+                    snapshot_main_len = next_main_lines.len(),
+                    snapshot_screen_len = snapshot.screen_lines.len(),
+                    active_buffer = %snapshot.active_buffer.as_api_str(),
+                    rows = snapshot.rows,
+                    cols = snapshot.cols,
+                    clear_scrollback = snapshot.clear_scrollback,
+                    "[TERMINAL_HISTORY_TRACE] preserve canonical history across layout-only viewport shrink"
+                );
+            } else if snapshot.layout_changed {
                 info!(
                     terminal_id = %terminal_id,
                     previous_main_len = old_main_len,
@@ -530,8 +564,8 @@ impl TerminalSyncState {
                 }
                 let history_end_line = self.history_end_line();
                 let preview_end_line = history_end_line;
-                let preview_start_line = (preview_end_line
-                    - TERMINAL_HISTORY_RESET_PREVIEW_LINES as i64)
+                let preview_start_line = preview_end_line
+                    .saturating_sub(TERMINAL_HISTORY_PREVIEW_MAX_LINES as i64)
                     .max(self.history_start_line);
                 let start_index = (preview_start_line - self.history_start_line) as usize;
                 let preview_lines = self
@@ -562,18 +596,52 @@ impl TerminalSyncState {
                 self.main_lines = VecDeque::from(next_main_lines);
             } else {
                 if next_main_lines.len() < previous_main.len() {
-                    info!(
-                        terminal_id = %terminal_id,
-                        previous_main_len = previous_main.len(),
-                        next_main_len = next_main_lines.len(),
-                        active_buffer = %snapshot.active_buffer.as_api_str(),
-                        rows = snapshot.rows,
-                        cols = snapshot.cols,
-                        clear_scrollback = snapshot.clear_scrollback,
-                        "[TERMINAL_HISTORY_TRACE] main history shrank without explicit clear"
-                    );
+                    let collapsed_to_viewport =
+                        next_main_lines.len() <= snapshot.screen_lines.len()
+                            && previous_main.len() > snapshot.screen_lines.len();
+                    if collapsed_to_viewport {
+                        // 参考 tmux 的 grid/history 思路：scrollback 应该被当作
+                        // 持久主数据，而不是在 parser 某次瞬时只吐出“当前可视区”
+                        // 时就直接把 canonical history 覆盖掉。
+                        //
+                        // 真实日志里最常见的问题就是：
+                        // - resize / 重连后 VT parser 临时只剩几十行；
+                        // - current screen 是对的，但 main history 被错误压缩；
+                        // - Flutter 随后拿着这份缩水 history 做 rebuild，历史就丢了。
+                        //
+                        // 这里当“新 main_lines 退化到不超过当前 screen_lines，
+                        // 且旧 canonical history 明显更长”时，视为 parser 的
+                        // 临时退化，保留已有 canonical history，只同步当前 screen。
+                        info!(
+                            terminal_id = %terminal_id,
+                            previous_main_len = previous_main.len(),
+                            next_main_len = next_main_lines.len(),
+                            screen_len = snapshot.screen_lines.len(),
+                            history_generation = self.history_generation,
+                            active_buffer = %snapshot.active_buffer.as_api_str(),
+                            rows = snapshot.rows,
+                            cols = snapshot.cols,
+                            clear_scrollback = snapshot.clear_scrollback,
+                            "[TERMINAL_HISTORY_TRACE] preserve canonical history on viewport-sized shrink"
+                        );
+                    } else {
+                        info!(
+                            terminal_id = %terminal_id,
+                            previous_main_len = previous_main.len(),
+                            next_main_len = next_main_lines.len(),
+                            screen_len = snapshot.screen_lines.len(),
+                            history_generation = self.history_generation,
+                            active_buffer = %snapshot.active_buffer.as_api_str(),
+                            rows = snapshot.rows,
+                            cols = snapshot.cols,
+                            clear_scrollback = snapshot.clear_scrollback,
+                            "[TERMINAL_HISTORY_TRACE] main history shrank without explicit clear"
+                        );
+                        self.main_lines = VecDeque::from(next_main_lines);
+                    }
+                } else {
+                    self.main_lines = VecDeque::from(next_main_lines);
                 }
-                self.main_lines = VecDeque::from(next_main_lines);
             }
             if self.main_lines.len() > TERMINAL_STATE_CACHE_MAX_LINES {
                 let overflow = self.main_lines.len() - TERMINAL_STATE_CACHE_MAX_LINES;
@@ -670,6 +738,38 @@ impl TerminalSyncState {
         self.history_start_line + self.main_lines.len() as i64
     }
 
+    fn bootstrap_history_preview_payload(
+        &self,
+        terminal_id: Uuid,
+    ) -> Option<TerminalHistoryInvalidatedPayload> {
+        if self.active_buffer != BufferKind::Main || self.main_lines.is_empty() {
+            return None;
+        }
+
+        let history_end_line = self.history_end_line();
+        let preview_start_line = history_end_line
+            .saturating_sub(TERMINAL_HISTORY_PREVIEW_MAX_LINES as i64)
+            .max(self.history_start_line);
+        let start_index = (preview_start_line - self.history_start_line) as usize;
+        let preview_lines = self
+            .main_lines
+            .iter()
+            .skip(start_index)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        Some(TerminalHistoryInvalidatedPayload {
+            terminal_id,
+            history_generation: self.history_generation,
+            history_start_line: self.history_start_line,
+            history_end_line,
+            start_line: preview_start_line,
+            end_line: history_end_line,
+            lines: preview_lines,
+            reason: "bootstrap",
+        })
+    }
+
     fn select_main_resize_strategy(
         &self,
         replay_bytes: Option<&[u8]>,
@@ -722,6 +822,44 @@ mod tests {
         let state = TerminalSyncState::new(3, 8);
         let event = state.history_range_response(terminal_id, "req-1".to_string(), 0, 2);
         assert_eq!(event.event_type, "terminal.history.range.error");
+    }
+
+    #[test]
+    fn bootstrap_events_include_history_preview_for_main_buffer() {
+        let terminal_id = Uuid::new_v4();
+        let mut state = TerminalSyncState::new(3, 12);
+        let _ = state.apply_output(terminal_id, b"alpha\r\nbeta\r\ngamma\r\ndelta\r\n");
+
+        let events = state.bootstrap_events(TerminalReadyV2Payload {
+            terminal_id,
+            device_id: "device".to_string(),
+            title: "Terminal".to_string(),
+            source: "hosted".to_string(),
+            shell: "bash".to_string(),
+            cwd: "/tmp".to_string(),
+            state: "active".to_string(),
+            session_state: "active".to_string(),
+            cols: 12,
+            rows: 3,
+            created_at: chrono::Utc::now(),
+            closed_at: None,
+            geometry_generation: 0,
+            authority_source: "system_terminal".to_string(),
+            viewer_presence_epoch: Some(1),
+            protocol_version: 2,
+            sync_mode: V2_SYNC_MODE,
+        });
+
+        let preview = events
+            .iter()
+            .find(|event| event.event_type == "terminal.history.invalidated")
+            .expect("bootstrap should include canonical history preview");
+        assert_eq!(preview.payload["reason"], "bootstrap");
+        assert!(preview
+            .payload
+            .get("lines")
+            .and_then(|value| value.as_array())
+            .is_some_and(|lines| !lines.is_empty()));
     }
 
     #[test]
@@ -814,6 +952,42 @@ mod tests {
     }
 
     #[test]
+    fn layout_resize_invalidation_preview_is_not_capped_to_tiny_window() {
+        let terminal_id = Uuid::new_v4();
+        let mut state = TerminalSyncState::new(3, 24);
+        let mut payload = Vec::new();
+        for index in 0..320 {
+            payload.extend_from_slice(format!("line-{index:03}\r\n").as_bytes());
+        }
+        let _ = state.apply_output(terminal_id, &payload);
+
+        let events = state.resize_with_replay_metadata(
+            terminal_id,
+            4,
+            18,
+            Some(&payload),
+            ResizeReplayMetadata {
+                history_truncated: true,
+                replay_byte_len: payload.len(),
+                buffer_epoch: state.buffer_epoch,
+                layout_epoch: state.layout_epoch,
+            },
+        );
+        let invalidated = events
+            .iter()
+            .find(|event| event.event_type == "terminal.history.invalidated")
+            .expect("layout resize should invalidate history");
+        let preview_lines = invalidated
+            .payload
+            .get("lines")
+            .and_then(|value| value.as_array())
+            .map(|lines| lines.len())
+            .unwrap_or_default();
+
+        assert!(preview_lines > 200);
+    }
+
+    #[test]
     fn alt_resize_does_not_advance_main_history_generation() {
         let terminal_id = Uuid::new_v4();
         let mut state = TerminalSyncState::new(3, 12);
@@ -839,5 +1013,99 @@ mod tests {
             after.main.history_generation,
             before.main.history_generation
         );
+    }
+
+    #[test]
+    fn viewport_sized_shrink_preserves_canonical_history() {
+        let terminal_id = Uuid::new_v4();
+        let mut state = TerminalSyncState::new(3, 24);
+        let full_lines = (0..12)
+            .map(|index| TerminalLine {
+                text: format!("line-{index}"),
+                wrapped: false,
+                hard_break: true,
+            })
+            .collect::<Vec<_>>();
+        state.main_lines = VecDeque::from(full_lines.clone());
+        state.history_start_line = 1;
+        state.current_screen_lines = full_lines[9..12].to_vec();
+        state.current_rows = 3;
+        state.current_cols = 24;
+        let history_end_before = state.history_end_line();
+
+        let shrink_snapshot = VtAuthoritySnapshot {
+            active_buffer: BufferKind::Main,
+            buffer_epoch: 0,
+            layout_epoch: 0,
+            rows: 3,
+            cols: 24,
+            cursor_row: 2,
+            cursor_col: 0,
+            screen_lines: full_lines[9..12].to_vec(),
+            formatted_screen: Vec::new(),
+            main_lines: full_lines[9..12].to_vec(),
+            clear_scrollback: false,
+            buffer_changed: false,
+            layout_changed: false,
+        };
+
+        let events = state.apply_snapshot(terminal_id, shrink_snapshot);
+
+        assert!(events.is_empty());
+        assert_eq!(state.main_lines.len(), 12);
+        assert_eq!(
+            state
+                .main_lines
+                .front()
+                .expect("canonical history should be kept")
+                .text,
+            "line-0"
+        );
+        assert_eq!(state.history_end_line(), history_end_before);
+    }
+
+    #[test]
+    fn layout_changed_viewport_shrink_preserves_canonical_history() {
+        let terminal_id = Uuid::new_v4();
+        let mut state = TerminalSyncState::new(3, 24);
+        let full_lines = (0..12)
+            .map(|index| TerminalLine {
+                text: format!("line-{index}"),
+                wrapped: false,
+                hard_break: true,
+            })
+            .collect::<Vec<_>>();
+        state.main_lines = VecDeque::from(full_lines.clone());
+        state.history_start_line = 1;
+        state.current_screen_lines = full_lines[9..12].to_vec();
+        state.current_rows = 3;
+        state.current_cols = 24;
+        let history_generation_before = state.history_generation;
+        let history_end_before = state.history_end_line();
+
+        let shrink_snapshot = VtAuthoritySnapshot {
+            active_buffer: BufferKind::Main,
+            buffer_epoch: 0,
+            layout_epoch: 1,
+            rows: 3,
+            cols: 24,
+            cursor_row: 2,
+            cursor_col: 0,
+            screen_lines: full_lines[9..12].to_vec(),
+            formatted_screen: Vec::new(),
+            main_lines: full_lines[9..12].to_vec(),
+            clear_scrollback: false,
+            buffer_changed: false,
+            layout_changed: true,
+        };
+
+        let events = state.apply_snapshot(terminal_id, shrink_snapshot);
+
+        assert!(events
+            .iter()
+            .all(|event| event.event_type != "terminal.history.invalidated"));
+        assert_eq!(state.main_lines.len(), 12);
+        assert_eq!(state.history_generation, history_generation_before);
+        assert_eq!(state.history_end_line(), history_end_before);
     }
 }

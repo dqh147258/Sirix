@@ -9,7 +9,6 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
 };
 
 use anyhow::Context;
@@ -20,8 +19,9 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 use cli_support::{
-    ensure_desktop_server, ensure_login_prompt, local_http_url, local_ws_url, spawn_stdin_reader,
-    RawModeGuard, CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
+    current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
+    local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
+    CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
 };
 use scene::{resolve_scene, resolve_sirix_home, SIRIX_SCENE_ENV};
 
@@ -124,7 +124,8 @@ async fn main() -> anyhow::Result<()> {
     ensure_login_prompt(port).await?;
 
     let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 32));
+    let initial_size = current_terminal_size(TerminalSize::new(120, 32));
+    let (cols, rows) = initial_size.as_tuple();
     let shell = resolve_shared_shell();
     let session = create_hosted_terminal_session(
         port,
@@ -215,8 +216,8 @@ async fn run_hosted_terminal(
     spawn_stdin_reader(stdin_tx);
     spawn_pty_reader(reader, pty_tx);
 
-    let mut last_size = (cols, rows);
-    let mut resize_tick = tokio::time::interval(Duration::from_millis(250));
+    let mut last_size = TerminalSize::new(cols, rows);
+    let mut size_rx = spawn_terminal_size_watcher(last_size);
 
     eprintln!(
         "[sirix-terminal] attached terminal_id={} mirrored_to_backend={}",
@@ -266,14 +267,13 @@ async fn run_hosted_terminal(
                     }
                 }
             }
-            _ = resize_tick.tick() => {
-                let current_size = crossterm::terminal::size().unwrap_or(last_size);
+            Some(current_size) = size_rx.recv() => {
                 if current_size != last_size {
                     last_size = current_size;
                     if let Ok(master) = master.lock() {
                         master.resize(PtySize {
-                            rows: current_size.1,
-                            cols: current_size.0,
+                            rows: current_size.rows,
+                            cols: current_size.cols,
                             pixel_width: 0,
                             pixel_height: 0,
                         })?;
@@ -282,8 +282,8 @@ async fn run_hosted_terminal(
                         &mut write,
                         &HostedTerminalClientMessage::Resized {
                             terminal_id: session.terminal_id,
-                            cols: current_size.0,
-                            rows: current_size.1,
+                            cols: current_size.cols,
+                            rows: current_size.rows,
                         },
                     )
                     .await?;

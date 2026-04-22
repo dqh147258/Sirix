@@ -10,10 +10,9 @@ use std::{
 use anyhow::Context;
 use crossterm::terminal;
 use reqwest::StatusCode;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
-use crate::scene::{
-    resolve_scene, SirixScene, SIRIX_SCENE_ENV,
-};
+use crate::scene::{resolve_scene, SirixScene, SIRIX_SCENE_ENV};
 
 const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
 
@@ -141,6 +140,90 @@ impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+impl TerminalSize {
+    pub(crate) const fn new(cols: u16, rows: u16) -> Self {
+        Self { cols, rows }
+    }
+
+    pub(crate) const fn as_tuple(self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+}
+
+pub(crate) fn current_terminal_size(default: TerminalSize) -> TerminalSize {
+    terminal::size()
+        .map(|(cols, rows)| TerminalSize::new(cols, rows))
+        .unwrap_or(default)
+}
+
+pub(crate) fn spawn_terminal_size_watcher(
+    initial_size: TerminalSize,
+) -> UnboundedReceiver<TerminalSize> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    #[cfg(unix)]
+    {
+        if spawn_sigwinch_size_watcher(tx.clone(), initial_size) {
+            return rx;
+        }
+    }
+
+    spawn_polling_size_watcher(tx, initial_size, Duration::from_millis(120));
+    rx
+}
+
+fn spawn_polling_size_watcher(
+    tx: tokio::sync::mpsc::UnboundedSender<TerminalSize>,
+    initial_size: TerminalSize,
+    interval: Duration,
+) {
+    tokio::spawn(async move {
+        let mut last_size = initial_size;
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let current_size = current_terminal_size(last_size);
+            if current_size != last_size {
+                last_size = current_size;
+                if tx.send(current_size).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+#[cfg(unix)]
+fn spawn_sigwinch_size_watcher(
+    tx: tokio::sync::mpsc::UnboundedSender<TerminalSize>,
+    initial_size: TerminalSize,
+) -> bool {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let Ok(mut signal_stream) = signal(SignalKind::window_change()) else {
+        return false;
+    };
+
+    tokio::spawn(async move {
+        let mut last_size = initial_size;
+        while signal_stream.recv().await.is_some() {
+            let current_size = current_terminal_size(last_size);
+            if current_size != last_size {
+                last_size = current_size;
+                if tx.send(current_size).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    true
 }
 
 async fn probe_running_port() -> anyhow::Result<Option<u16>> {

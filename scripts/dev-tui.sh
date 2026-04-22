@@ -526,6 +526,141 @@ normalize_selection() {
   printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:],;'
 }
 
+desktop_server_probe_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' 'python3'
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    printf '%s\n' 'python'
+    return 0
+  fi
+  return 1
+}
+
+probe_desktop_server_port_with_curl() {
+  local host="$1"
+  local port_start="$2"
+  local port_end="$3"
+  local port
+  for ((port = port_start; port <= port_end; port++)); do
+    if curl -fsS --max-time 1 "http://${host}:${port}/health" >/dev/null 2>&1; then
+      printf '%s\n' "${port}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+probe_desktop_server_port() {
+  local python_cmd host port_start port_end
+  host="${SIRIX_DESKTOP_SERVER_HOST:-127.0.0.1}"
+  port_start="${SIRIX_DESKTOP_SERVER_PORT_START:-$(sirix_desktop_port_start_for_scene "${SCENE}")}"
+  port_end="${SIRIX_DESKTOP_SERVER_PORT_END:-$(sirix_desktop_port_end_for_scene "${SCENE}")}"
+  if (( port_end < port_start )); then
+    port_end="${port_start}"
+  fi
+
+  # 先走 curl，保持探活实现轻量且无 Python 依赖；
+  # 若运行环境缺少 curl，再回退到 Python 标准库 HTTP 探测。
+  if command -v curl >/dev/null 2>&1; then
+    probe_desktop_server_port_with_curl "${host}" "${port_start}" "${port_end}"
+    return $?
+  fi
+
+  python_cmd=$(desktop_server_probe_python) || return 1
+
+  "${python_cmd}" - "${host}" "${port_start}" "${port_end}" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+host = sys.argv[1]
+start = int(sys.argv[2])
+end = int(sys.argv[3])
+if end < start:
+    end = start
+
+for port in range(start, end + 1):
+    try:
+        with urllib.request.urlopen(
+            f"http://{host}:{port}/health",
+            timeout=0.5,
+        ) as response:
+            if 200 <= response.status < 300:
+                print(port)
+                sys.exit(0)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        continue
+
+sys.exit(1)
+PY
+}
+
+wait_for_desktop_server_ready() {
+  local timeout_secs="${1:-180}"
+  local waited=0
+  local port state exit_code
+
+  while (( waited < timeout_secs )); do
+    if port=$(probe_desktop_server_port 2>/dev/null); then
+      printf '%s\n' "${port}"
+      return 0
+    fi
+
+    state=$(read_status_value desktop_server state 2>/dev/null || true)
+    exit_code=$(read_status_value desktop_server exit_code 2>/dev/null || true)
+    case "${state}" in
+      failed)
+        return 1
+        ;;
+      stopped)
+        if [[ -n "${exit_code}" && "${exit_code}" != '0' ]]; then
+          return 1
+        fi
+        ;;
+    esac
+
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  return 1
+}
+
+ensure_desktop_server_ready_for_flutter() {
+  local port
+
+  if port=$(probe_desktop_server_port 2>/dev/null); then
+    write_component_status desktop_server running 0 "health ok | port=${port}"
+    log_note INFO "检测到 Desktop Server 已就绪，port=${port}。"
+    printf '%s\n' "${port}"
+    return 0
+  fi
+
+  # 用户要求 Flutter 必须在 Desktop Server 启动并通过健康检查后再启动，
+  # 所以这里把 TUI 的 Desktop Client 入口改成显式前置依赖：
+  # 先确保 desktop-server 已被拉起，再等待 `/health` 真正可用，最后才允许
+  # `flutter run` 继续执行，避免桌面端在本地 WS/HTTP 还没监听时抢跑。
+  if component_is_running desktop_server; then
+    log_note INFO 'Desktop Server 正在运行或启动中，等待健康检查通过后再启动 Flutter。'
+  else
+    log_note INFO 'Desktop Client 依赖 Desktop Server，先启动 Desktop Server。'
+    start_desktop_server || return 1
+  fi
+
+  if port=$(wait_for_desktop_server_ready 180); then
+    write_component_status desktop_server running 0 "health ok | port=${port}"
+    log_note INFO "Desktop Server 健康检查通过，port=${port}。"
+    printf '%s\n' "${port}"
+    return 0
+  fi
+
+  write_component_status desktop_server failed 1 'desktop-server health check timed out'
+  log_note ERROR 'Desktop Server 未在超时时间内通过健康检查，已阻止 Flutter 启动。'
+  return 1
+}
+
 launch_managed_component() {
   local component="$1"
   shift
@@ -853,7 +988,16 @@ start_cli_build() {
 
 start_desktop_client() {
   local cmd=("${SCRIPT_DIR}/run-desktop-client.sh")
+  local desktop_server_port
   [[ "${SCENE}" == 'release' ]] && cmd+=(--release)
+
+  if ! desktop_server_port=$(ensure_desktop_server_ready_for_flutter); then
+    write_component_status desktop_client failed 1 'desktop-server not ready'
+    set_notice 'Desktop Server 未就绪，已阻止 Desktop Client 启动。' ERROR
+    return 1
+  fi
+
+  log_note INFO "Desktop Server 已就绪(port=${desktop_server_port})，开始启动 Desktop Client。"
   launch_managed_component desktop_client "${cmd[@]}"
   wait_for_component_settle desktop_client start 4
 }

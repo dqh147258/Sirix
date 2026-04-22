@@ -21,6 +21,15 @@
 
 ## 3. 本地联调（推荐顺序）
 
+也可以直接使用统一控制台：
+
+```bash
+./scripts/dev-tui.sh
+./scripts/dev-tui.sh --release
+```
+
+它可以统一控制 backend、desktop-server、CLI build、desktop client、mobile client 的启动/停止/重启与状态查看，并支持日志清理和历史指令回看。
+
 ## 3.1 启动 backend 及依赖
 
 ```bash
@@ -36,6 +45,7 @@
 
 - 默认启动 Debug scene；附带 `--release` 时切到 Release scene。
 - `--clear-logs` 会清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`，方便只观察本轮启动日志。
+- `dev-up.sh` / `dev-restart.sh` 默认不再强制 rebuild / pull；若需要重建 backend 镜像，用 `--build`，若需要主动更新依赖镜像或构建基底，再额外附带 `--pull`。
 - backend-server 现在会在写 runtime logs 前自动补齐缺失目录，因此清理日志目录后再次启动不会因为目录丢失而写日志失败。
 
 ### backend 可配置项（在哪里改）

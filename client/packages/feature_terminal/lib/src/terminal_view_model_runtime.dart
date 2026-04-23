@@ -250,9 +250,17 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
     }
   }
 
-  void _resetTerminalSnapshot(Terminal terminal) {
+  void _resetTerminalSnapshot(
+    Terminal terminal, {
+    String activeBuffer = 'main',
+  }) {
     terminal.mainBuffer.clear();
     terminal.altBuffer.clear();
+    if (activeBuffer == 'alt') {
+      terminal.useAltBuffer();
+    } else {
+      terminal.useMainBuffer();
+    }
     terminal.setCursor(0, 0);
   }
 

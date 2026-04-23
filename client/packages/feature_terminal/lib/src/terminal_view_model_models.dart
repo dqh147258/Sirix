@@ -427,7 +427,14 @@ class TerminalAuthorityCache {
       final line = sortedEntries[index].value;
       buffer.write(line.text);
       if (line.hardBreak && index < sortedEntries.length - 1) {
-        buffer.write('\n');
+        // xterm.dart matches real terminals here: LF only moves the cursor to
+        // the next row, while CR performs the "back to column 0" part.
+        // Authority rebuilds replay full-screen text into a fresh xterm
+        // instance, so every physical hard break must be emitted as CRLF.
+        // Otherwise each replay leaves the next prompt at the previous cursor
+        // column and the Desktop App starts drifting diagonally after every
+        // submitted command even though sirix-terminal remains correct.
+        buffer.write('\r\n');
       }
     }
     return buffer.toString();
@@ -442,7 +449,11 @@ class TerminalAuthorityCache {
       final line = lines[index];
       buffer.write(line.text);
       if (line.hardBreak && index < lines.length - 1) {
-        buffer.write('\n');
+        // Keep alternate-buffer and visible-screen-only rebuilds aligned with
+        // the same CRLF hard-break semantics used by the Desktop Server VT
+        // authority. This keeps Flutter xterm replay behavior consistent with
+        // sirix-terminal's native terminal rendering.
+        buffer.write('\r\n');
       }
     }
     return buffer.toString();

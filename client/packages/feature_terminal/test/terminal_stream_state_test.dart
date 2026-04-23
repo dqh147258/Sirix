@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:feature_terminal/src/terminal_view_model.dart';
+import 'package:xterm/xterm.dart';
 
 void main() {
   group('TerminalStreamState', () {
@@ -198,7 +199,35 @@ void main() {
         ],
       });
 
-      expect(cache.buildTranscript(), 'line-0\nnew-1\nnew-2');
+      expect(cache.buildTranscript(), 'line-0\r\nnew-1\r\nnew-2');
+    });
+
+    test('CRLF hard breaks keep xterm replay left aligned across commands', () {
+      final lfOnly = Terminal(maxLines: 100)..resize(40, 6);
+      lfOnly.write('prompt> \nprompt> \nprompt> ');
+
+      final crlf = Terminal(maxLines: 100)..resize(40, 6);
+      crlf.write('prompt> \r\nprompt> \r\nprompt> ');
+
+      int firstOccupiedColumn(Terminal terminal, int row) {
+        final line = terminal.buffer.lines[row];
+        for (var col = 0; col < terminal.viewWidth; col += 1) {
+          if (line.getCodePoint(col) != 0) {
+            return col;
+          }
+        }
+        return -1;
+      }
+
+      expect(lfOnly.buffer.lines[0].getText(0, 20), 'prompt> ');
+      expect(firstOccupiedColumn(lfOnly, 1), greaterThan(0));
+      expect(firstOccupiedColumn(lfOnly, 2), greaterThan(firstOccupiedColumn(lfOnly, 1)));
+
+      expect(crlf.buffer.lines[0].getText(0, 20), 'prompt> ');
+      expect(firstOccupiedColumn(crlf, 1), 0);
+      expect(firstOccupiedColumn(crlf, 2), 0);
+      expect(crlf.buffer.lines[1].getText(0, 20), 'prompt> ');
+      expect(crlf.buffer.lines[2].getText(0, 20), 'prompt> ');
     });
   });
 

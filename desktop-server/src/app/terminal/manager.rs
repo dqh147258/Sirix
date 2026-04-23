@@ -3,6 +3,7 @@ use std::{
     env,
     io::{Read, Write},
     path::PathBuf,
+    process::Command,
     sync::mpsc::{self, RecvTimeoutError},
     sync::{Arc, Mutex},
     thread,
@@ -13,7 +14,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc::UnboundedSender, RwLock};
+use tokio::sync::{broadcast, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -22,19 +23,23 @@ use crate::app::{
     terminal::geometry_arbiter::{
         GeometryAuthoritySource, GeometryUpdate, TerminalClientKind, TerminalGeometryArbiter,
     },
+    terminal::persistence::{self, TerminalRuntimeRecord},
     terminal::state_cache::{
         ResizeReplayMetadata, TerminalOutboundEvent, TerminalReadyV2Payload, TerminalSyncState,
         V2_SYNC_MODE,
     },
 };
 use crate::scene::{resolve_scene, SIRIX_SCENE_ENV};
+use crate::terminal_launch::{
+    apply_tmux_session_defaults, build_tmux_fallback_warning, preferred_tmux_client_term,
+    select_terminal_launch, TerminalCommandPlan, TerminalLaunchRequest, TerminalLaunchWarning,
+};
 
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 type SharedReplayBuffer = Arc<Mutex<TerminalReplayBuffer>>;
 type SharedSyncState = Arc<Mutex<TerminalSyncState>>;
-type SharedHostedControlSender = Arc<Mutex<Option<UnboundedSender<HostedTerminalCommand>>>>;
 type SharedResizePublishFingerprint = Arc<Mutex<Option<ResizePublishFingerprint>>>;
 
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
@@ -44,19 +49,13 @@ const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSessionSource {
     LocalPty,
-    Hosted,
 }
 
 impl TerminalSessionSource {
     pub fn as_api_str(self) -> &'static str {
         match self {
             Self::LocalPty => "local_pty",
-            Self::Hosted => "hosted",
         }
-    }
-
-    pub fn supports_ai_current_terminal_reuse(self) -> bool {
-        matches!(self, Self::LocalPty)
     }
 }
 
@@ -67,6 +66,7 @@ struct TerminalSessionHandle {
     sync_state: SharedSyncState,
     last_resize_publish: SharedResizePublishFingerprint,
     remote_sync: bool,
+    tmux_session_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,17 +172,12 @@ enum TerminalSessionEndpoint {
         writer: SharedWriter,
         child: SharedChild,
     },
-    Hosted {
-        host_token: String,
-        control_sender: SharedHostedControlSender,
-    },
 }
 
 impl TerminalSessionEndpoint {
     fn source(&self) -> TerminalSessionSource {
         match self {
             Self::LocalPty { .. } => TerminalSessionSource::LocalPty,
-            Self::Hosted { .. } => TerminalSessionSource::Hosted,
         }
     }
 }
@@ -209,6 +204,8 @@ struct TerminalOutputContext {
     backend_base_url: String,
     device_id: String,
     local_events: broadcast::Sender<String>,
+    sessions: Arc<RwLock<HashMap<Uuid, TerminalSessionHandle>>>,
+    sirix_home: PathBuf,
     terminal_id: Uuid,
     replay_buffer: SharedReplayBuffer,
     sync_state: SharedSyncState,
@@ -292,31 +289,15 @@ pub struct LocalTerminalSnapshot {
     pub closed_at: Option<DateTime<Utc>>,
     pub latest_output_sequence: u64,
     pub history_truncated: bool,
+    pub viewers: LocalTerminalViewersSnapshot,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct HostedTerminalSession {
-    pub terminal_id: Uuid,
-    pub host_token: String,
-    pub remote_sync: bool,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "type")]
-pub enum HostedTerminalCommand {
-    #[serde(rename = "terminal.host.input")]
-    Input {
-        terminal_id: Uuid,
-        data_base64: String,
-    },
-    #[serde(rename = "terminal.host.resize")]
-    Resize {
-        terminal_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    #[serde(rename = "terminal.host.close")]
-    Close { terminal_id: Uuid },
+pub struct LocalTerminalViewersSnapshot {
+    pub system_terminal_attached: bool,
+    pub system_terminal_epoch: u64,
+    pub desktop_app_attached: bool,
+    pub desktop_app_epoch: u64,
 }
 
 pub struct TerminalManager {
@@ -335,14 +316,16 @@ impl TerminalManager {
         local_events: broadcast::Sender<String>,
         sirix_home: PathBuf,
     ) -> Self {
-        Self {
+        let manager = Self {
             backend_base_url: backend_base_url.trim_end_matches('/').to_string(),
             device_id,
             local_events,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             client: reqwest::Client::new(),
             sirix_home,
-        }
+        };
+        manager.log_persisted_runtime_registry_backlog();
+        manager
     }
 
     pub async fn create_terminal(
@@ -353,32 +336,138 @@ impl TerminalManager {
         title: Option<String>,
         cols: u16,
         rows: u16,
+        prefer_tmux_terminal: bool,
+        remote_sync: bool,
     ) -> anyhow::Result<()> {
         let shell_path = resolve_shell(shell.as_deref());
         let cwd_display = cwd.clone().unwrap_or_else(|| "~".to_string());
         let title = title.clone().unwrap_or_else(|| "Terminal".to_string());
-        let mut builder = CommandBuilder::new(shell_path.clone());
-        if let Some(dir) = cwd.as_deref().and_then(resolve_cwd) {
+        let resolved_cwd = cwd.as_deref().and_then(resolve_cwd);
+        let tmux_session_seed = format!("sirix-{terminal_id}");
+        // 关键策略入口：统一通过 launcher 选择器决策“tmux 还是 legacy”。
+        // 这样 Desktop 终端与 CLI 终端可复用同一套决策规则，避免分叉导致行为不一致。
+        let launch_selection = select_terminal_launch(&TerminalLaunchRequest {
+            requested_shell: shell_path.as_str(),
+            cwd: resolved_cwd.as_deref(),
+            prefer_tmux: prefer_tmux_terminal,
+            tmux_session_seed: tmux_session_seed.as_str(),
+        });
+        self.emit_terminal_launch_warnings(terminal_id, &launch_selection.warnings);
+
+        let create_primary = self
+            .create_terminal_with_plan(
+                terminal_id,
+                title.as_str(),
+                cwd_display.as_str(),
+                resolved_cwd.as_deref(),
+                cols,
+                rows,
+                &launch_selection.primary,
+                remote_sync,
+            )
+            .await;
+
+        let selected_strategy = match create_primary {
+            Ok(()) => launch_selection.primary.strategy,
+            Err(primary_error) => {
+                if let Some(fallback_plan) = launch_selection.fallback.as_ref() {
+                    let fallback_warning = build_tmux_fallback_warning(&primary_error.to_string());
+                    self.emit_terminal_launch_warnings(
+                        terminal_id,
+                        std::slice::from_ref(&fallback_warning),
+                    );
+                    self.create_terminal_with_plan(
+                        terminal_id,
+                        title.as_str(),
+                        cwd_display.as_str(),
+                        resolved_cwd.as_deref(),
+                        cols,
+                        rows,
+                        fallback_plan,
+                        remote_sync,
+                    )
+                    .await
+                    .map_err(|fallback_error| {
+                        anyhow::anyhow!(
+                            "terminal launch failed: primary={primary_error}; fallback={fallback_error}"
+                        )
+                    })?;
+                    fallback_plan.strategy
+                } else {
+                    return Err(primary_error);
+                }
+            }
+        };
+
+        info!(
+            terminal_id = %terminal_id,
+            strategy = selected_strategy.as_api_str(),
+            "terminal session created"
+        );
+        Ok(())
+    }
+
+    async fn create_terminal_with_plan(
+        &self,
+        terminal_id: Uuid,
+        title: &str,
+        cwd_display: &str,
+        resolved_cwd: Option<&std::path::Path>,
+        cols: u16,
+        rows: u16,
+        plan: &TerminalCommandPlan,
+        remote_sync: bool,
+    ) -> anyhow::Result<()> {
+        let mut builder = CommandBuilder::new(plan.program.clone());
+        for arg in &plan.args {
+            builder.arg(arg);
+        }
+        if let Some(dir) = resolved_cwd {
             builder.cwd(dir);
         }
         self.apply_sirix_env(&mut builder, Some(terminal_id))?;
+        builder.env("SIRIX_TERMINAL_LAUNCH_STRATEGY", plan.strategy.as_api_str());
+        if let Some(tmux_session_name) = plan.tmux_session_name.as_deref() {
+            builder.env("SIRIX_TERMINAL_TMUX_SESSION", tmux_session_name);
+            builder.env("TERM", preferred_tmux_client_term());
+        }
 
         self.create_process_terminal(
             terminal_id,
             builder,
-            title.clone(),
-            shell_path.clone(),
-            cwd_display.clone(),
+            title.to_string(),
+            plan.display_shell.clone(),
+            cwd_display.to_string(),
             cols,
             rows,
-            true,
-            Some(title),
-            Some(shell_path),
-            Some(cwd_display),
+            remote_sync,
+            Some(title.to_string()),
+            Some(plan.display_shell.clone()),
+            Some(cwd_display.to_string()),
+            plan.tmux_session_name.clone(),
         )
-        .await?;
-        info!(terminal_id = %terminal_id, "terminal session created");
-        Ok(())
+        .await
+    }
+
+    fn emit_terminal_launch_warnings(&self, terminal_id: Uuid, warnings: &[TerminalLaunchWarning]) {
+        for warning in warnings {
+            warn!(
+                terminal_id = %terminal_id,
+                code = warning.code,
+                message = %warning.message,
+                install_commands = %warning.install_commands.join(" | "),
+                "[TERMINAL_TMUX_TRACE] terminal launch warning"
+            );
+            self.publish_local_terminal_event(
+                "terminal.warning",
+                json!({
+                    "terminal_id": terminal_id,
+                    "code": warning.code,
+                    "message": warning.message,
+                    "install_commands": warning.install_commands,
+                }),
+            );
+        }
     }
 
     pub async fn create_codex_terminal(
@@ -425,6 +514,7 @@ impl TerminalManager {
             Some(format!("Sirix AI · {}", launch.agent.name)),
             Some("codex".to_string()),
             Some(launch.workspace_root.display().to_string()),
+            None,
         )
         .await
     }
@@ -435,29 +525,11 @@ impl TerminalManager {
         let handle = sessions
             .get(&terminal_id)
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-
-        match &handle.endpoint {
-            TerminalSessionEndpoint::LocalPty { writer, .. } => {
-                let mut writer = writer
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
-                writer.write_all(&bytes)?;
-            }
-            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
-                let payload = HostedTerminalCommand::Input {
-                    terminal_id,
-                    data_base64: data_base64.to_string(),
-                };
-                let sender = control_sender
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
-                sender
-                    .send(payload)
-                    .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal input"))?;
-            }
-        }
+        let TerminalSessionEndpoint::LocalPty { writer, .. } = &handle.endpoint;
+        let mut writer = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
+        writer.write_all(&bytes)?;
         Ok(())
     }
 
@@ -643,34 +715,16 @@ impl TerminalManager {
                 .ok()
                 .and_then(|replay| replay.snapshot());
 
-            match &handle.endpoint {
-                TerminalSessionEndpoint::LocalPty { master, .. } => {
-                    let master = master
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
-                    master.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })?;
-                }
-                TerminalSessionEndpoint::Hosted { control_sender, .. } => {
-                    let payload = HostedTerminalCommand::Resize {
-                        terminal_id,
-                        cols,
-                        rows,
-                    };
-                    let sender = control_sender
-                        .lock()
-                        .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?
-                        .clone()
-                        .ok_or_else(|| anyhow::anyhow!("hosted terminal is not connected"))?;
-                    sender
-                        .send(payload)
-                        .map_err(|_| anyhow::anyhow!("failed to deliver hosted terminal resize"))?;
-                }
-            }
+            let TerminalSessionEndpoint::LocalPty { master, .. } = &handle.endpoint;
+            let master = master
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?;
+            master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })?;
             let mut sync_state = handle
                 .sync_state
                 .lock()
@@ -746,182 +800,20 @@ impl TerminalManager {
     }
 
     pub async fn close(&self, terminal_id: Uuid) -> anyhow::Result<()> {
-        self.close_session(terminal_id, TerminalCloseReason::Closed, true)
-            .await
-    }
-
-    pub async fn create_hosted_terminal(
-        &self,
-        terminal_id: Uuid,
-        shell: String,
-        cwd: String,
-        title: String,
-        cols: u16,
-        rows: u16,
-        remote_sync: bool,
-    ) -> anyhow::Result<HostedTerminalSession> {
-        let host_token = Uuid::new_v4().to_string();
-        let metadata = Arc::new(Mutex::new(TerminalSessionMetadata {
-            title: title.clone(),
-            shell: shell.clone(),
-            cwd: cwd.clone(),
-            state: "opening".to_string(),
-            geometry: TerminalGeometryArbiter::new_host_authority(cols, rows),
-            created_at: Utc::now(),
-            closed_at: None,
-        }));
-        let replay_buffer = Arc::new(Mutex::new(TerminalReplayBuffer::default()));
-        let sync_state = Arc::new(Mutex::new(TerminalSyncState::new(rows, cols)));
-        self.sessions.write().await.insert(
-            terminal_id,
-            TerminalSessionHandle {
-                endpoint: TerminalSessionEndpoint::Hosted {
-                    host_token: host_token.clone(),
-                    control_sender: Arc::new(Mutex::new(None)),
-                },
-                metadata,
-                replay_buffer,
-                sync_state,
-                last_resize_publish: Arc::new(Mutex::new(None)),
-                remote_sync,
-            },
-        );
-
-        self.update_state(
-            terminal_id,
-            "opening",
-            Some(title),
-            Some(shell),
-            Some(cwd),
-            Some(cols.into()),
-            Some(rows.into()),
-            None,
-        )
-        .await?;
-        self.publish_local_terminal_ready(terminal_id).await;
-
-        Ok(HostedTerminalSession {
-            terminal_id,
-            host_token,
-            remote_sync,
-        })
-    }
-
-    pub async fn register_hosted_terminal(
-        &self,
-        terminal_id: Uuid,
-        host_token: &str,
-        sender: UnboundedSender<HostedTerminalCommand>,
-    ) -> anyhow::Result<()> {
-        let sessions = self.sessions.read().await;
-        let handle = sessions
-            .get(&terminal_id)
-            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-        let TerminalSessionEndpoint::Hosted {
-            host_token: expected_token,
-            control_sender,
-        } = &handle.endpoint
-        else {
-            anyhow::bail!("terminal session is not hosted");
-        };
-        if expected_token != host_token.trim() {
-            anyhow::bail!("invalid hosted terminal registration token");
-        }
-
-        {
-            let mut guard = control_sender
-                .lock()
-                .map_err(|_| anyhow::anyhow!("hosted terminal control sender poisoned"))?;
-            if guard.is_some() {
-                anyhow::bail!("hosted terminal already has an active host connection");
+        if !self.sessions.read().await.contains_key(&terminal_id) {
+            if let Some(record) = persistence::load_runtime_record(&self.sirix_home, terminal_id)? {
+                warn!(
+                    terminal_id = %terminal_id,
+                    source = %record.source,
+                    state = %record.state,
+                    "[TERMINAL_RUNTIME_REGISTRY] closing persisted runtime record without an in-memory session; treating it as a stale recovering runtime"
+                );
+                self.remove_runtime_registry_entry(terminal_id);
+                return Ok(());
             }
-            *guard = Some(sender);
         }
-        if let Ok(mut metadata) = handle.metadata.lock() {
-            metadata.state = "active".to_string();
-        }
-        drop(sessions);
-
-        self.update_state(terminal_id, "active", None, None, None, None, None, None)
-            .await?;
-        self.publish_local_terminal_ready(terminal_id).await;
-        Ok(())
-    }
-
-    pub async fn ingest_hosted_output(
-        &self,
-        terminal_id: Uuid,
-        data_base64: &str,
-    ) -> anyhow::Result<()> {
-        let bytes = BASE64.decode(data_base64)?;
-        self.push_terminal_output(terminal_id, &bytes).await?;
-        Ok(())
-    }
-
-    pub async fn update_hosted_terminal_size(
-        &self,
-        terminal_id: Uuid,
-        cols: u16,
-        rows: u16,
-    ) -> anyhow::Result<()> {
-        info!(
-            terminal_id = %terminal_id,
-            cols,
-            rows,
-            "[TERMINAL_HISTORY_TRACE] hosted terminal reported system resize"
-        );
-        let geometry_update = {
-            let sessions = self.sessions.read().await;
-            let handle = sessions
-                .get(&terminal_id)
-                .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
-            let TerminalSessionEndpoint::Hosted { .. } = &handle.endpoint else {
-                anyhow::bail!("terminal session is not hosted");
-            };
-            let mut metadata = handle
-                .metadata
-                .lock()
-                .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?;
-            metadata.geometry.update_host_size(cols, rows)
-        };
-
-        self.update_state(
-            terminal_id,
-            "active",
-            None,
-            None,
-            None,
-            Some(cols.into()),
-            Some(rows.into()),
-            None,
-        )
-        .await?;
-        if let Some(update) = geometry_update {
-            self.apply_geometry_update(terminal_id, update).await?;
-        }
-        Ok(())
-    }
-
-    pub async fn complete_hosted_terminal(
-        &self,
-        terminal_id: Uuid,
-        error_message: Option<String>,
-    ) -> anyhow::Result<()> {
-        let reason = if let Some(message) = error_message {
-            TerminalCloseReason::Error(message)
-        } else {
-            TerminalCloseReason::Closed
-        };
-        self.close_session(terminal_id, reason, false).await
-    }
-
-    pub async fn hosted_terminal_disconnected(&self, terminal_id: Uuid) -> anyhow::Result<()> {
-        self.close_session(
-            terminal_id,
-            TerminalCloseReason::Error("hosted terminal connection dropped".to_string()),
-            false,
-        )
-        .await
+        self.close_session(terminal_id, TerminalCloseReason::Closed)
+            .await
     }
 
     pub async fn get_snapshot(&self, terminal_id: Uuid) -> Option<LocalTerminalSnapshot> {
@@ -943,13 +835,29 @@ impl TerminalManager {
             closed_at: metadata.closed_at,
             latest_output_sequence: replay.latest_sequence,
             history_truncated: replay.history_truncated,
+            viewers: LocalTerminalViewersSnapshot {
+                system_terminal_attached: metadata
+                    .geometry
+                    .viewer_attached(TerminalClientKind::SystemTerminal),
+                system_terminal_epoch: metadata
+                    .geometry
+                    .viewer_presence_epoch(TerminalClientKind::SystemTerminal),
+                desktop_app_attached: metadata
+                    .geometry
+                    .viewer_attached(TerminalClientKind::DesktopApp),
+                desktop_app_epoch: metadata
+                    .geometry
+                    .viewer_presence_epoch(TerminalClientKind::DesktopApp),
+            },
         })
     }
 
     pub async fn list_snapshots(&self) -> Vec<LocalTerminalSnapshot> {
         let sessions = self.sessions.read().await;
         let mut items = Vec::with_capacity(sessions.len());
+        let mut active_ids = HashMap::with_capacity(sessions.len());
         for (terminal_id, handle) in sessions.iter() {
+            active_ids.insert(*terminal_id, ());
             if let Ok(metadata) = handle.metadata.lock() {
                 let metadata = metadata.clone();
                 if metadata.state == "closed" {
@@ -977,8 +885,61 @@ impl TerminalManager {
                         .lock()
                         .map(|replay| replay.history_truncated)
                         .unwrap_or(false),
+                    viewers: LocalTerminalViewersSnapshot {
+                        system_terminal_attached: metadata
+                            .geometry
+                            .viewer_attached(TerminalClientKind::SystemTerminal),
+                        system_terminal_epoch: metadata
+                            .geometry
+                            .viewer_presence_epoch(TerminalClientKind::SystemTerminal),
+                        desktop_app_attached: metadata
+                            .geometry
+                            .viewer_attached(TerminalClientKind::DesktopApp),
+                        desktop_app_epoch: metadata
+                            .geometry
+                            .viewer_presence_epoch(TerminalClientKind::DesktopApp),
+                    },
                 });
             }
+        }
+        drop(sessions);
+        match persistence::load_runtime_records(&self.sirix_home) {
+            Ok(records) => {
+                for record in records {
+                    if active_ids.contains_key(&record.terminal_id) {
+                        continue;
+                    }
+                    if record.state == "closed" || record.closed_at.is_some() {
+                        continue;
+                    }
+                    let persisted_state = persisted_runtime_list_state(&record).to_string();
+                    items.push(LocalTerminalSnapshot {
+                        terminal_id: record.terminal_id,
+                        device_id: self.device_id.clone(),
+                        title: record.title,
+                        source: record.source,
+                        shell: record.shell,
+                        cwd: record.cwd,
+                        state: persisted_state,
+                        cols: i32::from(record.cols),
+                        rows: i32::from(record.rows),
+                        created_at: record.created_at,
+                        closed_at: record.closed_at,
+                        latest_output_sequence: 0,
+                        history_truncated: false,
+                        viewers: LocalTerminalViewersSnapshot {
+                            system_terminal_attached: false,
+                            system_terminal_epoch: 0,
+                            desktop_app_attached: false,
+                            desktop_app_epoch: 0,
+                        },
+                    });
+                }
+            }
+            Err(error) => warn!(
+                error = %error,
+                "[TERMINAL_RUNTIME_REGISTRY] failed to load persisted runtime records while listing snapshots"
+            ),
         }
         items.sort_by(|left, right| left.created_at.cmp(&right.created_at));
         items
@@ -992,6 +953,225 @@ impl TerminalManager {
         let handle = sessions.get(&terminal_id)?;
         let replay = handle.replay_buffer.lock().ok()?;
         replay.snapshot()
+    }
+
+    async fn persist_runtime_registry_entry(&self, terminal_id: Uuid) -> anyhow::Result<()> {
+        let sessions = self.sessions.read().await;
+        let handle = sessions
+            .get(&terminal_id)
+            .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
+        let metadata = handle
+            .metadata
+            .lock()
+            .map_err(|_| anyhow::anyhow!("terminal metadata poisoned"))?
+            .clone();
+        let record = TerminalRuntimeRecord {
+            terminal_id,
+            source: handle.endpoint.source().as_api_str().to_string(),
+            state: metadata.state,
+            title: metadata.title,
+            shell: metadata.shell,
+            cwd: metadata.cwd,
+            cols: metadata.geometry.cols(),
+            rows: metadata.geometry.rows(),
+            authority_source: metadata
+                .geometry
+                .authority_source()
+                .as_api_str()
+                .to_string(),
+            geometry_generation: metadata.geometry.geometry_generation(),
+            created_at: metadata.created_at,
+            closed_at: metadata.closed_at,
+            tmux_session_name: handle.tmux_session_name.clone(),
+            recovery_strategy: runtime_recovery_strategy(
+                handle.endpoint.source(),
+                handle.tmux_session_name.as_deref(),
+            )
+            .to_string(),
+        };
+        let path = persistence::persist_runtime_record(&self.sirix_home, &record)?;
+        info!(
+            terminal_id = %terminal_id,
+            path = %path.display(),
+            source = %record.source,
+            state = %record.state,
+            authority_source = %record.authority_source,
+            "[TERMINAL_RUNTIME_REGISTRY] persisted runtime registry entry"
+        );
+        Ok(())
+    }
+
+    fn remove_runtime_registry_entry(&self, terminal_id: Uuid) {
+        match persistence::remove_runtime_record(&self.sirix_home, terminal_id) {
+            Ok(()) => info!(
+                terminal_id = %terminal_id,
+                "[TERMINAL_RUNTIME_REGISTRY] removed runtime registry entry"
+            ),
+            Err(error) => warn!(
+                terminal_id = %terminal_id,
+                error = %error,
+                "[TERMINAL_RUNTIME_REGISTRY] failed to remove runtime registry entry"
+            ),
+        }
+    }
+
+    fn log_persisted_runtime_registry_backlog(&self) {
+        match persistence::load_runtime_records(&self.sirix_home) {
+            Ok(records) if records.is_empty() => {}
+            Ok(records) => {
+                warn!(
+                    count = records.len(),
+                    registry_root = %persistence::runtime_registry_root(&self.sirix_home).display(),
+                    "[TERMINAL_RUNTIME_REGISTRY] found persisted runtime records from a previous desktop-server lifecycle; tmux-backed runtimes can be reconciled automatically while other records are surfaced as restart-required"
+                );
+                for record in records {
+                    info!(
+                        terminal_id = %record.terminal_id,
+                        source = %record.source,
+                        state = %record.state,
+                        title = %record.title,
+                        cwd = %record.cwd,
+                        authority_source = %record.authority_source,
+                        tmux_session = record.tmux_session_name.as_deref().unwrap_or("-"),
+                        recovery_strategy = %record.recovery_strategy,
+                        created_at = %record.created_at,
+                        "[TERMINAL_RUNTIME_REGISTRY] pending persisted runtime record"
+                    );
+                }
+            }
+            Err(error) => warn!(
+                error = %error,
+                registry_root = %persistence::runtime_registry_root(&self.sirix_home).display(),
+                "[TERMINAL_RUNTIME_REGISTRY] failed to inspect persisted runtime registry on startup"
+            ),
+        }
+    }
+
+    pub async fn reconcile_persisted_runtimes(&self) {
+        let records = match persistence::load_runtime_records(&self.sirix_home) {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "[TERMINAL_RUNTIME_REGISTRY] failed to load persisted runtime records for reconcile"
+                );
+                return;
+            }
+        };
+
+        for record in records {
+            if let Err(error) = self.reconcile_persisted_runtime_record(record).await {
+                warn!(
+                    error = %error,
+                    "[TERMINAL_RUNTIME_REGISTRY] persisted runtime reconcile attempt failed"
+                );
+            }
+        }
+    }
+
+    async fn reconcile_persisted_runtime_record(
+        &self,
+        record: TerminalRuntimeRecord,
+    ) -> anyhow::Result<()> {
+        if record.state == "closed" || record.closed_at.is_some() {
+            info!(
+                terminal_id = %record.terminal_id,
+                state = %record.state,
+                "[TERMINAL_RUNTIME_REGISTRY] skip reconcile for closed runtime record"
+            );
+            return Ok(());
+        }
+        if record.source != TerminalSessionSource::LocalPty.as_api_str() {
+            info!(
+                terminal_id = %record.terminal_id,
+                source = %record.source,
+                recovery_strategy = %record.recovery_strategy,
+                "[TERMINAL_RUNTIME_REGISTRY] skip reconcile for unsupported persisted runtime source"
+            );
+            return Ok(());
+        }
+        if record.recovery_strategy != "tmux_takeover" {
+            warn!(
+                terminal_id = %record.terminal_id,
+                source = %record.source,
+                recovery_strategy = %record.recovery_strategy,
+                "[TERMINAL_RUNTIME_REGISTRY] persisted runtime requires manual restart; automatic takeover is only implemented for tmux-backed runtimes"
+            );
+            return Ok(());
+        }
+        let Some(tmux_session_name) = record.tmux_session_name.clone() else {
+            warn!(
+                terminal_id = %record.terminal_id,
+                source = %record.source,
+                recovery_strategy = %record.recovery_strategy,
+                "[TERMINAL_RUNTIME_REGISTRY] local PTY record is marked for tmux takeover but has no tmux session name"
+            );
+            return Ok(());
+        };
+        if self.sessions.read().await.contains_key(&record.terminal_id) {
+            info!(
+                terminal_id = %record.terminal_id,
+                "[TERMINAL_RUNTIME_REGISTRY] runtime already active in memory; skipping persisted reconcile"
+            );
+            return Ok(());
+        }
+        if !tmux_session_exists(tmux_session_name.as_str()) {
+            warn!(
+                terminal_id = %record.terminal_id,
+                tmux_session = %tmux_session_name,
+                "[TERMINAL_RUNTIME_REGISTRY] persisted tmux runtime record cannot be reconciled because tmux session no longer exists"
+            );
+            return Ok(());
+        }
+
+        let shell = if record.shell.trim().is_empty() || record.shell == "default" {
+            resolve_shell(None)
+        } else {
+            resolve_shell(Some(record.shell.as_str()))
+        };
+        let mut builder = CommandBuilder::new("tmux");
+        builder.arg("-u");
+        builder.arg("new-session");
+        builder.arg("-A");
+        builder.arg("-s");
+        builder.arg(tmux_session_name.as_str());
+        if !record.cwd.trim().is_empty() {
+            builder.arg("-c");
+            builder.arg(record.cwd.as_str());
+        }
+        builder.arg(shell.as_str());
+        self.apply_sirix_env(&mut builder, Some(record.terminal_id))?;
+        builder.env("SIRIX_TERMINAL_TMUX_SESSION", tmux_session_name.as_str());
+        builder.env("TERM", preferred_tmux_client_term());
+        if let Some(resolved_cwd) = resolve_cwd(record.cwd.as_str()) {
+            builder.cwd(resolved_cwd);
+        }
+
+        info!(
+            terminal_id = %record.terminal_id,
+            tmux_session = %tmux_session_name,
+            cwd = %record.cwd,
+            shell = %shell,
+            cols = record.cols,
+            rows = record.rows,
+            "[TERMINAL_RUNTIME_REGISTRY] reconciling persisted tmux-backed runtime by reattaching desktop-server to existing tmux session"
+        );
+
+        self.create_process_terminal(
+            record.terminal_id,
+            builder,
+            record.title.clone(),
+            record.shell,
+            record.cwd,
+            record.cols.max(20),
+            record.rows.max(10),
+            false,
+            None,
+            None,
+            None,
+            Some(tmux_session_name),
+        )
+        .await
     }
 
     pub async fn bootstrap_v2(
@@ -1035,33 +1215,11 @@ impl TerminalManager {
             .sync_state
             .lock()
             .map_err(|_| anyhow::anyhow!("terminal sync state poisoned"))?;
-        let mut messages = sync_state
+        let messages = sync_state
             .bootstrap_events(ready)
             .into_iter()
             .map(TerminalOutboundEvent::into_message)
             .collect::<Vec<_>>();
-
-        if let Ok(replay) = handle.replay_buffer.lock() {
-            if let Some(snapshot) = replay.snapshot() {
-                // V2 bootstrap 之前只下发 authority screen snapshot，Flutter 端首次 attach
-                // 到共享终端时只能拿到“当前屏幕”的 76 行左右内容，后续 resize 即使
-                // 不再 replace，也只剩这一小段本地 scrollback 可供 reflow，表现为
-                // 一拖动窗口历史消息就像丢失。这里把完整 replay snapshot 追加到
-                // bootstrap 末尾，让客户端先拿到 authority 元数据，再用原始输出流
-                // 重建完整本地 scrollback，后续 resize 才有足够历史可保留。
-                if !snapshot.history_truncated {
-                    messages.push(serde_json::json!({
-                        "type": "terminal.snapshot",
-                        "payload": {
-                            "terminal_id": terminal_id,
-                            "data_base64": BASE64.encode(&snapshot.bytes),
-                            "stream_sequence": snapshot.latest_sequence,
-                            "history_truncated": false,
-                        }
-                    }));
-                }
-            }
-        }
 
         Ok(messages)
     }
@@ -1113,6 +1271,30 @@ impl TerminalManager {
         if !self.is_remote_sync(terminal_id).await {
             return Ok(());
         }
+        self.force_update_state(
+            terminal_id,
+            state,
+            title,
+            shell,
+            cwd,
+            cols,
+            rows,
+            error_message,
+        )
+        .await
+    }
+
+    pub async fn force_update_state(
+        &self,
+        terminal_id: Uuid,
+        state: &str,
+        title: Option<String>,
+        shell: Option<String>,
+        cwd: Option<String>,
+        cols: Option<i32>,
+        rows: Option<i32>,
+        error_message: Option<String>,
+    ) -> anyhow::Result<()> {
         let url = format!(
             "{}/api/v1/desktop/terminals/{}/state",
             self.backend_base_url, terminal_id
@@ -1268,6 +1450,7 @@ impl TerminalManager {
         remote_title: Option<String>,
         remote_shell: Option<String>,
         remote_cwd: Option<String>,
+        tmux_session_name: Option<String>,
     ) -> anyhow::Result<()> {
         let system = native_pty_system();
         let pair = system.openpty(PtySize {
@@ -1278,6 +1461,16 @@ impl TerminalManager {
         })?;
 
         let child = pair.slave.spawn_command(builder)?;
+        if let Some(tmux_session_name) = tmux_session_name.as_deref() {
+            if let Err(error) = apply_tmux_session_defaults(tmux_session_name) {
+                warn!(
+                    terminal_id = %terminal_id,
+                    session = tmux_session_name,
+                    error = %error,
+                    "[TERMINAL_TMUX_TRACE] failed to apply tmux session defaults after spawn"
+                );
+            }
+        }
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
         let master = Arc::new(Mutex::new(pair.master));
@@ -1308,26 +1501,45 @@ impl TerminalManager {
                 sync_state: sync_state.clone(),
                 last_resize_publish: Arc::new(Mutex::new(None)),
                 remote_sync,
+                tmux_session_name,
             },
         );
 
-        self.update_state(
-            terminal_id,
-            "active",
-            remote_title.or_else(|| Some(title.clone())),
-            remote_shell.or_else(|| Some(shell.clone())),
-            remote_cwd.or_else(|| Some(cwd.clone())),
-            Some(cols.into()),
-            Some(rows.into()),
-            None,
-        )
-        .await?;
+        if let Err(error) = self
+            .update_state(
+                terminal_id,
+                "active",
+                remote_title.or_else(|| Some(title.clone())),
+                remote_shell.or_else(|| Some(shell.clone())),
+                remote_cwd.or_else(|| Some(cwd.clone())),
+                Some(cols.into()),
+                Some(rows.into()),
+                None,
+            )
+            .await
+        {
+            // 这里一旦 remote sync 失败，说明“本地 runtime 已经拉起，但外部世界
+            // 还不知道它存在”。继续保留 child/tmux 只会泄漏一个不可达 shell。
+            if let Some(handle) = self.sessions.write().await.remove(&terminal_id) {
+                let TerminalSessionEndpoint::LocalPty { child, .. } = handle.endpoint;
+                if let Ok(mut child) = child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                if let Some(tmux_session_name) = handle.tmux_session_name.as_deref() {
+                    cleanup_tmux_session(tmux_session_name);
+                }
+            }
+            return Err(error);
+        }
 
         let output_context = TerminalOutputContext {
             client: self.client.clone(),
             backend_base_url: self.backend_base_url.clone(),
             device_id: self.device_id.clone(),
             local_events: self.local_events.clone(),
+            sessions: self.sessions.clone(),
+            sirix_home: self.sirix_home.clone(),
             terminal_id,
             replay_buffer: replay_buffer.clone(),
             sync_state: sync_state.clone(),
@@ -1338,6 +1550,13 @@ impl TerminalManager {
             stream_terminal_output(reader, output_context, metadata, runtime_handle);
         });
 
+        if let Err(error) = self.persist_runtime_registry_entry(terminal_id).await {
+            warn!(
+                terminal_id = %terminal_id,
+                error = %error,
+                "[TERMINAL_RUNTIME_REGISTRY] failed to persist local runtime registry entry"
+            );
+        }
         self.publish_local_terminal_ready(terminal_id).await;
         Ok(())
     }
@@ -1346,11 +1565,11 @@ impl TerminalManager {
         &self,
         terminal_id: Uuid,
         reason: TerminalCloseReason,
-        notify_host: bool,
     ) -> anyhow::Result<()> {
         let Some(handle) = self.sessions.write().await.remove(&terminal_id) else {
             return Ok(());
         };
+        self.remove_runtime_registry_entry(terminal_id);
         let event_type = match &reason {
             TerminalCloseReason::Closed => "terminal.closed",
             TerminalCloseReason::Error(_) => "terminal.error",
@@ -1359,6 +1578,7 @@ impl TerminalManager {
             TerminalCloseReason::Closed => None,
             TerminalCloseReason::Error(message) => Some(message.clone()),
         };
+        let tmux_session_name = handle.tmux_session_name.clone();
 
         if let Ok(mut metadata) = handle.metadata.lock() {
             metadata.state = if error_message.is_some() {
@@ -1375,33 +1595,37 @@ impl TerminalManager {
                     let _ = child.kill();
                     let _ = child.wait();
                 }
-            }
-            TerminalSessionEndpoint::Hosted { control_sender, .. } => {
-                if notify_host {
-                    if let Ok(guard) = control_sender.lock() {
-                        if let Some(sender) = guard.as_ref() {
-                            let _ = sender.send(HostedTerminalCommand::Close { terminal_id });
-                        }
-                    }
+                if let Some(tmux_session_name) = tmux_session_name.as_deref() {
+                    cleanup_tmux_session(tmux_session_name);
                 }
             }
         }
 
-        self.update_state(
-            terminal_id,
-            if error_message.is_some() {
-                "error"
-            } else {
-                "closed"
-            },
-            None,
-            None,
-            None,
-            None,
-            None,
-            error_message.clone(),
-        )
-        .await?;
+        if handle.remote_sync {
+            if let Err(error) = self
+                .force_update_state(
+                    terminal_id,
+                    if error_message.is_some() {
+                        "error"
+                    } else {
+                        "closed"
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    error_message.clone(),
+                )
+                .await
+            {
+                warn!(
+                    terminal_id = %terminal_id,
+                    error = %error,
+                    "terminal close remote state sync failed"
+                );
+            }
+        }
         self.publish_local_terminal_event(
             event_type,
             match error_message {
@@ -1425,6 +1649,8 @@ impl TerminalManager {
             backend_base_url: self.backend_base_url.clone(),
             device_id: self.device_id.clone(),
             local_events: self.local_events.clone(),
+            sessions: self.sessions.clone(),
+            sirix_home: self.sirix_home.clone(),
             terminal_id,
             replay_buffer: handle.replay_buffer.clone(),
             sync_state: handle.sync_state.clone(),
@@ -1530,17 +1756,6 @@ fn stream_terminal_output(
                 if pending.len() >= TERMINAL_OUTPUT_MAX_BATCH_BYTES {
                     if let Err(error) = flush_terminal_output(&context, &mut pending, &runtime) {
                         warn!(terminal_id = %context.terminal_id, error = %error, "terminal output upload failed");
-                        if context.remote_sync {
-                            let _ = update_terminal_remote_state(
-                                &context.client,
-                                &context.backend_base_url,
-                                &context.device_id,
-                                context.terminal_id,
-                                "error",
-                                Some(error.to_string()),
-                                &runtime,
-                            );
-                        }
                         break;
                     }
                 }
@@ -1573,6 +1788,7 @@ fn stream_terminal_output(
                     })
                     .to_string(),
                 );
+                cleanup_finished_local_terminal_session(&context, &runtime);
                 break;
             }
             Ok(Err(error)) => {
@@ -1601,31 +1817,51 @@ fn stream_terminal_output(
                     })
                     .to_string(),
                 );
+                cleanup_finished_local_terminal_session(&context, &runtime);
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if let Err(error) = flush_terminal_output(&context, &mut pending, &runtime) {
                     warn!(terminal_id = %context.terminal_id, error = %error, "terminal output upload failed");
-                    if context.remote_sync {
-                        let _ = update_terminal_remote_state(
-                            &context.client,
-                            &context.backend_base_url,
-                            &context.device_id,
-                            context.terminal_id,
-                            "error",
-                            Some(error.to_string()),
-                            &runtime,
-                        );
-                    }
                     break;
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = flush_terminal_output(&context, &mut pending, &runtime);
+                cleanup_finished_local_terminal_session(&context, &runtime);
                 break;
             }
         }
     }
+}
+
+fn cleanup_finished_local_terminal_session(
+    context: &TerminalOutputContext,
+    runtime: &tokio::runtime::Handle,
+) {
+    let sessions = context.sessions.clone();
+    let sirix_home = context.sirix_home.clone();
+    let terminal_id = context.terminal_id;
+    runtime.block_on(async move {
+        let Some(handle) = sessions.write().await.remove(&terminal_id) else {
+            return;
+        };
+        let TerminalSessionEndpoint::LocalPty { child, .. } = handle.endpoint;
+        if let Ok(mut child) = child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(tmux_session_name) = handle.tmux_session_name.as_deref() {
+            cleanup_tmux_session(tmux_session_name);
+        }
+        if let Err(error) = persistence::remove_runtime_record(&sirix_home, terminal_id) {
+            warn!(
+                terminal_id = %terminal_id,
+                error = %error,
+                "[TERMINAL_RUNTIME_REGISTRY] failed to remove runtime registry entry after local PTY exit"
+            );
+        }
+    });
 }
 
 fn flush_terminal_output(
@@ -1667,14 +1903,19 @@ fn flush_terminal_output(
         let payload = event.into_message();
         let _ = context.local_events.send(payload.to_string());
         if context.remote_sync {
-            push_remote_terminal_event(
+            if let Err(error) = push_remote_terminal_event(
                 &context.client,
                 &context.backend_base_url,
                 &context.device_id,
                 context.terminal_id,
                 payload.clone(),
                 runtime,
-            )?;
+            ) {
+                report_non_fatal_terminal_mirror_error(
+                    context,
+                    format!("event relay failed error={error}"),
+                );
+            }
         }
     }
 
@@ -1682,7 +1923,7 @@ fn flush_terminal_output(
         return Ok(());
     }
 
-    runtime.block_on(async {
+    if let Err(error) = runtime.block_on(async {
         let url = format!(
             "{}/api/v1/desktop/terminals/{}/output",
             context.backend_base_url, context.terminal_id
@@ -1700,7 +1941,13 @@ fn flush_terminal_output(
             .await?
             .error_for_status()?;
         anyhow::Ok(())
-    })
+    }) {
+        report_non_fatal_terminal_mirror_error(
+            context,
+            format!("output relay failed error={error}"),
+        );
+    }
+    Ok(())
 }
 
 async fn push_terminal_output_chunk(
@@ -1739,7 +1986,7 @@ async fn push_terminal_output_chunk(
                 "{}/api/v1/desktop/terminals/{}/events",
                 context.backend_base_url, context.terminal_id
             );
-            context
+            let response = context
                 .client
                 .post(url)
                 .json(&json!({
@@ -1747,8 +1994,13 @@ async fn push_terminal_output_chunk(
                     "event": payload,
                 }))
                 .send()
-                .await?
-                .error_for_status()?;
+                .await;
+            if let Err(error) = response.and_then(|response| response.error_for_status()) {
+                report_non_fatal_terminal_mirror_error(
+                    context,
+                    format!("event relay failed error={error}"),
+                );
+            }
         }
     }
 
@@ -1760,7 +2012,7 @@ async fn push_terminal_output_chunk(
         "{}/api/v1/desktop/terminals/{}/output",
         context.backend_base_url, context.terminal_id
     );
-    context
+    let response = context
         .client
         .post(url)
         .json(&json!({
@@ -1770,9 +2022,24 @@ async fn push_terminal_output_chunk(
             "timestamp": Utc::now(),
         }))
         .send()
-        .await?
-        .error_for_status()?;
+        .await;
+    if let Err(error) = response.and_then(|response| response.error_for_status()) {
+        report_non_fatal_terminal_mirror_error(
+            context,
+            format!("output relay failed error={error}"),
+        );
+    }
     Ok(())
+}
+
+fn report_non_fatal_terminal_mirror_error(context: &TerminalOutputContext, detail: String) {
+    // server-owned local PTY 的稳定性优先于 backend 镜像链路；
+    // mirror 失败时只告警、不杀死本地 shell。
+    warn!(
+        terminal_id = %context.terminal_id,
+        detail = %detail,
+        "[TERMINAL_MIRROR_TRACE] keep local terminal alive after mirror failure"
+    );
 }
 
 fn update_terminal_remote_state(
@@ -1827,6 +2094,62 @@ fn push_remote_terminal_event(
             .error_for_status()?;
         anyhow::Ok(())
     })
+}
+
+fn runtime_recovery_strategy(
+    source: TerminalSessionSource,
+    tmux_session_name: Option<&str>,
+) -> &'static str {
+    match source {
+        TerminalSessionSource::LocalPty if tmux_session_name.is_some() => "tmux_takeover",
+        TerminalSessionSource::LocalPty if cfg!(windows) => "windows_conpty_restart_required",
+        TerminalSessionSource::LocalPty => "process_bound_ephemeral",
+    }
+}
+
+fn persisted_runtime_list_state(record: &TerminalRuntimeRecord) -> &'static str {
+    match record.recovery_strategy.as_str() {
+        "tmux_takeover" => "recovering",
+        "windows_conpty_restart_required" | "process_bound_ephemeral" | "unknown" => {
+            "restart_required"
+        }
+        _ => "restart_required",
+    }
+}
+
+fn cleanup_tmux_session(session_name: &str) {
+    if cfg!(windows) {
+        return;
+    }
+
+    let result = Command::new("tmux")
+        .arg("kill-session")
+        .arg("-t")
+        .arg(session_name)
+        .output();
+    match result {
+        Ok(output) if output.status.success() => {
+            info!(
+                session = session_name,
+                "[TERMINAL_TMUX_TRACE] cleaned up tmux session after terminal close"
+            );
+        }
+        Ok(output) => {
+            warn!(
+                session = session_name,
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "[TERMINAL_TMUX_TRACE] tmux session cleanup returned non-zero status"
+            );
+        }
+        Err(error) => {
+            warn!(
+                session = session_name,
+                error = %error,
+                "[TERMINAL_TMUX_TRACE] failed to cleanup tmux session"
+            );
+        }
+    }
 }
 
 fn resolve_shell(requested: Option<&str>) -> String {
@@ -1930,15 +2253,25 @@ fn executable_in_path(name: &str) -> bool {
     env::split_paths(&path).any(|directory| directory.join(name).is_file())
 }
 
+fn tmux_session_exists(session_name: &str) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+
+    Command::new("tmux")
+        .arg("has-session")
+        .arg("-t")
+        .arg(session_name)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use serde_json::Value;
-    use tokio::{
-        sync::{broadcast, mpsc::unbounded_channel},
-        time::{timeout, Duration as TokioDuration},
-    };
+    use tokio::sync::broadcast;
 
     fn test_manager(events: broadcast::Sender<String>) -> TerminalManager {
         TerminalManager::new(
@@ -1949,224 +2282,6 @@ mod tests {
         )
     }
 
-    async fn next_event(receiver: &mut broadcast::Receiver<String>) -> Value {
-        let payload = timeout(TokioDuration::from_secs(1), receiver.recv())
-            .await
-            .expect("event should arrive before timeout")
-            .expect("broadcast receive should succeed");
-        serde_json::from_str(&payload).expect("event payload should be valid json")
-    }
-
-    async fn next_event_of_type(
-        receiver: &mut broadcast::Receiver<String>,
-        event_type: &str,
-    ) -> Value {
-        loop {
-            let event = next_event(receiver).await;
-            if event["type"] == event_type {
-                return event;
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn hosted_terminal_relays_input_resize_and_close() {
-        let (events, _) = broadcast::channel(16);
-        let mut event_receiver = events.subscribe();
-        let manager = test_manager(events);
-        let terminal_id = Uuid::new_v4();
-
-        let session = manager
-            .create_hosted_terminal(
-                terminal_id,
-                "/bin/zsh".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
-                120,
-                32,
-                false,
-            )
-            .await
-            .expect("hosted terminal should be created");
-
-        let opening_event = next_event(&mut event_receiver).await;
-        assert_eq!(opening_event["type"], "terminal.ready");
-        assert_eq!(
-            opening_event["payload"]["terminal_id"],
-            terminal_id.to_string()
-        );
-        assert_eq!(
-            opening_event["payload"]["source"],
-            TerminalSessionSource::Hosted.as_api_str()
-        );
-        assert_eq!(opening_event["payload"]["state"], "opening");
-
-        let snapshot = manager
-            .get_snapshot(terminal_id)
-            .await
-            .expect("opening snapshot should exist");
-        assert_eq!(snapshot.source, TerminalSessionSource::Hosted.as_api_str());
-        assert_eq!(
-            manager.session_source(terminal_id).await,
-            Some(TerminalSessionSource::Hosted)
-        );
-        assert_eq!(snapshot.state, "opening");
-
-        let (command_sender, mut command_receiver) = unbounded_channel();
-        manager
-            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
-            .await
-            .expect("host should register");
-
-        let active_event = next_event(&mut event_receiver).await;
-        assert_eq!(active_event["type"], "terminal.ready");
-        assert_eq!(active_event["payload"]["state"], "active");
-
-        manager
-            .write_input(terminal_id, &BASE64.encode("ls\n"))
-            .await
-            .expect("input should relay to host");
-        let HostedTerminalCommand::Input {
-            terminal_id: input_terminal_id,
-            data_base64,
-        } = command_receiver
-            .recv()
-            .await
-            .expect("input command should exist")
-        else {
-            panic!("expected input command");
-        };
-        assert_eq!(input_terminal_id, terminal_id);
-        assert_eq!(
-            BASE64
-                .decode(data_base64)
-                .expect("input payload should decode"),
-            b"ls\n"
-        );
-
-        manager
-            .resize(terminal_id, 140, 40)
-            .await
-            .expect("resize should relay to host");
-        let HostedTerminalCommand::Resize {
-            terminal_id: resize_terminal_id,
-            cols,
-            rows,
-        } = command_receiver
-            .recv()
-            .await
-            .expect("resize command should exist")
-        else {
-            panic!("expected resize command");
-        };
-        assert_eq!(resize_terminal_id, terminal_id);
-        assert_eq!((cols, rows), (140, 40));
-
-        let resized_snapshot = manager
-            .get_snapshot(terminal_id)
-            .await
-            .expect("resized snapshot should exist");
-        assert_eq!((resized_snapshot.cols, resized_snapshot.rows), (140, 40));
-
-        manager
-            .close(terminal_id)
-            .await
-            .expect("close should succeed");
-        let HostedTerminalCommand::Close {
-            terminal_id: close_terminal_id,
-        } = command_receiver
-            .recv()
-            .await
-            .expect("close command should exist")
-        else {
-            panic!("expected close command");
-        };
-        assert_eq!(close_terminal_id, terminal_id);
-
-        let closed_event = next_event_of_type(&mut event_receiver, "terminal.closed").await;
-        assert_eq!(closed_event["type"], "terminal.closed");
-        assert_eq!(
-            closed_event["payload"]["terminal_id"],
-            terminal_id.to_string()
-        );
-        assert!(manager.get_snapshot(terminal_id).await.is_none());
-    }
-
-    #[tokio::test]
-    async fn hosted_terminal_rejects_invalid_registration_token() {
-        let (events, _) = broadcast::channel(8);
-        let manager = test_manager(events);
-        let terminal_id = Uuid::new_v4();
-
-        manager
-            .create_hosted_terminal(
-                terminal_id,
-                "shell".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
-                120,
-                32,
-                false,
-            )
-            .await
-            .expect("hosted terminal should be created");
-
-        let (command_sender, _) = unbounded_channel();
-        let error = manager
-            .register_hosted_terminal(terminal_id, "wrong-token", command_sender)
-            .await
-            .expect_err("registration should fail");
-        assert!(error
-            .to_string()
-            .contains("invalid hosted terminal registration token"));
-    }
-
-    #[tokio::test]
-    async fn hosted_terminal_disconnect_emits_error_event() {
-        let (events, _) = broadcast::channel(16);
-        let mut event_receiver = events.subscribe();
-        let manager = test_manager(events);
-        let terminal_id = Uuid::new_v4();
-
-        let session = manager
-            .create_hosted_terminal(
-                terminal_id,
-                "shell".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
-                120,
-                32,
-                false,
-            )
-            .await
-            .expect("hosted terminal should be created");
-        let _ = next_event(&mut event_receiver).await;
-
-        let (command_sender, _) = unbounded_channel();
-        manager
-            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
-            .await
-            .expect("registration should succeed");
-        let _ = next_event(&mut event_receiver).await;
-
-        manager
-            .hosted_terminal_disconnected(terminal_id)
-            .await
-            .expect("disconnect cleanup should succeed");
-
-        let error_event = next_event(&mut event_receiver).await;
-        assert_eq!(error_event["type"], "terminal.error");
-        assert_eq!(
-            error_event["payload"]["terminal_id"],
-            terminal_id.to_string()
-        );
-        assert_eq!(
-            error_event["payload"]["error_message"],
-            "hosted terminal connection dropped"
-        );
-        assert!(manager.get_snapshot(terminal_id).await.is_none());
-    }
-
     #[tokio::test]
     async fn bootstrap_v2_includes_socket_local_viewer_presence_epoch() {
         let (events, _) = broadcast::channel(8);
@@ -2174,17 +2289,18 @@ mod tests {
         let terminal_id = Uuid::new_v4();
 
         manager
-            .create_hosted_terminal(
+            .create_terminal(
                 terminal_id,
-                "shell".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
+                Some(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_string()),
+                Some(std::env::temp_dir().display().to_string()),
+                Some("Sirix Terminal".to_string()),
                 120,
                 32,
                 false,
+                false,
             )
             .await
-            .expect("hosted terminal should be created");
+            .expect("local terminal should be created");
 
         let messages = manager
             .bootstrap_v2(terminal_id, Some(7))
@@ -2196,6 +2312,11 @@ mod tests {
             .expect("bootstrap should contain terminal.ready");
 
         assert_eq!(ready["payload"]["viewer_presence_epoch"], 7);
+
+        manager
+            .close(terminal_id)
+            .await
+            .expect("test runtime should close cleanly");
     }
 
     #[tokio::test]
@@ -2204,30 +2325,30 @@ mod tests {
         let manager = test_manager(events);
         let terminal_id = Uuid::new_v4();
 
-        let session = manager
-            .create_hosted_terminal(
+        manager
+            .create_terminal(
                 terminal_id,
-                "shell".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
+                Some(if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.to_string()),
+                Some(std::env::temp_dir().display().to_string()),
+                Some("Sirix Terminal".to_string()),
                 120,
                 32,
                 false,
+                false,
             )
             .await
-            .expect("hosted terminal should be created");
-        let (command_sender, _) = unbounded_channel();
+            .expect("local terminal should be created");
         manager
-            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
-            .await
-            .expect("host should register");
-        manager
-            .ingest_hosted_output(
+            .push_terminal_output(
                 terminal_id,
-                &BASE64.encode("alpha\r\nbeta\r\ngamma\r\ndelta\r\n"),
+                b"alpha
+beta
+gamma
+delta
+",
             )
             .await
-            .expect("hosted output should ingest");
+            .expect("local PTY output should be ingested");
 
         let messages = manager
             .bootstrap_v2(terminal_id, Some(9))
@@ -2243,85 +2364,160 @@ mod tests {
 
         assert_eq!(preview["payload"]["reason"], "bootstrap");
         assert!(!lines.is_empty());
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["type"] != "terminal.snapshot"),
+            "v2 bootstrap should no longer append raw terminal.snapshot frames"
+        );
+
+        manager
+            .close(terminal_id)
+            .await
+            .expect("test runtime should close cleanly");
     }
 
     #[tokio::test]
-    async fn desktop_viewer_resize_is_ignored_while_hosted_terminal_has_system_authority() {
-        let (events, _) = broadcast::channel(16);
-        let manager = test_manager(events);
+    async fn list_snapshots_includes_recovering_persisted_runtime_records() {
+        let (events, _) = broadcast::channel(8);
+        let sirix_home =
+            std::env::temp_dir().join(format!("sirix-terminal-recovering-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sirix_home).expect("sirix home should exist");
+        let manager = TerminalManager::new(
+            "http://127.0.0.1:0".to_string(),
+            Uuid::new_v4().to_string(),
+            events,
+            sirix_home.clone(),
+        );
         let terminal_id = Uuid::new_v4();
-
-        let session = manager
-            .create_hosted_terminal(
+        persistence::persist_runtime_record(
+            &sirix_home,
+            &TerminalRuntimeRecord {
                 terminal_id,
-                "shell".to_string(),
-                "/tmp".to_string(),
-                "Sirix Terminal".to_string(),
-                120,
-                32,
-                false,
-            )
-            .await
-            .expect("hosted terminal should be created");
+                source: TerminalSessionSource::LocalPty.as_api_str().to_string(),
+                state: "active".to_string(),
+                title: "Recovered".to_string(),
+                shell: "/bin/zsh".to_string(),
+                cwd: "/tmp".to_string(),
+                cols: 120,
+                rows: 32,
+                authority_source: "system_terminal".to_string(),
+                geometry_generation: 3,
+                created_at: Utc::now(),
+                closed_at: None,
+                tmux_session_name: Some("sirix-test-recovering".to_string()),
+                recovery_strategy: "tmux_takeover".to_string(),
+            },
+        )
+        .expect("runtime record should persist");
 
-        let (command_sender, mut command_receiver) = unbounded_channel();
-        manager
-            .register_hosted_terminal(terminal_id, &session.host_token, command_sender)
-            .await
-            .expect("host should register");
+        let snapshots = manager.list_snapshots().await;
+        let recovering = snapshots
+            .iter()
+            .find(|snapshot| snapshot.terminal_id == terminal_id)
+            .expect("persisted runtime should surface in terminal list");
+        assert_eq!(recovering.state, "recovering");
+        assert_eq!(recovering.title, "Recovered");
+        assert_eq!(recovering.source, "local_pty");
+        assert!(!recovering.viewers.system_terminal_attached);
+        assert!(!recovering.viewers.desktop_app_attached);
 
-        let epoch = manager
-            .register_viewer(terminal_id, TerminalClientKind::DesktopApp)
-            .await
-            .expect("viewer should register");
-        assert!(epoch > 0);
+        let _ = std::fs::remove_dir_all(&sirix_home);
+    }
 
-        manager
-            .resize_from_client_if_epoch(
+    #[tokio::test]
+    async fn close_removes_stale_persisted_runtime_record_without_live_session() {
+        let (events, _) = broadcast::channel(8);
+        let sirix_home =
+            std::env::temp_dir().join(format!("sirix-terminal-stale-close-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&sirix_home).expect("sirix home should exist");
+        let manager = TerminalManager::new(
+            "http://127.0.0.1:0".to_string(),
+            Uuid::new_v4().to_string(),
+            events,
+            sirix_home.clone(),
+        );
+        let terminal_id = Uuid::new_v4();
+        persistence::persist_runtime_record(
+            &sirix_home,
+            &TerminalRuntimeRecord {
                 terminal_id,
-                140,
-                40,
-                TerminalClientKind::DesktopApp,
-                Some(epoch.saturating_sub(1)),
-            )
-            .await
-            .expect("stale resize should be ignored without error");
+                source: TerminalSessionSource::LocalPty.as_api_str().to_string(),
+                state: "active".to_string(),
+                title: "Stale".to_string(),
+                shell: "/bin/zsh".to_string(),
+                cwd: "/tmp".to_string(),
+                cols: 120,
+                rows: 32,
+                authority_source: "system_terminal".to_string(),
+                geometry_generation: 1,
+                created_at: Utc::now(),
+                closed_at: None,
+                tmux_session_name: Some("sirix-test-stale".to_string()),
+                recovery_strategy: "tmux_takeover".to_string(),
+            },
+        )
+        .expect("runtime record should persist");
 
+        manager
+            .close(terminal_id)
+            .await
+            .expect("closing a stale persisted runtime should succeed");
+
+        let loaded = persistence::load_runtime_record(&sirix_home, terminal_id)
+            .expect("runtime record lookup should succeed");
         assert!(
-            timeout(TokioDuration::from_millis(100), command_receiver.recv())
-                .await
-                .is_err(),
-            "stale resize must not forward resize command"
+            loaded.is_none(),
+            "stale persisted runtime record should be removed by close()"
         );
 
-        let snapshot = manager
-            .get_snapshot(terminal_id)
-            .await
-            .expect("snapshot should exist");
-        assert_eq!((snapshot.cols, snapshot.rows), (120, 32));
+        let _ = std::fs::remove_dir_all(&sirix_home);
+    }
 
-        manager
-            .resize_from_client_if_epoch(
-                terminal_id,
-                140,
-                40,
-                TerminalClientKind::DesktopApp,
-                Some(epoch),
-            )
-            .await
-            .expect("current resize should succeed");
-
-        assert!(
-            timeout(TokioDuration::from_millis(100), command_receiver.recv())
-                .await
-                .is_err(),
-            "desktop viewer resize must not override the hosted system terminal authority"
+    #[tokio::test]
+    async fn list_snapshots_marks_non_recoverable_persisted_runtime_as_restart_required() {
+        let (events, _) = broadcast::channel(8);
+        let sirix_home = std::env::temp_dir().join(format!(
+            "sirix-terminal-restart-required-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&sirix_home).expect("sirix home should exist");
+        let manager = TerminalManager::new(
+            "http://127.0.0.1:0".to_string(),
+            Uuid::new_v4().to_string(),
+            events,
+            sirix_home.clone(),
         );
-        let snapshot = manager
-            .get_snapshot(terminal_id)
-            .await
-            .expect("snapshot should continue using hosted size");
-        assert_eq!((snapshot.cols, snapshot.rows), (120, 32));
+        let terminal_id = Uuid::new_v4();
+        persistence::persist_runtime_record(
+            &sirix_home,
+            &TerminalRuntimeRecord {
+                terminal_id,
+                source: TerminalSessionSource::LocalPty.as_api_str().to_string(),
+                state: "active".to_string(),
+                title: "Restart Required".to_string(),
+                shell: "/bin/zsh".to_string(),
+                cwd: "/tmp".to_string(),
+                cols: 100,
+                rows: 30,
+                authority_source: "server_default".to_string(),
+                geometry_generation: 0,
+                created_at: Utc::now(),
+                closed_at: None,
+                tmux_session_name: None,
+                recovery_strategy: "process_bound_ephemeral".to_string(),
+            },
+        )
+        .expect("runtime record should persist");
+
+        let snapshots = manager.list_snapshots().await;
+        let restart_required = snapshots
+            .iter()
+            .find(|snapshot| snapshot.terminal_id == terminal_id)
+            .expect("persisted runtime should surface in terminal list");
+        assert_eq!(restart_required.state, "restart_required");
+
+        let _ = std::fs::remove_dir_all(&sirix_home);
     }
 
     #[test]

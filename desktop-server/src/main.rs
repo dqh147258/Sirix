@@ -2,6 +2,8 @@ mod api;
 mod app;
 mod bootstrap;
 mod scene;
+mod shared_terminal_protocol;
+mod terminal_launch;
 
 use std::net::SocketAddr;
 
@@ -58,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
                 .warn(format!("failed to restore desktop auth session: {error}"));
         }
     }
+    state.terminal_manager.reconcile_persisted_runtimes().await;
     spawn_background_tasks(state.clone());
 
     info!(

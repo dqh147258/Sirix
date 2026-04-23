@@ -9,10 +9,11 @@ use uuid::Uuid;
 use crate::app::terminal::vt_authority::{
     BufferKind, MainResizeStrategy, TerminalLine, VtAuthority, VtAuthoritySnapshot,
 };
+use crate::shared_terminal_protocol::AUTHORITY_SYNC_MODE;
 
 const TERMINAL_STATE_CACHE_MAX_LINES: usize = 20_000;
 const TERMINAL_HISTORY_PREVIEW_MAX_LINES: usize = 2_000;
-pub const V2_SYNC_MODE: &str = "state-cache-v2";
+pub const V2_SYNC_MODE: &str = AUTHORITY_SYNC_MODE;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TerminalStateSnapshotPayload {
@@ -596,9 +597,9 @@ impl TerminalSyncState {
                 self.main_lines = VecDeque::from(next_main_lines);
             } else {
                 if next_main_lines.len() < previous_main.len() {
-                    let collapsed_to_viewport =
-                        next_main_lines.len() <= snapshot.screen_lines.len()
-                            && previous_main.len() > snapshot.screen_lines.len();
+                    let collapsed_to_viewport = next_main_lines.len()
+                        <= snapshot.screen_lines.len()
+                        && previous_main.len() > snapshot.screen_lines.len();
                     if collapsed_to_viewport {
                         // 参考 tmux 的 grid/history 思路：scrollback 应该被当作
                         // 持久主数据，而不是在 parser 某次瞬时只吐出“当前可视区”
@@ -709,27 +710,30 @@ impl TerminalSyncState {
             ));
         }
 
-        if trimmed || snapshot.layout_changed || snapshot.buffer_changed {
-            events.push(TerminalOutboundEvent::new(
-                "terminal.state.snapshot",
-                &self.state_snapshot_payload(terminal_id),
-            ));
-            events.push(TerminalOutboundEvent::new(
-                "terminal.screen.snapshot",
-                &TerminalScreenSnapshotPayload {
-                    terminal_id,
-                    buffer_kind: self.active_buffer.as_api_str(),
-                    buffer_epoch: self.buffer_epoch,
-                    layout_epoch: self.layout_epoch,
-                    rows: self.current_rows,
-                    cols: self.current_cols,
-                    cursor_row: self.current_cursor_row,
-                    cursor_col: self.current_cursor_col,
-                    screen_data_base64: BASE64.encode(&snapshot.formatted_screen),
-                    screen_lines: self.current_screen_lines.clone(),
-                },
-            ));
-        }
+        // Authority mode must be able to render purely from canonical events,
+        // not from the raw PTY byte stream. Emit the current state/screen on
+        // every snapshot application so desktop-local / backend relay /
+        // session transports all observe the same authoritative baseline and
+        // prompt-like updates no longer depend on `terminal.output`.
+        events.push(TerminalOutboundEvent::new(
+            "terminal.state.snapshot",
+            &self.state_snapshot_payload(terminal_id),
+        ));
+        events.push(TerminalOutboundEvent::new(
+            "terminal.screen.snapshot",
+            &TerminalScreenSnapshotPayload {
+                terminal_id,
+                buffer_kind: self.active_buffer.as_api_str(),
+                buffer_epoch: self.buffer_epoch,
+                layout_epoch: self.layout_epoch,
+                rows: self.current_rows,
+                cols: self.current_cols,
+                cursor_row: self.current_cursor_row,
+                cursor_col: self.current_cursor_col,
+                screen_data_base64: BASE64.encode(&snapshot.formatted_screen),
+                screen_lines: self.current_screen_lines.clone(),
+            },
+        ));
 
         events
     }
@@ -779,11 +783,15 @@ impl TerminalSyncState {
             return None;
         }
 
-        if replay_metadata.history_truncated || replay_bytes.is_none() {
-            return Some(MainResizeStrategy::CanonicalTranscript);
-        }
+        let _ = replay_bytes;
+        let _ = replay_metadata;
 
-        Some(MainResizeStrategy::ReplayBytes)
+        // Shared-terminal resize now treats the canonical state cache as the
+        // single source of truth. The raw replay ring remains available for
+        // CLI raw fallback/debugging, but main-path reflow always rebuilds from
+        // canonical lines so resize correctness no longer depends on byte
+        // replay completeness or transport ordering.
+        Some(MainResizeStrategy::CanonicalTranscript)
     }
 }
 
@@ -834,7 +842,7 @@ mod tests {
             terminal_id,
             device_id: "device".to_string(),
             title: "Terminal".to_string(),
-            source: "hosted".to_string(),
+            source: "local_pty".to_string(),
             shell: "bash".to_string(),
             cwd: "/tmp".to_string(),
             state: "active".to_string(),

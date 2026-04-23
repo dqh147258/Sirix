@@ -679,13 +679,9 @@ pub async fn launch_ai_session_in_current_terminal(
 pub(crate) fn validate_current_terminal_reuse_source(
     source: TerminalSessionSource,
 ) -> Result<(), &'static str> {
-    if source.supports_ai_current_terminal_reuse() {
-        return Ok(());
+    match source {
+        TerminalSessionSource::LocalPty => Ok(()),
     }
-
-    Err(
-        "`sirix-terminal` hosted shell cannot be reused for `sirix` AI launch; create a separate AI session instead",
-    )
 }
 
 async fn remote_sync_available(state: &AppState) -> bool {
@@ -764,14 +760,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_hosted_terminal_for_current_terminal_reuse() {
+    fn local_pty_terminal_can_be_reused_for_current_terminal_launch() {
         assert!(validate_current_terminal_reuse_source(TerminalSessionSource::LocalPty).is_ok());
-        assert_eq!(
-            validate_current_terminal_reuse_source(TerminalSessionSource::Hosted),
-            Err(
-                "`sirix-terminal` hosted shell cannot be reused for `sirix` AI launch; create a separate AI session instead",
-            )
-        );
     }
 
     #[test]

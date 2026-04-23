@@ -2,6 +2,10 @@
 mod cli_support;
 #[path = "../scene.rs"]
 mod scene;
+#[path = "../shared_terminal_protocol.rs"]
+mod shared_terminal_protocol;
+#[path = "../terminal_launch.rs"]
+mod terminal_launch;
 
 use std::{
     env,
@@ -24,8 +28,14 @@ use tokio_tungstenite::tungstenite::Message;
 use cli_support::{
     current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
     local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
-    CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
+    CURRENT_TERMINAL_ENV,
 };
+use shared_terminal_protocol::{RAW_STREAM_PROTOCOL_VERSION, RAW_STREAM_SYNC_MODE};
+
+#[derive(Debug, serde::Deserialize)]
+struct LocalSettingsSnapshot {
+    prefer_tmux_terminal: Option<bool>,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,16 +45,12 @@ async fn main() -> anyhow::Result<()> {
     match args.next().as_deref() {
         Some("list") => list_sessions().await,
         Some("resume") => {
-            if is_hosted_shell_terminal() {
-                anyhow::bail!(
-                    "`sirix resume` is not supported inside `sirix-terminal`; please resume from a system terminal or Sirix Desktop"
-                );
-            }
             let session_or_terminal_id = args
                 .next()
                 .context("usage: sirix resume <ai_session_id|terminal_id>")?;
             let port = ensure_desktop_server().await?;
             ensure_login_prompt(port).await?;
+            maybe_warn_tmux_recommendation(port).await;
             let terminal_id = resolve_terminal_id(port, &session_or_terminal_id).await?;
             attach_session(port, &terminal_id).await
         }
@@ -55,24 +61,47 @@ async fn main() -> anyhow::Result<()> {
         _ => {
             let port = ensure_desktop_server().await?;
             ensure_login_prompt(port).await?;
+            maybe_warn_tmux_recommendation(port).await;
             let current_terminal_id = env::var(CURRENT_TERMINAL_ENV).ok();
-            let hosted_shell_terminal = is_hosted_shell_terminal();
-            let launch = launch_session(
-                port,
-                (!hosted_shell_terminal)
-                    .then_some(current_terminal_id.as_deref())
-                    .flatten(),
-            )
-            .await?;
-            if hosted_shell_terminal {
-                print_detached_session_hint(&launch);
-                Ok(())
-            } else if launch.reuse_current_terminal {
+            let launch = launch_session(port, current_terminal_id.as_deref()).await?;
+            if launch.reuse_current_terminal {
                 run_codex_in_current_terminal(&launch)
             } else {
                 attach_session(port, &launch.terminal_id).await
             }
         }
+    }
+}
+
+async fn maybe_warn_tmux_recommendation(port: u16) {
+    let prefer_tmux = resolve_prefer_tmux_terminal(port).await;
+    if !prefer_tmux || cfg!(windows) {
+        return;
+    }
+    let probe = terminal_launch::cached_tmux_availability();
+    if probe.available {
+        return;
+    }
+    let warning = terminal_launch::build_tmux_missing_warning();
+    terminal_launch::emit_warning_to_stderr("sirix", &warning);
+}
+
+async fn resolve_prefer_tmux_terminal(port: u16) -> bool {
+    if let Some(override_value) = terminal_launch::prefer_tmux_env_override() {
+        return override_value;
+    }
+
+    let default_value = terminal_launch::default_prefer_tmux_terminal();
+    let response = reqwest::get(local_http_url(port, "/settings")).await;
+    let Ok(response) = response else {
+        return default_value;
+    };
+    let Ok(response) = response.error_for_status() else {
+        return default_value;
+    };
+    match response.json::<LocalSettingsSnapshot>().await {
+        Ok(payload) => payload.prefer_tmux_terminal.unwrap_or(default_value),
+        Err(_) => default_value,
     }
 }
 
@@ -229,24 +258,6 @@ async fn launch_session(
         reuse_current_terminal,
         current_terminal_launch,
     })
-}
-
-fn is_hosted_shell_terminal() -> bool {
-    env::var(CURRENT_TERMINAL_KIND_ENV)
-        .ok()
-        .is_some_and(|value| value.trim() == TERMINAL_KIND_HOSTED_SHELL)
-}
-
-fn print_detached_session_hint(launch: &LaunchSessionResult) {
-    eprintln!(
-        "[sirix] current terminal is a `sirix-terminal` hosted shell, so Sirix AI was created as a separate shared terminal instead of reusing this shell."
-    );
-    eprintln!("[sirix] ai_session_id={}", launch.ai_session_id);
-    eprintln!("[sirix] terminal_id={}", launch.terminal_id);
-    eprintln!(
-        "[sirix] open it from Sirix Desktop/Mobile, or resume it from a system terminal with: sirix resume {}",
-        launch.ai_session_id
-    );
 }
 
 fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result<()> {
@@ -418,8 +429,8 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                 "type": "terminal.attach",
                 "payload": {
                     "terminal_id": terminal_id,
-                    "protocol_version": 1,
-                    "sync_mode": "raw-v1",
+                    "protocol_version": RAW_STREAM_PROTOCOL_VERSION,
+                    "sync_mode": RAW_STREAM_SYNC_MODE,
                     "client_kind": "system_terminal",
                 }
             })
@@ -651,6 +662,27 @@ fn handle_terminal_message(
                 eprintln!("\n[sirix] terminal error: {message}");
             }
             Ok(true)
+        }
+        "terminal.warning" => {
+            if let Some(message) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("message"))
+                .and_then(serde_json::Value::as_str)
+            {
+                eprintln!("\n\u{1b}[33m[sirix] {message}\u{1b}[0m");
+            }
+            if let Some(install_commands) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("install_commands"))
+                .and_then(serde_json::Value::as_array)
+            {
+                for command in install_commands {
+                    if let Some(command) = command.as_str() {
+                        eprintln!("\u{1b}[33m  {command}\u{1b}[0m");
+                    }
+                }
+            }
+            Ok(false)
         }
         "terminal.closed" => Ok(true),
         _ => Ok(false),

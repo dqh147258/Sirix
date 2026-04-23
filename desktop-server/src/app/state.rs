@@ -17,6 +17,7 @@ use crate::app::{
     terminal::manager::TerminalManager,
 };
 use crate::bootstrap::config::AppConfig;
+use crate::terminal_launch::{default_prefer_tmux_terminal, resolve_prefer_tmux_toggle};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -40,6 +41,7 @@ pub struct RuntimeState {
     pub local_ws_port: u16,
     pub desktop_client_connections: usize,
     pub auto_approve_screen_share: bool,
+    pub prefer_tmux_terminal: bool,
     pub logging_enabled: bool,
     pub backend_event_stream_connected: bool,
     pub backend_last_healthy_at: Option<DateTime<Utc>>,
@@ -55,6 +57,10 @@ impl AppState {
         let sirix_config_store = Arc::new(
             SirixConfigStore::new().expect("failed to initialize scene-aware Sirix config store"),
         );
+        // 终端 tmux 开关默认遵循平台策略（Unix 默认开启，Windows 默认关闭），
+        // 并允许通过环境变量 SIRIX_PREFER_TMUX_TERMINAL 在命令行/调试场景提前覆盖。
+        // 该开关字段先在 runtime 层预留，后续可直接接入 Desktop App 设置页。
+        let prefer_tmux_terminal = resolve_prefer_tmux_toggle(default_prefer_tmux_terminal());
         let approval_storage_dir = sirix_config_store
             .sirix_home()
             .join("runtime")
@@ -80,6 +86,7 @@ impl AppState {
                 local_ws_port,
                 desktop_client_connections: 0,
                 auto_approve_screen_share: false,
+                prefer_tmux_terminal,
                 logging_enabled: true,
                 backend_event_stream_connected: false,
                 backend_last_healthy_at: None,

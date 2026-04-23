@@ -26,8 +26,12 @@ pub fn router(state: AppState) -> Router {
             get(settings::get_settings).patch(settings::set_settings),
         )
         .route(
-            "/terminals/hosted/sessions",
-            axum::routing::post(terminals::create_hosted_terminal_session),
+            "/terminals/sessions",
+            axum::routing::post(terminals::create_local_terminal_session),
+        )
+        .route(
+            "/terminals/sessions/:terminal_id/close",
+            axum::routing::post(terminals::close_local_terminal_session),
         )
         .route(
             "/ai/config",

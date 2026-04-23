@@ -243,10 +243,9 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
 
   Future<void> _requestTerminalClose(String terminalId) async {
     if (_shouldUseSessionTransport) {
-      final sent = await _sessionTerminalChannelController.sendJson({
-        'type': 'terminal.close',
-        'terminal_id': terminalId,
-      });
+      final sent = await _sessionTerminalChannelController.sendJson(
+        buildTerminalCloseMessage(terminalId: terminalId),
+      );
       if (sent) {
         return;
       }
@@ -330,22 +329,18 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
       if (_shouldUseSessionTransport) {
         await _detachChannel();
         _transport = _TerminalTransport.sessionWebrtc;
-        final sent = await _sessionTerminalChannelController.sendJson({
-          'type': 'terminal.attach',
-          'payload': {
-            'terminal_id': terminalId,
-            'protocol_version': 2,
-            'sync_mode': _terminalSyncModeV2,
-            'client_kind': 'mobile_app',
-          },
-        });
+        final sent = await _sessionTerminalChannelController.sendJson(
+          buildTerminalAttachMessage(
+            terminalId: terminalId,
+            protocolVersion: authorityTerminalProtocolVersion,
+            syncMode: _terminalSyncModeV2,
+            clientKind: 'mobile_app',
+          ),
+        );
         if (sent) {
-          await _sessionTerminalChannelController.sendJson({
-            'type': 'terminal.bootstrap.request',
-            'payload': {
-              'terminal_id': terminalId,
-            },
-          });
+          await _sessionTerminalChannelController.sendJson(
+            buildTerminalBootstrapRequestMessage(terminalId: terminalId),
+          );
           if (_shouldRetrySessionAttach(terminalId)) {
             unawaited(_retrySessionAttachUntilReady(terminalId));
           }
@@ -416,23 +411,19 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
           },
         );
         channel.sink.add(
-          jsonEncode({
-            'type': 'terminal.attach',
-            'payload': {
-              'terminal_id': terminalId,
-              'protocol_version': 2,
-              'sync_mode': _terminalSyncModeV2,
-              'client_kind': _shouldUseSessionTransport ? 'mobile_app' : 'desktop_app',
-            },
-          }),
+          jsonEncode(
+            buildTerminalAttachMessage(
+              terminalId: terminalId,
+              protocolVersion: authorityTerminalProtocolVersion,
+              syncMode: _terminalSyncModeV2,
+              clientKind: _shouldUseSessionTransport ? 'mobile_app' : 'desktop_app',
+            ),
+          ),
         );
         channel.sink.add(
-          jsonEncode({
-            'type': 'terminal.bootstrap.request',
-            'payload': {
-              'terminal_id': terminalId,
-            },
-          }),
+          jsonEncode(
+            buildTerminalBootstrapRequestMessage(terminalId: terminalId),
+          ),
         );
         state = state.copyWith(connecting: false);
       } catch (error) {

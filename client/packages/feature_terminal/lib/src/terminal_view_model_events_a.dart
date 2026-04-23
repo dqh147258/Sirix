@@ -16,7 +16,6 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
   void _replaceTerminals(List<TerminalSessionSummary> terminals);
   void _removeTerminalById(String terminalId);
   void _updateTerminalStateById(String terminalId, String nextState);
-  @override
   List<int>? _decodeScreenSnapshotBytes(Map<String, dynamic> body);
   void _removeApprovalRequest({
     required String aiSessionId,
@@ -29,7 +28,23 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
   Future<void> _detachChannel() async {
     _flushPendingOutboundOperations();
 
+    final activeTerminalId = state.activeTerminalId;
+    final viewerPresenceEpoch = activeTerminalId == null
+        ? null
+        : _viewerPresenceEpochByTerminal[activeTerminalId];
+
     if (_transport == _TerminalTransport.sessionWebrtc) {
+      if (activeTerminalId != null) {
+        unawaited(
+          _sessionTerminalChannelController.sendJson(
+            buildTerminalDetachMessage(
+              terminalId: activeTerminalId,
+              clientKind: 'mobile_app',
+              viewerPresenceEpoch: viewerPresenceEpoch,
+            ),
+          ),
+        );
+      }
       _transport = null;
       _attachingTerminalId = null;
       return;
@@ -42,6 +57,16 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     _channelSubscription = null;
     _desktopLocalChannelConnectFuture = null;
     _attachingTerminalId = null;
+    if (channel != null &&
+        activeTerminalId != null &&
+        _desktopLocalClient != null) {
+      _desktopLocalClient.sendTerminalDetach(
+        channel: channel,
+        terminalId: activeTerminalId,
+        clientKind: 'desktop_app',
+        viewerPresenceEpoch: viewerPresenceEpoch,
+      );
+    }
     await subscription?.cancel();
     await channel?.sink.close();
   }
@@ -59,11 +84,6 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     }
     _pendingAuthorityRefreshTimers.clear();
     _pendingAuthorityRefreshes.clear();
-    for (final timer in _pendingVisibleSnapshotTimers.values) {
-      timer.cancel();
-    }
-    _pendingVisibleSnapshotTimers.clear();
-    _pendingVisibleSnapshotApplies.clear();
   }
 
   @override
@@ -174,6 +194,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
       return;
     }
 
+    final authority = _terminalAuthorities[terminalId];
+    if (authority?.isV2Authority == true) {
+      AppLogger.info(
+        '$_terminalStreamTraceTag ignore raw output on v2 authority terminalId=$terminalId sequence=${streamSequence ?? -1}',
+      );
+      return;
+    }
+
     final streamState = _streamStateFor(terminalId);
     if (streamSequence != null &&
         streamState.lastAppliedSequence != null &&
@@ -211,6 +239,18 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     final bytes = _decodeEventBytes(body);
     final streamSequence = _resolveEventStreamSequence(body);
     if (terminalId == null) {
+      return;
+    }
+    final authority = _terminalAuthorities[terminalId];
+    if (authority?.isV2Authority == true) {
+      // Shared terminal v2 has switched to an authority bootstrap
+      // (`terminal.ready` + state/screen/history preview). If an old relay or
+      // stale sender still emits a raw replay snapshot after v2 is negotiated,
+      // applying that snapshot would reintroduce the duplicate/overlap problem
+      // we are explicitly removing from the tmux-aligned architecture.
+      AppLogger.info(
+        '$_terminalStreamTraceTag ignore raw snapshot on v2 authority terminalId=$terminalId sequence=${streamSequence ?? -1}',
+      );
       return;
     }
     final historyTruncated = body['history_truncated'] == true;
@@ -263,7 +303,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     if (terminalId == null) {
       return;
     }
-    _authorityCacheFor(terminalId).applyStateSnapshot(body);
+    final authority = _authorityCacheFor(terminalId);
+    authority.applyStateSnapshot(body);
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'state_snapshot',
+      );
+    }
   }
 
   void _handleTerminalScreenSnapshot(Map<String, dynamic> body) {
@@ -273,27 +320,24 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     }
     final authority = _authorityCacheFor(terminalId);
     authority.applyScreenSnapshot(body);
+    if (!authority.isV2Authority) {
+      final screenBytes = _decodeScreenSnapshotBytes(body);
+      if (screenBytes != null) {
+        _replaceTerminalSnapshot(
+          terminalId: terminalId,
+          bytes: screenBytes,
+          streamSequence: null,
+          source: 'screen',
+        );
+      }
+      return;
+    }
     final streamState = _streamStateFor(terminalId);
-    final shouldForceViewportResync = streamState.shouldForceViewportResync(
-      bufferEpoch: authority.bufferEpoch,
-      layoutEpoch: authority.layoutEpoch,
-    );
-    final preferScreenSnapshotResync = authority.shouldPreferScreenSnapshotResync;
-    final screenLines = (body['screen_lines'] as List<dynamic>? ?? const [])
-        .whereType<Map<String, dynamic>>()
-        .map(TerminalAuthorityLine.fromJson)
-        .toList(growable: false);
-    final canUseLineSnapshot = screenLines.isNotEmpty &&
-        TerminalVisibleWindowPlanner.hasMeaningfulVisibleText(screenLines);
     final snapshotSignature = _screenSnapshotSignature(
       body: body,
       rows: authority.rows,
       cols: authority.cols,
     );
-    final needsInitialVisibleWindowAlignment =
-        preferScreenSnapshotResync &&
-        screenLines.isNotEmpty &&
-        streamState.initialVisibleWindowTopOffset == null;
     if (streamState.isDuplicateScreenSnapshot(
       signature: snapshotSignature,
       bufferEpoch: authority.bufferEpoch,
@@ -307,104 +351,18 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
       );
       return;
     }
-    if (!streamState.acceptsViewportResync &&
-        !shouldForceViewportResync &&
-        !needsInitialVisibleWindowAlignment) {
-      // 这里的 screen snapshot 只有“当前屏幕视口”，不包含完整 scrollback。
-      // 一旦终端已经进入正常交互态，再用它整屏 replace 会把 xterm 已积累的
-      // 历史缓冲区清掉，表现为“历史突然丢失”。因此首帧 bootstrap 允许应用，
-      // 后续仅缓存 authority 元数据，不再拿 viewport snapshot 覆盖整条历史。
-      streamState.markAppliedScreenSnapshot(
-        signature: snapshotSignature,
-        bufferEpoch: authority.bufferEpoch,
-        layoutEpoch: authority.layoutEpoch,
-        rows: authority.rows,
-        cols: authority.cols,
-      );
-      AppLogger.info(
-        '$_terminalStreamTraceTag skip screen snapshot replace terminalId=$terminalId bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch} preserveHistory=true',
-      );
-      return;
-    }
-    if (needsInitialVisibleWindowAlignment) {
-      AppLogger.info(
-        '$_terminalStreamTraceTag allow one-time initial visible window alignment terminalId=$terminalId bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch} screenLines=${screenLines.length} canUseLineSnapshot=$canUseLineSnapshot cursorRow=${(body['cursor_row'] as num?)?.toInt() ?? 0} cursorCol=${(body['cursor_col'] as num?)?.toInt() ?? 0}',
-      );
-    }
-    if (shouldForceViewportResync) {
-      if (preferScreenSnapshotResync) {
-        _scheduleVisibleScreenSnapshotApply(
-          terminalId,
-          reason: 'visible_history_only',
-          body: body,
-          signature: snapshotSignature,
-        );
-        streamState.markAppliedScreenSnapshot(
-          signature: snapshotSignature,
-          bufferEpoch: authority.bufferEpoch,
-          layoutEpoch: authority.layoutEpoch,
-          rows: authority.rows,
-          cols: authority.cols,
-        );
-        streamState.markInteractiveFrame();
-        return;
-      }
-      AppLogger.info(
-        '$_terminalStreamTraceTag force screen snapshot replace terminalId=$terminalId bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch}',
-      );
-      streamState.markAppliedScreenSnapshot(
-        signature: snapshotSignature,
-        bufferEpoch: authority.bufferEpoch,
-        layoutEpoch: authority.layoutEpoch,
-        rows: authority.rows,
-        cols: authority.cols,
-      );
-      streamState.markInteractiveFrame();
-      _scheduleAuthorityRefresh(
-        terminalId,
-        reason: 'force_viewport_resync',
-      );
-      return;
-    }
-    final screenBytes = _decodeScreenSnapshotBytes(body);
-    if (!canUseLineSnapshot) {
-      AppLogger.info(
-        '$_terminalStreamTraceTag screen snapshot lacks meaningful line data terminalId=$terminalId bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch} screenLines=${screenLines.length} initialVisibleWindowTopOffset=${streamState.initialVisibleWindowTopOffset}',
-      );
-    }
-    if (screenBytes != null && !(preferScreenSnapshotResync && canUseLineSnapshot)) {
-      _replaceTerminalSnapshot(
-        terminalId: terminalId,
-        bytes: screenBytes,
-        streamSequence: null,
-        source: 'screen',
-      );
-      streamState.markAppliedScreenSnapshot(
-        signature: snapshotSignature,
-        bufferEpoch: authority.bufferEpoch,
-        layoutEpoch: authority.layoutEpoch,
-        rows: authority.rows,
-        cols: authority.cols,
-      );
-      streamState.markInteractiveFrame();
-      return;
-    }
-    if (canUseLineSnapshot || screenBytes == null) {
-      _replaceTerminalScreenSnapshot(
-        terminalId: terminalId,
-        screenLines: screenLines,
-        cursorRow: (body['cursor_row'] as num?)?.toInt() ?? 0,
-        cursorCol: (body['cursor_col'] as num?)?.toInt() ?? 0,
-      );
-      streamState.markAppliedScreenSnapshot(
-        signature: snapshotSignature,
-        bufferEpoch: authority.bufferEpoch,
-        layoutEpoch: authority.layoutEpoch,
-        rows: authority.rows,
-        cols: authority.cols,
-      );
-      streamState.markInteractiveFrame();
-    }
+    streamState.markAppliedScreenSnapshot(
+      signature: snapshotSignature,
+      bufferEpoch: authority.bufferEpoch,
+      layoutEpoch: authority.layoutEpoch,
+      rows: authority.rows,
+      cols: authority.cols,
+    );
+    streamState.markInteractiveFrame();
+    _scheduleAuthorityRefresh(
+      terminalId,
+      reason: 'screen_snapshot',
+    );
   }
 
   void _handleTerminalHistoryAppend(Map<String, dynamic> body) {
@@ -412,7 +370,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     if (terminalId == null) {
       return;
     }
-    _authorityCacheFor(terminalId).appendHistory(body);
+    final authority = _authorityCacheFor(terminalId);
+    authority.appendHistory(body);
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'history_append',
+      );
+    }
   }
 
   void _handleTerminalLayoutChanged(Map<String, dynamic> body) {
@@ -427,6 +392,12 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
       cols: authority.cols,
       rows: authority.rows,
     );
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'layout_changed',
+      );
+    }
   }
 
   void _handleTerminalGeometryChanged(Map<String, dynamic> body) {
@@ -441,6 +412,12 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
       cols: authority.cols,
       rows: authority.rows,
     );
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'geometry_changed',
+      );
+    }
   }
 
   void _handleTerminalBufferChanged(Map<String, dynamic> body) {
@@ -448,7 +425,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     if (terminalId == null) {
       return;
     }
-    _authorityCacheFor(terminalId).applyBufferChanged(body);
+    final authority = _authorityCacheFor(terminalId);
+    authority.applyBufferChanged(body);
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'buffer_changed',
+      );
+    }
   }
 
   void _handleTerminalScrollbackTrimmed(Map<String, dynamic> body) {
@@ -456,7 +440,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     if (terminalId == null) {
       return;
     }
-    _authorityCacheFor(terminalId).applyTrimmed(body);
+    final authority = _authorityCacheFor(terminalId);
+    authority.applyTrimmed(body);
+    if (authority.isV2Authority) {
+      _scheduleAuthorityRefresh(
+        terminalId,
+        reason: 'scrollback_trimmed',
+      );
+    }
   }
 
   void _handleTerminalHistoryRangeResponse(Map<String, dynamic> body) {
@@ -528,37 +519,6 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
     AppLogger.info(
       '$_terminalStreamTraceTag history invalidated terminalId=$terminalId generation=${authority.historyGeneration} history=${authority.historyStartLine}-${authority.historyEndLine} preview=$previewStartLine-$previewEndLine previewLines=$previewLineCount desiredStart=$desiredStartLine desiredBackfillLines=$desiredBackfillLines cacheSize=$cacheSize',
     );
-    final shouldTreatAsVisibleOnly = authority.shouldTreatHistoryInvalidationAsVisibleOnly(
-      previewLineCount: previewLineCount,
-    );
-    if (shouldTreatAsVisibleOnly) {
-      final streamState = _streamStateFor(terminalId);
-      final previewLines = (body['lines'] as List<dynamic>? ?? const [])
-          .whereType<Map<String, dynamic>>()
-          .map(TerminalAuthorityLine.fromJson)
-          .toList(growable: false);
-      final canUsePreviewForInitialAlignment = streamState.initialVisibleWindowTopOffset == null &&
-          TerminalVisibleWindowPlanner.hasMeaningfulVisibleText(previewLines);
-      if (canUsePreviewForInitialAlignment) {
-        AppLogger.info(
-          '$_terminalStreamTraceTag apply one-time initial alignment from history preview terminalId=$terminalId previewLines=${previewLines.length} generation=${authority.historyGeneration}',
-        );
-        _replaceTerminalScreenSnapshot(
-          terminalId: terminalId,
-          screenLines: previewLines,
-          cursorRow: TerminalVisibleWindowPlanner.inferredCursorRowForDisplay(previewLines),
-          cursorCol: 0,
-        );
-      } else if (streamState.initialVisibleWindowTopOffset == null) {
-        AppLogger.info(
-          '$_terminalStreamTraceTag visible-only history preview cannot anchor initial alignment terminalId=$terminalId previewLines=${previewLines.length} hasMeaningfulText=${TerminalVisibleWindowPlanner.hasMeaningfulVisibleText(previewLines)}',
-        );
-      }
-      AppLogger.info(
-        '$_terminalStreamTraceTag skip authority refresh schedule terminalId=$terminalId reason=visible_history_only',
-      );
-      return;
-    }
     _scheduleAuthorityRefresh(
       terminalId,
       reason: 'history_invalidated_preview',

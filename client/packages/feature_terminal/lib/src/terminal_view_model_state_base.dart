@@ -47,9 +47,6 @@ abstract class _TerminalViewModelStateBase extends BaseViewModel<TerminalState> 
   final Map<String, Timer> _pendingAuthorityRefreshTimers = <String, Timer>{};
   final Map<String, _PendingAuthorityRefresh> _pendingAuthorityRefreshes =
       <String, _PendingAuthorityRefresh>{};
-  final Map<String, Timer> _pendingVisibleSnapshotTimers = <String, Timer>{};
-  final Map<String, _PendingScreenSnapshotApply> _pendingVisibleSnapshotApplies =
-      <String, _PendingScreenSnapshotApply>{};
   _TerminalViewportSize? _lastObservedViewportSize;
   bool _resizeTrailingWindowActive = false;
   Completer<List<TerminalSessionSummary>>? _pendingSessionTerminalListCompleter;

@@ -2,31 +2,40 @@
 mod cli_support;
 #[path = "../scene.rs"]
 mod scene;
+#[path = "../shared_terminal_protocol.rs"]
+mod shared_terminal_protocol;
+#[path = "../terminal_launch.rs"]
+mod terminal_launch;
 
 use std::{
     env,
-    io::{self, Read, Write},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    thread,
+    io::{self, Write},
 };
 
 use anyhow::Context;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use crossterm::{
+    cursor, execute, style,
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
+};
 use futures_util::{SinkExt, StreamExt};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
 use cli_support::{
     current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
     local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
-    CURRENT_TERMINAL_ENV, CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL,
+    CURRENT_TERMINAL_ENV,
 };
-use scene::{resolve_scene, resolve_sirix_home, SIRIX_SCENE_ENV};
+use shared_terminal_protocol::{RAW_STREAM_PROTOCOL_VERSION, RAW_STREAM_SYNC_MODE};
+
+#[derive(Debug, serde::Deserialize)]
+struct LocalSettingsSnapshot {
+    prefer_tmux_terminal: Option<bool>,
+}
 
 #[derive(Debug, serde::Serialize)]
-struct CreateHostedTerminalSessionRequest<'a> {
+struct CreateLocalTerminalSessionRequest<'a> {
     cwd: &'a str,
     shell: &'a str,
     title: &'a str,
@@ -35,77 +44,9 @@ struct CreateHostedTerminalSessionRequest<'a> {
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct CreateHostedTerminalSessionResponse {
+struct CreateLocalTerminalSessionResponse {
     terminal_id: Uuid,
-    host_token: String,
     mirrored_to_backend: bool,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(tag = "type")]
-enum HostedTerminalClientMessage<'a> {
-    #[serde(rename = "terminal.host.register")]
-    Register {
-        terminal_id: Uuid,
-        host_token: &'a str,
-    },
-    #[serde(rename = "terminal.host.output")]
-    Output {
-        terminal_id: Uuid,
-        data_base64: String,
-    },
-    #[serde(rename = "terminal.host.resized")]
-    Resized {
-        terminal_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    #[serde(rename = "terminal.host.closed")]
-    Closed { terminal_id: Uuid },
-    #[serde(rename = "terminal.host.error")]
-    Error {
-        terminal_id: Uuid,
-        error_message: String,
-    },
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type")]
-enum HostedTerminalServerMessage {
-    #[serde(rename = "terminal.host.registered")]
-    Registered {
-        payload: HostedTerminalRegisteredPayload,
-    },
-    #[serde(rename = "terminal.host.input")]
-    Input {
-        terminal_id: Uuid,
-        data_base64: String,
-    },
-    #[serde(rename = "terminal.host.resize")]
-    Resize {
-        terminal_id: Uuid,
-        cols: u16,
-        rows: u16,
-    },
-    #[serde(rename = "terminal.host.close")]
-    Close { terminal_id: Uuid },
-    #[serde(rename = "settings.sync")]
-    SettingsSync,
-    #[serde(rename = "pong")]
-    Pong,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct HostedTerminalRegisteredPayload {
-    terminal_id: Uuid,
-    ok: bool,
-    error_message: Option<String>,
-}
-
-enum PtyEvent {
-    Output(Vec<u8>),
-    Closed,
-    Error(String),
 }
 
 #[tokio::main]
@@ -122,36 +63,87 @@ async fn main() -> anyhow::Result<()> {
 
     let port = ensure_desktop_server().await?;
     ensure_login_prompt(port).await?;
+    maybe_warn_tmux_recommendation(port).await;
 
     let cwd = env::current_dir().context("failed to resolve current directory")?;
+    let cwd_string = cwd.display().to_string();
     let initial_size = current_terminal_size(TerminalSize::new(120, 32));
-    let (cols, rows) = initial_size.as_tuple();
     let shell = resolve_shared_shell();
-    let session = create_hosted_terminal_session(
+    let session = create_local_terminal_session(
         port,
-        cwd.as_path(),
+        cwd_string.as_str(),
         shell.as_str(),
         "Sirix Terminal",
-        cols,
-        rows,
+        initial_size.cols,
+        initial_size.rows,
     )
     .await?;
-    run_hosted_terminal(port, cwd, shell, session, cols, rows).await
+
+    eprintln!(
+        "[sirix-terminal] attached terminal_id={} mirrored_to_backend={} mode=server_owned_runtime",
+        session.terminal_id, session.mirrored_to_backend
+    );
+
+    // 关键语义变更：sirix-terminal 不再自己启动/持有 PTY 或 tmux。
+    // 这里改成只创建 server-owned terminal runtime，然后把当前系统终端
+    // 当作一个 system_terminal viewer attach 到 desktop-server。
+    let (attached_once, attach_result) =
+        attach_session(port, &session.terminal_id.to_string()).await;
+    if !attached_once {
+        if let Err(cleanup_error) = close_local_terminal_session(port, session.terminal_id).await {
+            eprintln!(
+                "[sirix-terminal] failed to cleanup unattached terminal {} after attach did not reach ready: {}",
+                session.terminal_id, cleanup_error
+            );
+        }
+    }
+    attach_result
 }
 
-async fn create_hosted_terminal_session(
+async fn maybe_warn_tmux_recommendation(port: u16) {
+    let prefer_tmux = resolve_prefer_tmux_terminal(port).await;
+    if !prefer_tmux || cfg!(windows) {
+        return;
+    }
+    let probe = terminal_launch::cached_tmux_availability();
+    if probe.available {
+        return;
+    }
+    let warning = terminal_launch::build_tmux_missing_warning();
+    terminal_launch::emit_warning_to_stderr("sirix-terminal", &warning);
+}
+
+async fn resolve_prefer_tmux_terminal(port: u16) -> bool {
+    if let Some(override_value) = terminal_launch::prefer_tmux_env_override() {
+        return override_value;
+    }
+
+    let default_value = terminal_launch::default_prefer_tmux_terminal();
+    let response = reqwest::get(local_http_url(port, "/settings")).await;
+    let Ok(response) = response else {
+        return default_value;
+    };
+    let Ok(response) = response.error_for_status() else {
+        return default_value;
+    };
+    match response.json::<LocalSettingsSnapshot>().await {
+        Ok(payload) => payload.prefer_tmux_terminal.unwrap_or(default_value),
+        Err(_) => default_value,
+    }
+}
+
+async fn create_local_terminal_session(
     port: u16,
-    cwd: &std::path::Path,
+    cwd: &str,
     shell: &str,
     title: &str,
     cols: u16,
     rows: u16,
-) -> anyhow::Result<CreateHostedTerminalSessionResponse> {
-    let cwd_string = cwd.display().to_string();
+) -> anyhow::Result<CreateLocalTerminalSessionResponse> {
     let response = reqwest::Client::new()
-        .post(local_http_url(port, "/terminals/hosted/sessions"))
-        .json(&CreateHostedTerminalSessionRequest {
-            cwd: &cwd_string,
+        .post(local_http_url(port, "/terminals/sessions"))
+        .json(&CreateLocalTerminalSessionRequest {
+            cwd,
             shell,
             title,
             cols,
@@ -159,311 +151,338 @@ async fn create_hosted_terminal_session(
         })
         .send()
         .await
-        .context("failed to create hosted terminal session")?
+        .context("failed to create local terminal session")?
         .error_for_status()
-        .context("desktop-server rejected hosted terminal session request")?;
+        .context("desktop-server rejected local terminal session request")?;
     response
-        .json::<CreateHostedTerminalSessionResponse>()
+        .json::<CreateLocalTerminalSessionResponse>()
         .await
-        .context("failed to decode hosted terminal session response")
+        .context("failed to decode local terminal session response")
 }
 
-async fn run_hosted_terminal(
-    port: u16,
-    cwd: PathBuf,
-    shell: String,
-    session: CreateHostedTerminalSessionResponse,
-    cols: u16,
-    rows: u16,
-) -> anyhow::Result<()> {
-    let (socket, _) = connect_async(local_ws_url(port, "/ws"))
+async fn close_local_terminal_session(port: u16, terminal_id: Uuid) -> anyhow::Result<()> {
+    reqwest::Client::new()
+        .post(local_http_url(
+            port,
+            format!("/terminals/sessions/{terminal_id}/close").as_str(),
+        ))
+        .send()
         .await
-        .context("failed to connect desktop-server local websocket")?;
-    let (mut write, mut read) = socket.split();
-
-    send_host_message(
-        &mut write,
-        &HostedTerminalClientMessage::Register {
-            terminal_id: session.terminal_id,
-            host_token: session.host_token.as_str(),
-        },
-    )
-    .await?;
-    wait_for_host_registration(&mut read, session.terminal_id).await?;
-
-    let system = native_pty_system();
-    let pair = system.openpty(PtySize {
-        rows,
-        cols,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
-
-    let mut builder = CommandBuilder::new(shell.clone());
-    builder.cwd(&cwd);
-    apply_shared_shell_env(&mut builder, session.terminal_id)?;
-    let child = Arc::new(Mutex::new(pair.slave.spawn_command(builder)?));
-    let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
-    let master = Arc::new(Mutex::new(pair.master));
-    let reader = master
-        .lock()
-        .map_err(|_| anyhow::anyhow!("terminal master poisoned"))?
-        .try_clone_reader()?;
-
-    let _raw_mode_guard = RawModeGuard::activate()?;
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let (pty_tx, mut pty_rx) = tokio::sync::mpsc::unbounded_channel::<PtyEvent>();
-    spawn_stdin_reader(stdin_tx);
-    spawn_pty_reader(reader, pty_tx);
-
-    let mut last_size = TerminalSize::new(cols, rows);
-    let mut size_rx = spawn_terminal_size_watcher(last_size);
-
-    eprintln!(
-        "[sirix-terminal] attached terminal_id={} mirrored_to_backend={}",
-        session.terminal_id, session.mirrored_to_backend
-    );
-
-    loop {
-        tokio::select! {
-            Some(bytes) = stdin_rx.recv() => {
-                let mut guard = writer
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
-                guard.write_all(&bytes)?;
-            }
-            Some(event) = pty_rx.recv() => {
-                match event {
-                    PtyEvent::Output(bytes) => {
-                        send_host_message(
-                            &mut write,
-                            &HostedTerminalClientMessage::Output {
-                                terminal_id: session.terminal_id,
-                                data_base64: BASE64.encode(bytes),
-                            },
-                        )
-                        .await?;
-                    }
-                    PtyEvent::Closed => {
-                        let _ = send_host_message(
-                            &mut write,
-                            &HostedTerminalClientMessage::Closed {
-                                terminal_id: session.terminal_id,
-                            },
-                        )
-                        .await;
-                        break;
-                    }
-                    PtyEvent::Error(error_message) => {
-                        let _ = send_host_message(
-                            &mut write,
-                            &HostedTerminalClientMessage::Error {
-                                terminal_id: session.terminal_id,
-                                error_message,
-                            },
-                        )
-                        .await;
-                        break;
-                    }
-                }
-            }
-            Some(current_size) = size_rx.recv() => {
-                if current_size != last_size {
-                    last_size = current_size;
-                    if let Ok(master) = master.lock() {
-                        master.resize(PtySize {
-                            rows: current_size.rows,
-                            cols: current_size.cols,
-                            pixel_width: 0,
-                            pixel_height: 0,
-                        })?;
-                    }
-                    send_host_message(
-                        &mut write,
-                        &HostedTerminalClientMessage::Resized {
-                            terminal_id: session.terminal_id,
-                            cols: current_size.cols,
-                            rows: current_size.rows,
-                        },
-                    )
-                    .await?;
-                }
-            }
-            message = read.next() => {
-                match message {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<HostedTerminalServerMessage>(&text) {
-                            Ok(HostedTerminalServerMessage::Input { terminal_id, data_base64 }) if terminal_id == session.terminal_id => {
-                                let bytes = BASE64.decode(data_base64)?;
-                                let mut guard = writer
-                                    .lock()
-                                    .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
-                                guard.write_all(&bytes)?;
-                            }
-                            Ok(HostedTerminalServerMessage::Resize { terminal_id, cols, rows }) if terminal_id == session.terminal_id => {
-                                if let Ok(master) = master.lock() {
-                                    master.resize(PtySize {
-                                        rows,
-                                        cols,
-                                        pixel_width: 0,
-                                        pixel_height: 0,
-                                    })?;
-                                }
-                            }
-                            Ok(HostedTerminalServerMessage::Close { terminal_id }) if terminal_id == session.terminal_id => {
-                                kill_child(&child);
-                                break;
-                            }
-                            Ok(HostedTerminalServerMessage::SettingsSync | HostedTerminalServerMessage::Pong | HostedTerminalServerMessage::Registered { .. }) => {}
-                            Ok(_) => {}
-                            Err(error) => {
-                                eprintln!("[sirix-terminal] ignored invalid host ws payload: {error}");
-                            }
-                        }
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        write.send(Message::Pong(data)).await.ok();
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
-                        kill_child(&child);
-                        break;
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(error)) => {
-                        kill_child(&child);
-                        let error = anyhow::Error::new(error).context("host websocket read failed");
-                        if is_graceful_host_disconnect(&error) {
-                            eprintln!("[sirix-terminal] desktop-server disconnected; hosted shell detached safely.");
-                            break;
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-        }
-    }
-
-    kill_child(&child);
-    let _ = write.send(Message::Close(None)).await;
+        .context("failed to request local terminal close")?
+        .error_for_status()
+        .context("desktop-server rejected local terminal close request")?;
     Ok(())
 }
 
-async fn wait_for_host_registration(
-    read: &mut (impl futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
-              + Unpin),
-    terminal_id: Uuid,
-) -> anyhow::Result<()> {
-    while let Some(message) = read.next().await {
-        match message {
-            Ok(Message::Text(text)) => {
-                match serde_json::from_str::<HostedTerminalServerMessage>(&text) {
-                    Ok(HostedTerminalServerMessage::Registered { payload })
-                        if payload.terminal_id == terminal_id =>
-                    {
-                        if payload.ok {
-                            return Ok(());
-                        }
-                        anyhow::bail!(
-                            "desktop-server rejected hosted terminal registration: {}",
-                            payload
-                                .error_message
-                                .unwrap_or_else(|| "unknown error".to_string())
-                        );
-                    }
-                    Ok(
-                        HostedTerminalServerMessage::SettingsSync
-                        | HostedTerminalServerMessage::Pong,
-                    ) => {}
-                    Ok(_) => {}
-                    Err(error) => {
-                        eprintln!("[sirix-terminal] ignored invalid pre-register payload: {error}");
-                    }
-                }
-            }
-            Ok(Message::Ping(_)) => {}
-            Ok(Message::Close(_)) | Err(_) | Ok(_) => break,
-        }
-    }
-    anyhow::bail!("desktop-server closed websocket before host registration completed")
-}
-
-async fn send_host_message(
-    write: &mut (impl futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
-              + Unpin),
-    payload: &HostedTerminalClientMessage<'_>,
-) -> anyhow::Result<()> {
-    let encoded = serde_json::to_string(payload).context("failed to serialize host message")?;
-    write
-        .send(Message::Text(encoded.into()))
+async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<()>) {
+    let url = local_ws_url(port, "/ws");
+    let (socket, _) = match connect_async(url)
         .await
-        .context("failed to send host websocket payload")
-}
+        .context("failed to connect local websocket")
+    {
+        Ok(value) => value,
+        Err(error) => return (false, Err(error)),
+    };
+    let (mut write, mut read) = socket.split();
 
-fn spawn_pty_reader(
-    mut reader: Box<dyn Read + Send>,
-    tx: tokio::sync::mpsc::UnboundedSender<PtyEvent>,
-) {
-    thread::spawn(move || {
-        let mut stdout = io::stdout();
-        let mut buffer = [0_u8; 4096];
+    if let Err(error) = write
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "terminal.attach",
+                "payload": {
+                    "terminal_id": terminal_id,
+                    "protocol_version": RAW_STREAM_PROTOCOL_VERSION,
+                    "sync_mode": RAW_STREAM_SYNC_MODE,
+                    "client_kind": "system_terminal",
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .context("failed to attach terminal session")
+    {
+        return (false, Err(error));
+    }
+
+    let mut stdout = io::stdout();
+    let raw_mode_guard = match RawModeGuard::activate() {
+        Ok(guard) => guard,
+        Err(error) => return (false, Err(error)),
+    };
+    if let Err(error) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        Clear(ClearType::All),
+        cursor::MoveTo(0, 0),
+        cursor::Hide
+    )
+    .context("failed to prepare local terminal screen")
+    {
+        drop(raw_mode_guard);
+        return (false, Err(error));
+    }
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    spawn_stdin_reader(stdin_tx);
+
+    let last_size = current_terminal_size(TerminalSize::new(120, 32));
+    let mut viewer_presence_epoch: Option<u64> = None;
+    let mut size_rx = spawn_terminal_size_watcher(last_size);
+    let mut attached_once = false;
+
+    let attach_result: anyhow::Result<TerminalDetachReason> = async {
+        write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
         loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    let _ = tx.send(PtyEvent::Closed);
-                    break;
-                }
-                Ok(read_len) => {
-                    let chunk = buffer[..read_len].to_vec();
-                    if stdout.write_all(&chunk).is_err() {
-                        let _ = tx.send(PtyEvent::Error(
-                            "failed to write terminal output".to_string(),
-                        ));
-                        break;
+            tokio::select! {
+                Some(bytes) = stdin_rx.recv() => {
+                    if let Err(error) = write
+                        .send(Message::Text(
+                            serde_json::json!({
+                                "type": "terminal.input",
+                                "terminal_id": terminal_id,
+                                "data_base64": BASE64.encode(bytes),
+                            })
+                            .to_string()
+                            .into()
+                        ))
+                        .await
+                    {
+                        break Err(anyhow::Error::new(error).context("failed to send terminal input"));
                     }
-                    stdout.flush().ok();
-                    if tx.send(PtyEvent::Output(chunk)).is_err() {
-                        break;
+                }
+                Some(current_size) = size_rx.recv() => {
+                    if let Err(error) = write_resize(
+                        &mut write,
+                        terminal_id,
+                        current_size,
+                        viewer_presence_epoch,
+                    )
+                    .await
+                    {
+                        break Err(error.context("failed to propagate terminal resize"));
                     }
                 }
-                Err(error) => {
-                    let _ = tx.send(PtyEvent::Error(error.to_string()));
-                    break;
+                message = read.next() => {
+                    match message {
+                        Some(Ok(Message::Text(text))) => {
+                            if message_marks_terminal_ready(&text) {
+                                attached_once = true;
+                            }
+                            if handle_terminal_message(&mut stdout, &text, &mut viewer_presence_epoch)? {
+                                break Ok(TerminalDetachReason::SessionClosed);
+                            }
+                        }
+                        Some(Ok(Message::Binary(bytes))) => {
+                            if let Err(error) = stdout.write_all(&bytes) {
+                                break Err(anyhow::Error::new(error).context("failed to write binary websocket frame"));
+                            }
+                            stdout.flush().ok();
+                        }
+                        Some(Ok(Message::Close(_))) | None => break Ok(TerminalDetachReason::TransportClosed),
+                        Some(Ok(_)) => {}
+                        Some(Err(error)) => break Err(anyhow::Error::new(error).context("terminal websocket read failed")),
+                    }
                 }
             }
         }
-    });
+    }.await;
+
+    let detach_reason = match &attach_result {
+        Ok(reason) => *reason,
+        Err(_) => TerminalDetachReason::TransportClosed,
+    };
+    if attached_once {
+        // 成功 attach 过之后，退出前显式发一次 detach，避免仅依赖 socket 关闭 +
+        // server 侧延迟清理，缩短 authority 回收与后续 viewer 接管的收敛时间。
+        let _ = write
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "terminal.detach",
+                    "payload": {
+                        "terminal_id": terminal_id,
+                        "client_kind": "system_terminal",
+                        "viewer_presence_epoch": viewer_presence_epoch,
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await;
+    }
+    drop(raw_mode_guard);
+    let restore_result = restore_local_terminal(&mut stdout, detach_reason);
+    let final_result = match attach_result {
+        Ok(_) => restore_result.map_err(Into::into),
+        Err(error) if is_graceful_terminal_disconnect(&error) => restore_result.map_err(Into::into),
+        Err(error) => match restore_result {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(error.context(format!(
+                "additionally failed to restore local terminal state: {restore_error}"
+            ))),
+        },
+    };
+    (attached_once, final_result)
 }
 
-fn is_graceful_host_disconnect(error: &anyhow::Error) -> bool {
+async fn write_resize<S>(
+    write: &mut S,
+    terminal_id: &str,
+    size: TerminalSize,
+    viewer_presence_epoch: Option<u64>,
+) -> anyhow::Result<()>
+where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    write
+        .send(Message::Text(
+            serde_json::json!({
+                "type": "terminal.resize",
+                "terminal_id": terminal_id,
+                "cols": size.cols,
+                "rows": size.rows,
+                "client_kind": "system_terminal",
+                "viewer_presence_epoch": viewer_presence_epoch,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .context("failed to send terminal resize")
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalDetachReason {
+    SessionClosed,
+    TransportClosed,
+}
+
+fn is_graceful_terminal_disconnect(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let message = cause.to_string().to_ascii_lowercase();
         message.contains("connection reset without closing handshake")
             || message.contains("broken pipe")
             || message.contains("connection reset by peer")
             || message.contains("sending after closing")
+            || message.contains("io error: broken pipe")
     })
 }
 
-fn apply_shared_shell_env(builder: &mut CommandBuilder, terminal_id: Uuid) -> anyhow::Result<()> {
-    let sirix_home = resolve_sirix_home().context("failed to resolve SIRIX_HOME")?;
-    let bin_dir = sirix_home.join("bin");
-    let path = env::var("PATH").unwrap_or_default();
-    let separator = if cfg!(windows) { ';' } else { ':' };
-    let augmented_path = if path.trim().is_empty() {
-        bin_dir.display().to_string()
-    } else {
-        format!("{}{}{}", bin_dir.display(), separator, path)
-    };
-
-    // The shared shell inherits the same Sirix bin directory as desktop-owned
-    // terminals, and it receives the terminal session id so nested
-    // `sirix-terminal` launches can be rejected deterministically.
-    builder.env("PATH", augmented_path);
-    builder.env("SIRIX_HOME", sirix_home);
-    builder.env(SIRIX_SCENE_ENV, resolve_scene()?.as_str());
-    builder.env(CURRENT_TERMINAL_ENV, terminal_id.to_string());
-    builder.env(CURRENT_TERMINAL_KIND_ENV, TERMINAL_KIND_HOSTED_SHELL);
+fn restore_local_terminal(
+    stdout: &mut io::Stdout,
+    reason: TerminalDetachReason,
+) -> anyhow::Result<()> {
+    execute!(
+        stdout,
+        LeaveAlternateScreen,
+        cursor::Show,
+        style::ResetColor
+    )
+    .context("failed to restore local terminal state")?;
+    stdout
+        .write_all(
+            b"\x1b[?1l\x1b>\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?7h\x1b[r\x1b[0m\x1b[?25h\r\n",
+        )
+        .context("failed to write local terminal reset sequence")?;
+    match reason {
+        TerminalDetachReason::SessionClosed => {
+            stdout
+                .write_all(b"[sirix-terminal] shared terminal closed.\r\n")
+                .context("failed to write session closed message")?;
+        }
+        TerminalDetachReason::TransportClosed => {
+            stdout
+                .write_all(
+                    b"[sirix-terminal] desktop-server disconnected; shared terminal detached safely.\r\n",
+                )
+                .context("failed to write transport closed message")?;
+        }
+    }
+    stdout.flush().ok();
     Ok(())
+}
+
+fn handle_terminal_message(
+    stdout: &mut io::Stdout,
+    raw: &str,
+    viewer_presence_epoch: &mut Option<u64>,
+) -> anyhow::Result<bool> {
+    let decoded = serde_json::from_str::<serde_json::Value>(raw)
+        .with_context(|| format!("failed to decode websocket payload: {raw}"))?;
+    let message_type = decoded
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+
+    match message_type {
+        "terminal.ready" => {
+            *viewer_presence_epoch = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("viewer_presence_epoch"))
+                .and_then(serde_json::Value::as_u64);
+            Ok(false)
+        }
+        "terminal.output" | "terminal.snapshot" => {
+            if let Some(data) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("data_base64"))
+                .and_then(serde_json::Value::as_str)
+            {
+                let bytes = BASE64
+                    .decode(data)
+                    .context("failed to decode terminal frame")?;
+                stdout
+                    .write_all(&bytes)
+                    .context("failed to write terminal output")?;
+                stdout.flush().ok();
+            }
+            Ok(false)
+        }
+        "terminal.error" => {
+            if let Some(message) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("error_message"))
+                .and_then(serde_json::Value::as_str)
+            {
+                eprintln!("\n[sirix-terminal] terminal error: {message}");
+            }
+            Ok(true)
+        }
+        "terminal.warning" => {
+            if let Some(message) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("message"))
+                .and_then(serde_json::Value::as_str)
+            {
+                eprintln!("\n\u{1b}[33m[sirix-terminal] {message}\u{1b}[0m");
+            }
+            if let Some(install_commands) = decoded
+                .get("payload")
+                .and_then(|payload| payload.get("install_commands"))
+                .and_then(serde_json::Value::as_array)
+            {
+                for command in install_commands {
+                    if let Some(command) = command.as_str() {
+                        eprintln!("\u{1b}[33m  {command}\u{1b}[0m");
+                    }
+                }
+            }
+            Ok(false)
+        }
+        "terminal.closed" => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn message_marks_terminal_ready(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|decoded| {
+            decoded
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|event_type| event_type == "terminal.ready")
 }
 
 fn resolve_shared_shell() -> String {
@@ -506,11 +525,4 @@ fn executable_in_path(name: &str) -> bool {
         return false;
     };
     env::split_paths(&path).any(|directory| directory.join(name).is_file())
-}
-
-fn kill_child(child: &Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>) {
-    if let Ok(mut child) = child.lock() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }

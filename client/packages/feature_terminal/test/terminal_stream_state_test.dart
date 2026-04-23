@@ -166,36 +166,39 @@ void main() {
       expect(cache.isDuplicateHistoryInvalidation(second), isFalse);
     });
 
-    test('treats preview-only invalidation as visible-history-only even when rows are missing', () {
+    test('buildTranscript overlays latest screen snapshot onto cached history tail', () {
       final cache = TerminalAuthorityCache()
         ..activeBuffer = 'main'
-        ..rows = 0
         ..historyStartLine = 0
-        ..historyEndLine = 76
-        ..viewportStartLine = 0
-        ..viewportEndLine = 76;
+        ..historyEndLine = 3
+        ..viewportStartLine = 1
+        ..viewportEndLine = 3;
 
       cache.applyHistoryInvalidated({
         'history_generation': 11,
         'history_start_line': 0,
-        'history_end_line': 76,
+        'history_end_line': 3,
         'start_line': 0,
-        'end_line': 76,
+        'end_line': 3,
         'reason': 'geometry_changed',
-        'lines': List.generate(
-          76,
-          (index) => {
-            'text': 'line-$index',
-            'wrapped': false,
-            'hard_break': true,
-          },
-        ),
+        'lines': [
+          {'text': 'line-0', 'wrapped': false, 'hard_break': true},
+          {'text': 'old-1', 'wrapped': false, 'hard_break': true},
+          {'text': 'old-2', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+      cache.applyScreenSnapshot({
+        'rows': 2,
+        'cols': 40,
+        'cursor_row': 1,
+        'cursor_col': 3,
+        'screen_lines': [
+          {'text': 'new-1', 'wrapped': false, 'hard_break': true},
+          {'text': 'new-2', 'wrapped': false, 'hard_break': true},
+        ],
       });
 
-      expect(
-        cache.shouldTreatHistoryInvalidationAsVisibleOnly(previewLineCount: 76),
-        isTrue,
-      );
+      expect(cache.buildTranscript(), 'line-0\nnew-1\nnew-2');
     });
   });
 

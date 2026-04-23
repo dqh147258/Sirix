@@ -7,6 +7,7 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'ai_models.dart';
 import 'models.dart';
+import 'terminal_protocol.dart';
 
 class DesktopLocalClient {
   DesktopLocalClient({
@@ -383,20 +384,19 @@ class DesktopLocalClient {
   void sendTerminalAttach({
     required WebSocketChannel channel,
     required String terminalId,
-    int protocolVersion = 2,
-    String syncMode = 'state-cache-v2',
+    int protocolVersion = authorityTerminalProtocolVersion,
+    String syncMode = authorityTerminalSyncMode,
     String clientKind = 'desktop_app',
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.attach',
-        'payload': {
-          'terminal_id': terminalId,
-          'protocol_version': protocolVersion,
-          'sync_mode': syncMode,
-          'client_kind': clientKind,
-        },
-      }),
+      jsonEncode(
+        buildTerminalAttachMessage(
+          terminalId: terminalId,
+          protocolVersion: protocolVersion,
+          syncMode: syncMode,
+          clientKind: clientKind,
+        ),
+      ),
     );
   }
 
@@ -405,12 +405,9 @@ class DesktopLocalClient {
     required String terminalId,
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.bootstrap.request',
-        'payload': {
-          'terminal_id': terminalId,
-        },
-      }),
+      jsonEncode(
+        buildTerminalBootstrapRequestMessage(terminalId: terminalId),
+      ),
     );
   }
 
@@ -423,16 +420,15 @@ class DesktopLocalClient {
     required int endLine,
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.history.range.request',
-        'payload': {
-          'request_id': requestId,
-          'terminal_id': terminalId,
-          'history_generation': historyGeneration,
-          'start_line': startLine,
-          'end_line': endLine,
-        },
-      }),
+      jsonEncode(
+        buildTerminalHistoryRangeRequestMessage(
+          requestId: requestId,
+          terminalId: terminalId,
+          historyGeneration: historyGeneration,
+          startLine: startLine,
+          endLine: endLine,
+        ),
+      ),
     );
   }
 
@@ -441,10 +437,24 @@ class DesktopLocalClient {
     required String terminalId,
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.close',
-        'terminal_id': terminalId,
-      }),
+      jsonEncode(buildTerminalCloseMessage(terminalId: terminalId)),
+    );
+  }
+
+  void sendTerminalDetach({
+    required WebSocketChannel channel,
+    required String terminalId,
+    required String clientKind,
+    int? viewerPresenceEpoch,
+  }) {
+    channel.sink.add(
+      jsonEncode(
+        buildTerminalDetachMessage(
+          terminalId: terminalId,
+          clientKind: clientKind,
+          viewerPresenceEpoch: viewerPresenceEpoch,
+        ),
+      ),
     );
   }
 
@@ -454,11 +464,12 @@ class DesktopLocalClient {
     required String dataBase64,
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.input',
-        'terminal_id': terminalId,
-        'data_base64': dataBase64,
-      }),
+      jsonEncode(
+        buildTerminalInputMessage(
+          terminalId: terminalId,
+          dataBase64: dataBase64,
+        ),
+      ),
     );
   }
 
@@ -471,14 +482,15 @@ class DesktopLocalClient {
     int? viewerPresenceEpoch,
   }) {
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.resize',
-        'terminal_id': terminalId,
-        'cols': cols,
-        'rows': rows,
-        'client_kind': clientKind,
-        'viewer_presence_epoch': viewerPresenceEpoch,
-      }),
+      jsonEncode(
+        buildTerminalResizeMessage(
+          terminalId: terminalId,
+          cols: cols,
+          rows: rows,
+          clientKind: clientKind,
+          viewerPresenceEpoch: viewerPresenceEpoch,
+        ),
+      ),
     );
   }
 

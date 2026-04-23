@@ -153,9 +153,10 @@ class TerminalSessionSummary {
   }
 
   bool get isHostedTerminal {
-    // Remote/mobile snapshots do not currently emit an explicit source field,
-    // so the dedicated Sirix Terminal title remains the compatibility fallback.
-    return source == 'hosted' || title.trim().toLowerCase() == 'sirix terminal';
+    // Shared-terminal summaries now come from Desktop Server owned runtimes.
+    // Keep the title-based check only as a UI compatibility hint for the
+    // dedicated Sirix terminal tab styling.
+    return title.trim().toLowerCase() == 'sirix terminal';
   }
 }
 

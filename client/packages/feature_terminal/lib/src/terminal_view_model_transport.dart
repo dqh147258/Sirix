@@ -171,11 +171,14 @@ abstract class _TerminalViewModelTransportBase extends _TerminalViewModelStateBa
     required String payload,
   }) {
     if (_transport == _TerminalTransport.sessionWebrtc) {
-      unawaited(_sessionTerminalChannelController.sendJson({
-        'type': 'terminal.input',
-        'terminal_id': terminalId,
-        'data_base64': payload,
-      }));
+      unawaited(
+        _sessionTerminalChannelController.sendJson(
+          buildTerminalInputMessage(
+            terminalId: terminalId,
+            dataBase64: payload,
+          ),
+        ),
+      );
       return;
     }
 
@@ -194,10 +197,12 @@ abstract class _TerminalViewModelTransportBase extends _TerminalViewModelStateBa
     }
 
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.input',
-        'data_base64': payload,
-      }),
+      jsonEncode(
+        buildTerminalInputMessage(
+          terminalId: terminalId,
+          dataBase64: payload,
+        )..remove('terminal_id'),
+      ),
     );
   }
 
@@ -265,14 +270,17 @@ abstract class _TerminalViewModelTransportBase extends _TerminalViewModelStateBa
     }
 
     if (_transport == _TerminalTransport.sessionWebrtc) {
-      unawaited(_sessionTerminalChannelController.sendJson({
-        'type': 'terminal.resize',
-        'terminal_id': resize.terminalId,
-        'cols': resize.cols,
-        'rows': resize.rows,
-        'client_kind': 'mobile_app',
-        'viewer_presence_epoch': viewerPresenceEpoch,
-      }));
+      unawaited(
+        _sessionTerminalChannelController.sendJson(
+          buildTerminalResizeMessage(
+            terminalId: resize.terminalId,
+            cols: resize.cols,
+            rows: resize.rows,
+            clientKind: 'mobile_app',
+            viewerPresenceEpoch: viewerPresenceEpoch,
+          ),
+        ),
+      );
       return;
     }
 
@@ -297,13 +305,15 @@ abstract class _TerminalViewModelTransportBase extends _TerminalViewModelStateBa
     }
 
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.resize',
-        'cols': resize.cols,
-        'rows': resize.rows,
-        'client_kind': 'desktop_app',
-        'viewer_presence_epoch': viewerPresenceEpoch,
-      }),
+      jsonEncode(
+        buildTerminalResizeMessage(
+          terminalId: resize.terminalId,
+          cols: resize.cols,
+          rows: resize.rows,
+          clientKind: 'desktop_app',
+          viewerPresenceEpoch: viewerPresenceEpoch,
+        )..remove('terminal_id'),
+      ),
     );
   }
 

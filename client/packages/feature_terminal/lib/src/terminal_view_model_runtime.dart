@@ -9,8 +9,6 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
     required super.config,
   });
 
-  List<int>? _decodeScreenSnapshotBytes(Map<String, dynamic> body);
-
   void queueInput({
     required String terminalId,
     required String data,
@@ -213,50 +211,6 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
     );
   }
 
-  void _scheduleVisibleScreenSnapshotApply(
-    String terminalId, {
-    required String reason,
-    required Map<String, dynamic> body,
-    required String signature,
-  }) {
-    final authority = _terminalAuthorities[terminalId];
-    if (authority == null) {
-      return;
-    }
-    final existingPending = _pendingVisibleSnapshotApplies[terminalId];
-    if (existingPending != null &&
-        existingPending.signature == signature &&
-        existingPending.bufferEpoch == authority.bufferEpoch &&
-        existingPending.layoutEpoch == authority.layoutEpoch) {
-      AppLogger.trace(
-        '$_terminalStreamTraceTag ignore duplicate pending visible snapshot terminalId=$terminalId reason=$reason bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch}',
-      );
-      return;
-    }
-    _pendingVisibleSnapshotApplies[terminalId] = _PendingScreenSnapshotApply(
-      reason: reason,
-      body: body,
-      signature: signature,
-      bufferEpoch: authority.bufferEpoch,
-      layoutEpoch: authority.layoutEpoch,
-    );
-    final existingTimer = _pendingVisibleSnapshotTimers[terminalId];
-    if (existingTimer != null) {
-      existingTimer.cancel();
-      AppLogger.info(
-        '$_terminalStreamTraceTag reschedule visible snapshot apply terminalId=$terminalId reason=$reason bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch}',
-      );
-    } else {
-      AppLogger.info(
-        '$_terminalStreamTraceTag schedule visible snapshot apply terminalId=$terminalId reason=$reason bufferEpoch=${authority.bufferEpoch} layoutEpoch=${authority.layoutEpoch}',
-      );
-    }
-    _pendingVisibleSnapshotTimers[terminalId] = Timer(
-      _terminalVisibleSnapshotApplyInterval,
-      () => _flushVisibleScreenSnapshotApply(terminalId),
-    );
-  }
-
   void _applyAuthorityViewportIfNeeded(
     String terminalId,
     Terminal terminal, {
@@ -267,63 +221,23 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
       return;
     }
 
-    final viewerRows = _preferredViewportRowsForTerminal(terminalId);
-    final streamState = _streamStateFor(terminalId);
-    final hasLockedVisibleWindow =
-        streamState.initialVisibleWindowTopOffset != null && viewerRows > 0;
     final targetRows = visibleRowOverride != null && visibleRowOverride > 0
         ? visibleRowOverride
-        : authority.shouldPreferScreenSnapshotResync
-        ? hasLockedVisibleWindow
-            ? authority.rows.clamp(1, viewerRows)
-            : authority.rows
-        : viewerRows > 0
-            ? authority.rows.clamp(1, viewerRows)
-            : authority.rows;
+        : authority.rows;
 
     if (terminal.viewWidth == authority.cols && terminal.viewHeight == targetRows) {
       return;
     }
 
-    // 共享终端必须锁定 authority 列宽，避免不同客户端各自按本地窗口重排。
-    // 但行高若也强制绑定成远端完整 rows（例如系统终端 76 行，而 Desktop
-    // 面板只有 25 行），Flutter 端会把可见内容裁到屏幕顶部，表现为“闪一下
-    // 然后内容消失/看起来空白”。因此这里采用“authority cols + viewer rows”
-    // 的折中策略：宽度保持权威，行数受本地可视区约束，保证当前屏幕至少能
-    // 稳定落在用户可见区域内。
-    //
-    // 已知遗留问题（暂时搁置，后续单独处理）：
-    // - Desktop App 当前命令行“应该显示的当前行”定位仍然可能不准确。
-    //   这和 authority rows、viewer rows、screen snapshot apply 的混合策略
-    //   仍然存在偏差有关；本次提交先优先保证多端共享的基本稳定性，不在这里
-    //   继续做更高风险的 cursor/viewport 语义重构。
     final viewportSource = _lastDispatchedResizeByTerminal.containsKey(terminalId)
         ? 'terminal'
         : _lastObservedViewportSize != null
             ? 'global'
             : 'unknown';
-    final viewportMode = authority.shouldPreferScreenSnapshotResync
-        ? visibleRowOverride != null && visibleRowOverride > 0
-            ? 'authority_visible_window_rows'
-            : hasLockedVisibleWindow
-                ? 'authority_locked_visible_rows'
-                : 'authority_full_rows'
-        : 'authority_cols_viewer_rows';
     AppLogger.info(
-      '$_terminalStreamTraceTag apply authority viewport terminalId=$terminalId authority=${authority.cols}x${authority.rows} viewerRows=$viewerRows viewportSource=$viewportSource viewportMode=$viewportMode target=${authority.cols}x$targetRows current=${terminal.viewWidth}x${terminal.viewHeight}',
+      '$_terminalStreamTraceTag apply authority viewport terminalId=$terminalId authority=${authority.cols}x${authority.rows} viewportSource=$viewportSource target=${authority.cols}x$targetRows current=${terminal.viewWidth}x${terminal.viewHeight}',
     );
     terminal.resize(authority.cols, targetRows);
-  }
-
-  int _preferredViewportRowsForTerminal(String terminalId) {
-    final dispatched = _lastDispatchedResizeByTerminal[terminalId];
-    if (dispatched != null && dispatched.rows > 0) {
-      return dispatched.rows;
-    }
-    if (_lastObservedViewportSize != null && _lastObservedViewportSize!.rows > 0) {
-      return _lastObservedViewportSize!.rows;
-    }
-    return 0;
   }
 
   void _pruneTerminalCache(Iterable<String> terminalIds) {
@@ -354,8 +268,6 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
     _lastDispatchedResizeByTerminal.remove(terminalId);
     _pendingAuthorityRefreshes.remove(terminalId);
     _pendingAuthorityRefreshTimers.remove(terminalId)?.cancel();
-    _pendingVisibleSnapshotApplies.remove(terminalId);
-    _pendingVisibleSnapshotTimers.remove(terminalId)?.cancel();
     if (terminal == null) {
       return;
     }

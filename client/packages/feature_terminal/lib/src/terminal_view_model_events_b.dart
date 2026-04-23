@@ -286,21 +286,17 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
         return;
       }
 
-      await _sessionTerminalChannelController.sendJson({
-        'type': 'terminal.attach',
-        'payload': {
-          'terminal_id': terminalId,
-          'protocol_version': 2,
-          'sync_mode': _terminalSyncModeV2,
-          'client_kind': 'mobile_app',
-        },
-      });
-      await _sessionTerminalChannelController.sendJson({
-        'type': 'terminal.bootstrap.request',
-        'payload': {
-          'terminal_id': terminalId,
-        },
-      });
+      await _sessionTerminalChannelController.sendJson(
+        buildTerminalAttachMessage(
+          terminalId: terminalId,
+          protocolVersion: authorityTerminalProtocolVersion,
+          syncMode: _terminalSyncModeV2,
+          clientKind: 'mobile_app',
+        ),
+      );
+      await _sessionTerminalChannelController.sendJson(
+        buildTerminalBootstrapRequestMessage(terminalId: terminalId),
+      );
     }
   }
 
@@ -335,14 +331,17 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
 
       // Desktop terminal creation is async on the desktop-server side. The
       // backend can return an "opening" terminal record before the local PTY
-      // has published its first ready/snapshot event, which leaves the client
+      // has published its first authority bootstrap, which leaves the client
       // stuck with a blank "OPENING" tab and no usable stdin path. Re-sending
-      // attach asks desktop-server to replay terminal.ready + terminal.snapshot
-      // once the PTY actually exists, without changing the underlying terminal
-      // session or transport model.
+      // attach asks desktop-server to replay the authority baseline
+      // (`terminal.ready` + canonical state/screen/history preview) once the
+      // PTY actually exists, without changing the underlying terminal session
+      // or transport model.
       localClient.sendTerminalAttach(
         channel: channel,
         terminalId: terminalId,
+        protocolVersion: authorityTerminalProtocolVersion,
+        syncMode: authorityTerminalSyncMode,
       );
     }
 

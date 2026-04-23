@@ -106,6 +106,7 @@ fn spawn_runtime_settings_sync(state: AppState) {
                                 serde_json::json!({
                                     "type": "settings.sync",
                                     "auto_approve_screen_share": runtime.auto_approve_screen_share,
+                                    "prefer_tmux_terminal": runtime.prefer_tmux_terminal,
                                     "device_id": state.config.backend.device_id,
                                     "local_ws_port": runtime.local_ws_port,
                                     "logging_enabled": runtime.logging_enabled,
@@ -940,13 +941,22 @@ async fn handle_terminal_create(state: &AppState, payload: serde_json::Value) {
 
     let result = state
         .terminal_manager
-        .create_terminal(terminal_id, shell, cwd, title, cols, rows)
+        .create_terminal(
+            terminal_id,
+            shell,
+            cwd,
+            title,
+            cols,
+            rows,
+            state.runtime.read().await.prefer_tmux_terminal,
+            true,
+        )
         .await;
     if let Err(error) = result {
         warn!(terminal_id = %terminal_id, error = %error, "create terminal failed");
         let _ = state
             .terminal_manager
-            .update_state(
+            .force_update_state(
                 terminal_id,
                 "error",
                 None,

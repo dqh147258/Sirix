@@ -16,23 +16,6 @@ class _PendingAuthorityRefresh {
 }
 
 @immutable
-class _PendingScreenSnapshotApply {
-  const _PendingScreenSnapshotApply({
-    required this.reason,
-    required this.body,
-    required this.signature,
-    required this.bufferEpoch,
-    required this.layoutEpoch,
-  });
-
-  final String reason;
-  final Map<String, dynamic> body;
-  final String signature;
-  final int bufferEpoch;
-  final int layoutEpoch;
-}
-
-@immutable
 class _QueuedResize {
   const _QueuedResize({
     required this.terminalId,
@@ -249,44 +232,19 @@ class TerminalAuthorityCache {
   int viewportEndLine = 1;
   int rows = 0;
   int cols = 0;
+  int cursorRow = 0;
+  int cursorCol = 0;
+  List<TerminalAuthorityLine> screenLines = const <TerminalAuthorityLine>[];
   final Map<int, TerminalAuthorityLine> historyLines = <int, TerminalAuthorityLine>{};
   String? _lastHistoryInvalidationSignature;
 
   int get cachedHistoryLineCount => historyLines.length;
 
   bool get shouldPreferScreenSnapshotResync {
-    return _isVisibleHistoryOnly(
-      previewLineCount: cachedHistoryLineCount,
-    );
-  }
-
-  bool shouldTreatHistoryInvalidationAsVisibleOnly({
-    required int previewLineCount,
-  }) {
-    return _isVisibleHistoryOnly(previewLineCount: previewLineCount);
-  }
-
-  bool _isVisibleHistoryOnly({
-    required int previewLineCount,
-  }) {
-    if (activeBuffer != 'main') {
-      return true;
-    }
-    final historyLineCount = historyEndLine - historyStartLine;
-    final viewportLineCount = viewportEndLine - viewportStartLine;
-    final effectiveRows = <int>[
-      rows,
-      viewportLineCount,
-      previewLineCount,
-      cachedHistoryLineCount,
-    ].fold(0, (maxValue, value) => value > maxValue ? value : maxValue);
-    // 当 history 规模没有超出当前 viewport / preview 时，authority 并没有
-    // 提供可供“重建滚动历史”的额外信息，此时更接近全屏 UI / TUI 的当前
-    // 屏幕镜像。继续用 transcript 重建只会把 Flutter 端已经持有的 scrollback
-    // 压缩回当前 preview，表现为历史突然丢失。
-    return effectiveRows > 0 &&
-        historyLineCount <= effectiveRows &&
-        viewportLineCount <= effectiveRows;
+    // Shared-terminal v2 has moved to a canonical-state-only main path.
+    // Desktop rendering should no longer branch into "visible-history-only"
+    // fallbacks that try to protect a separate client-owned truth.
+    return false;
   }
 
   int? get oldestCachedLine {
@@ -296,7 +254,8 @@ class TerminalAuthorityCache {
     return historyLines.keys.reduce((left, right) => left < right ? left : right);
   }
 
-  bool get isV2Authority => protocolVersion == 2 && syncMode == _terminalSyncModeV2;
+  bool get isV2Authority =>
+      isAuthorityTerminalProtocol(protocolVersion: protocolVersion, syncMode: syncMode);
 
   void applyStateSnapshot(Map<String, dynamic> json) {
     geometryGeneration =
@@ -321,6 +280,12 @@ class TerminalAuthorityCache {
     cols = (json['cols'] as num?)?.toInt() ?? cols;
     bufferEpoch = (json['buffer_epoch'] as num?)?.toInt() ?? bufferEpoch;
     layoutEpoch = (json['layout_epoch'] as num?)?.toInt() ?? layoutEpoch;
+    cursorRow = (json['cursor_row'] as num?)?.toInt() ?? cursorRow;
+    cursorCol = (json['cursor_col'] as num?)?.toInt() ?? cursorCol;
+    screenLines = (json['screen_lines'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(TerminalAuthorityLine.fromJson)
+        .toList(growable: false);
   }
 
   void appendHistory(Map<String, dynamic> json) {
@@ -437,16 +402,46 @@ class TerminalAuthorityCache {
   }
 
   String buildTranscript() {
-    if (historyLines.isEmpty) {
-      return '';
+    if (activeBuffer == 'alt') {
+      return _linesToTranscript(screenLines);
     }
-    final sortedEntries = historyLines.entries.toList(growable: false)
+
+    final merged = Map<int, TerminalAuthorityLine>.from(historyLines);
+    if (viewportEndLine > viewportStartLine && screenLines.isNotEmpty) {
+      for (var index = 0; index < screenLines.length; index += 1) {
+        final lineNumber = viewportStartLine + index;
+        if (lineNumber >= viewportEndLine) {
+          break;
+        }
+        merged[lineNumber] = screenLines[index];
+      }
+    }
+    if (merged.isEmpty) {
+      return _linesToTranscript(screenLines);
+    }
+
+    final sortedEntries = merged.entries.toList(growable: false)
       ..sort((left, right) => left.key.compareTo(right.key));
     final buffer = StringBuffer();
     for (var index = 0; index < sortedEntries.length; index += 1) {
       final line = sortedEntries[index].value;
       buffer.write(line.text);
       if (line.hardBreak && index < sortedEntries.length - 1) {
+        buffer.write('\n');
+      }
+    }
+    return buffer.toString();
+  }
+
+  String _linesToTranscript(List<TerminalAuthorityLine> lines) {
+    if (lines.isEmpty) {
+      return '';
+    }
+    final buffer = StringBuffer();
+    for (var index = 0; index < lines.length; index += 1) {
+      final line = lines[index];
+      buffer.write(line.text);
+      if (line.hardBreak && index < lines.length - 1) {
         buffer.write('\n');
       }
     }

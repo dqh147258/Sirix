@@ -164,6 +164,22 @@ impl TerminalGeometryArbiter {
         self.geometry_generation
     }
 
+    pub fn viewer_presence_epoch(self, kind: TerminalClientKind) -> u64 {
+        match kind {
+            TerminalClientKind::SystemTerminal => self.system_viewer.presence_epoch,
+            TerminalClientKind::DesktopApp => self.desktop_viewer.presence_epoch,
+            TerminalClientKind::MobileApp | TerminalClientKind::Unknown => 0,
+        }
+    }
+
+    pub fn viewer_attached(self, kind: TerminalClientKind) -> bool {
+        match kind {
+            TerminalClientKind::SystemTerminal => self.system_viewer.attached,
+            TerminalClientKind::DesktopApp => self.desktop_viewer.attached,
+            TerminalClientKind::MobileApp | TerminalClientKind::Unknown => false,
+        }
+    }
+
     pub fn register_viewer(&mut self, kind: TerminalClientKind) -> u64 {
         match kind {
             TerminalClientKind::SystemTerminal => self.system_viewer.register(),

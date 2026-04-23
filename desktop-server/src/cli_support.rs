@@ -17,8 +17,6 @@ use crate::scene::{resolve_scene, SirixScene, SIRIX_SCENE_ENV};
 const DEFAULT_LOCAL_HOST: &str = "127.0.0.1";
 
 pub(crate) const CURRENT_TERMINAL_ENV: &str = "SIRIX_TERMINAL_SESSION_ID";
-pub(crate) const CURRENT_TERMINAL_KIND_ENV: &str = "SIRIX_TERMINAL_KIND";
-pub(crate) const TERMINAL_KIND_HOSTED_SHELL: &str = "hosted_shell";
 
 pub(crate) async fn ensure_desktop_server() -> anyhow::Result<u16> {
     if let Some(port) = probe_running_port().await? {

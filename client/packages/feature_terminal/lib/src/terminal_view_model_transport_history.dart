@@ -34,16 +34,15 @@ extension _TerminalViewModelTransportHistory on _TerminalViewModelTransportBase 
       '$_terminalStreamTraceTag request history range terminalId=$terminalId requestId=$requestId generation=$generation start=$startLine end=$endLine transport=${_transport?.name ?? 'none'} cacheSize=${authority?.historyLines.length ?? 0}',
     );
     if (_transport == _TerminalTransport.sessionWebrtc) {
-      final sent = await _sessionTerminalChannelController.sendJson({
-        'type': 'terminal.history.range.request',
-        'payload': {
-          'request_id': requestId,
-          'terminal_id': terminalId,
-          'history_generation': generation,
-          'start_line': startLine,
-          'end_line': endLine,
-        },
-      });
+      final sent = await _sessionTerminalChannelController.sendJson(
+        buildTerminalHistoryRangeRequestMessage(
+          requestId: requestId,
+          terminalId: terminalId,
+          historyGeneration: generation,
+          startLine: startLine,
+          endLine: endLine,
+        ),
+      );
       if (!sent) {
         pendingKeys.remove(rangeKey);
       }
@@ -72,16 +71,15 @@ extension _TerminalViewModelTransportHistory on _TerminalViewModelTransportBase 
       return;
     }
     channel.sink.add(
-      jsonEncode({
-        'type': 'terminal.history.range.request',
-        'payload': {
-          'request_id': requestId,
-          'terminal_id': terminalId,
-          'history_generation': generation,
-          'start_line': startLine,
-          'end_line': endLine,
-        },
-      }),
+      jsonEncode(
+        buildTerminalHistoryRangeRequestMessage(
+          requestId: requestId,
+          terminalId: terminalId,
+          historyGeneration: generation,
+          startLine: startLine,
+          endLine: endLine,
+        ),
+      ),
     );
   }
 

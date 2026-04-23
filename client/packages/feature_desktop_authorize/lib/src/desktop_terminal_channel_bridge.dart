@@ -21,6 +21,7 @@ class DesktopTerminalChannelBridge {
   final DesktopLocalClient _localClient;
   final SessionTerminalChannelController _terminalChannelController;
   final List<String> _pendingMessages = <String>[];
+  final Map<String, String> _attachedTerminalMessages = <String, String>{};
 
   WebSocketChannel? _localChannel;
   StreamSubscription<dynamic>? _localSubscription;
@@ -49,6 +50,7 @@ class DesktopTerminalChannelBridge {
     }
 
     _sessionId = null;
+    _detachTrackedTerminals();
     _pendingMessages.clear();
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
@@ -72,6 +74,8 @@ class DesktopTerminalChannelBridge {
       return;
     }
 
+    _trackAttachmentState(payload, type);
+
     final encoded = jsonEncode(payload);
     final channel = _localChannel;
     if (channel == null) {
@@ -90,6 +94,7 @@ class DesktopTerminalChannelBridge {
       case 'terminal.bootstrap.request':
       case 'terminal.history.range.request':
       case 'terminal.close':
+      case 'terminal.detach':
       case 'terminal.input':
       case 'terminal.resize':
       case 'ping':
@@ -139,6 +144,7 @@ class DesktopTerminalChannelBridge {
         },
       );
       _flushPendingMessages();
+      _replayTrackedAttachments();
     } catch (error) {
       AppLogger.warn('desktop terminal bridge local ws connect failed error=$error');
       _scheduleReconnect();
@@ -178,6 +184,54 @@ class DesktopTerminalChannelBridge {
       channel.sink.add(message);
     }
     _pendingMessages.clear();
+  }
+
+  void _trackAttachmentState(Map<String, dynamic> payload, String? type) {
+    if (type == 'terminal.attach') {
+      final body = payload['payload'] as Map<String, dynamic>?;
+      final terminalId = body?['terminal_id'] as String?;
+      if (terminalId != null && terminalId.isNotEmpty) {
+        _attachedTerminalMessages[terminalId] = jsonEncode(payload);
+      }
+      return;
+    }
+    if (type == 'terminal.close' || type == 'terminal.detach') {
+      final payloadBody = payload['payload'] as Map<String, dynamic>?;
+      final terminalId =
+          payload['terminal_id'] as String? ?? payloadBody?['terminal_id'] as String?;
+      if (terminalId != null && terminalId.isNotEmpty) {
+        _attachedTerminalMessages.remove(terminalId);
+      }
+    }
+  }
+
+  void _replayTrackedAttachments() {
+    final channel = _localChannel;
+    if (channel == null || _attachedTerminalMessages.isEmpty) {
+      return;
+    }
+
+    for (final entry in _attachedTerminalMessages.entries) {
+      channel.sink.add(entry.value);
+      _localClient.sendTerminalBootstrapRequest(
+        channel: channel,
+        terminalId: entry.key,
+      );
+    }
+  }
+
+  void _detachTrackedTerminals() {
+    final channel = _localChannel;
+    if (channel != null) {
+      for (final terminalId in _attachedTerminalMessages.keys) {
+        _localClient.sendTerminalDetach(
+          channel: channel,
+          terminalId: terminalId,
+          clientKind: 'mobile_app',
+        );
+      }
+    }
+    _attachedTerminalMessages.clear();
   }
 
   void _scheduleReconnect() {

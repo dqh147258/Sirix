@@ -39,10 +39,9 @@ const int _terminalAuthorityCacheMaxLines = 8000;
 const int _terminalHistoryPrefetchChunkLines = 2000;
 const int _terminalVisibleSnapshotMaxTrailingBlankRows = 15;
 const String _terminalStreamTraceTag = '[TERMINAL_STREAM_TRACE]';
-const String _terminalSyncModeV2 = 'state-cache-v2';
+const String _terminalSyncModeV2 = authorityTerminalSyncMode;
 const String _terminalOscTraceTag = '[TERMINAL_OSC_TRACE]';
-const Duration _terminalAuthorityRefreshInterval = Duration(milliseconds: 500);
-const Duration _terminalVisibleSnapshotApplyInterval = Duration(milliseconds: 1000);
+const Duration _terminalAuthorityRefreshInterval = Duration(milliseconds: 80);
 
 @immutable
 class TerminalPageConfig {

@@ -996,6 +996,41 @@ mod tests {
     }
 
     #[test]
+    fn replay_resize_with_wide_chars_does_not_crash_on_narrow_width_jitter() {
+        let terminal_id = Uuid::new_v4();
+        let mut state = TerminalSyncState::new(12, 169);
+        let mut payload = Vec::new();
+        // 构造接近最新线上日志的场景：较宽窗口下已有内容，然后快速缩到极窄
+        // 宽度。这里特意把双宽字符放在长行尾部附近，覆盖 vt100 clear_wide
+        // 在窄宽度重排时最容易越界的边界条件。
+        for index in 0..96 {
+            let suffix = if index % 3 == 0 { "界" } else { "终" };
+            let long_ascii = "a".repeat(53);
+            payload
+                .extend_from_slice(format!("line-{index:03}-{long_ascii}{suffix}\r\n").as_bytes());
+        }
+        let _ = state.apply_output(terminal_id, &payload);
+
+        for cols in [
+            145_u16, 93, 72, 103, 162, 139, 86, 87, 140, 133, 59, 56, 51, 42, 39, 37, 34, 33, 32,
+            31, 30, 29, 28, 26, 25, 23, 21, 20, 19, 18, 12, 8, 4, 2, 1,
+        ] {
+            let _ = state.resize_with_replay_metadata(
+                terminal_id,
+                76,
+                cols,
+                Some(&payload),
+                ResizeReplayMetadata {
+                    history_truncated: false,
+                    replay_byte_len: payload.len(),
+                    buffer_epoch: state.buffer_epoch,
+                    layout_epoch: state.layout_epoch,
+                },
+            );
+        }
+    }
+
+    #[test]
     fn alt_resize_does_not_advance_main_history_generation() {
         let terminal_id = Uuid::new_v4();
         let mut state = TerminalSyncState::new(3, 12);

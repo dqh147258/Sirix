@@ -71,6 +71,24 @@
 - `terminal_view.dart` 新增 `_TerminalViewportScrollBehavior`，关闭 overscroll glow/stretch，避免软键盘 resize 与 scroll extent 修正期间触发额外 build。
 - `render.dart` 调整 `RenderTerminal._onTerminalChange()`：仅当 buffer line 数变化时 `markNeedsLayout()`，否则只 `markNeedsPaint()`，降低高频输出时的不必要 layout 抖动。
 
+### 5. 极窄窗口下 vt100 双宽字符崩溃修复
+
+相关文件：
+- `desktop-server/Cargo.toml`
+- `desktop-server/Cargo.lock`
+- `desktop-server/src/app/terminal/state_cache.rs`
+- `third_party/vt100/src/screen.rs`
+- `third_party/vt100/src/grid.rs`
+- `third_party/vt100/src/row.rs`
+
+实现方式：
+- 将 `vt100 0.16.2` vendoring 到 `third_party/vt100/`，并通过 `[patch.crates-io]` 让 `desktop-server` 使用本地修复版。
+- 在 `screen.rs` 的 `Screen::text()` 中补上 `width > cols` 的极端边界处理，避免双宽字符在 `1` 列终端内触发 `size.cols - width` 下溢。
+- 在 `screen.rs` 与 `grid.rs` 的 wrap 判断中统一改用 `saturating_sub(width)`，去掉极窄宽度下的整数下溢路径。
+- 在 `row.rs` 的 `Row::clear_wide()` 中改为边界安全的 partner 查找，遇到 resize/reflow 后残留的 orphan wide lead 时直接就地清理，不再越界 panic。
+- 在 `row.rs` 的 `Row::resize()` 中补上缩窄后最后一列 wide lead 清理，提前修复被截断后的坏状态。
+- 在 `state_cache.rs` 中新增接近真实日志的 narrow-width jitter 回归测试，覆盖 `51 -> ... -> 1` 列与双宽字符混排场景。
+
 ## 已完成验证
 
 ### Rust
@@ -81,6 +99,8 @@
 - `cargo test --manifest-path desktop-server/Cargo.toml app::terminal::manager::tests::bootstrap_v2_includes_socket_local_viewer_presence_epoch -- --exact`
 - `cargo test --manifest-path desktop-server/Cargo.toml app::terminal::manager::tests::stale_viewer_resize_epoch_is_ignored -- --exact`
 - `cargo test --manifest-path desktop-server/Cargo.toml app::terminal::manager::tests::resize_publish_fingerprint_changes_when_resize_bundle_changes -- --exact`
+- `cargo test --manifest-path third_party/vt100/Cargo.toml --lib`
+- `cargo test --manifest-path desktop-server/Cargo.toml replay_resize_with_wide_chars_does_not_crash_on_narrow_width_jitter -- --nocapture`
 
 ### Flutter
 - `flutter analyze client/packages/feature_terminal/lib/src/terminal_view_model.dart client/packages/infra_api/lib/src/desktop_local_client.dart`

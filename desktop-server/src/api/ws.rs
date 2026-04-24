@@ -669,6 +669,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             "local event receiver lagged skipped={}",
                             skipped
                         ));
+                        if let Some(attached_terminal_id) = raw_attached_terminal_id {
+                            if let Some(snapshot) = state
+                                .terminal_manager
+                                .get_output_snapshot(attached_terminal_id)
+                                .await
+                            {
+                                if !snapshot.history_truncated {
+                                    let reply = build_raw_terminal_snapshot_message(
+                                        attached_terminal_id,
+                                        &snapshot,
+                                    );
+                                    if socket.send(Message::Text(reply.to_string())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {

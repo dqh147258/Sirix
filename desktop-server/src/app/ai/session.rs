@@ -16,7 +16,7 @@ use crate::app::{
         SIRIX_AGENT_RUNTIME_FILE_NAME,
     },
     state::AppState,
-    terminal::manager::TerminalSessionSource,
+    terminal::manager::{TerminalSessionSource, TERMINAL_KIND_AI_RUNTIME},
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -42,6 +42,10 @@ pub struct AiSessionRecord {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CurrentTerminalLaunch {
+    pub terminal_id: Uuid,
+    pub ai_session_id: Uuid,
+    pub local_api_base: String,
+    pub terminal_kind: String,
     pub codex_executable: String,
     pub workspace_root: String,
     pub codex_home: String,
@@ -662,6 +666,10 @@ pub async fn launch_ai_session_in_current_terminal(
         created_locally: true,
         reuse_current_terminal: true,
         current_terminal_launch: Some(CurrentTerminalLaunch {
+            terminal_id,
+            ai_session_id,
+            local_api_base: format!("http://127.0.0.1:{}", runtime.local_ws_port),
+            terminal_kind: TERMINAL_KIND_AI_RUNTIME.to_string(),
             codex_executable: super::super::terminal::manager::resolve_codex_executable()?,
             workspace_root: launch.workspace_root.display().to_string(),
             codex_home: launch.codex_home.display().to_string(),

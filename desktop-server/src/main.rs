@@ -42,7 +42,6 @@ async fn main() -> anyhow::Result<()> {
     let app = api::router(state.clone()).layer(CorsLayer::permissive());
 
     install_panic_logger(state.clone());
-    install_termination_logger(state.clone());
     state.logger.clone().spawn_flush_task();
     match state.auth_session_store.restore().await {
         Ok(Some(session)) => {
@@ -74,9 +73,13 @@ async fn main() -> anyhow::Result<()> {
         config.local_ws.host, bound_port, config.backend.base_url
     ));
 
-    if let Err(err) = axum::serve(listener, app).await {
+    if let Err(err) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state.clone()))
+        .await
+    {
         error!(error = %err, "desktop-server crashed");
         state.logger.error(format!("desktop-server crashed: {err}"));
+        state.terminal_manager.shutdown_cleanup("serve_error").await;
         return Err(err.into());
     }
 
@@ -84,8 +87,55 @@ async fn main() -> anyhow::Result<()> {
     state
         .logger
         .warn("desktop-server serve loop exited without error".to_string());
+    state
+        .terminal_manager
+        .shutdown_cleanup("serve_loop_exit")
+        .await;
 
     Ok(())
+}
+
+async fn shutdown_signal(state: AppState) {
+    wait_for_shutdown_signal().await;
+    info!("desktop-server received shutdown signal; cleaning terminal runtimes");
+    state
+        .logger
+        .warn("desktop-server received shutdown signal; cleaning terminal runtimes".to_string());
+    state
+        .terminal_manager
+        .shutdown_cleanup("shutdown_signal")
+        .await;
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            error!(error = %err, "failed to listen for ctrl-c");
+        }
+    };
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                error!(error = %err, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    if let Err(err) = tokio::signal::ctrl_c().await {
+        error!(error = %err, "failed to listen for ctrl-c");
+    }
 }
 
 fn install_panic_logger(state: AppState) {
@@ -111,30 +161,6 @@ fn install_panic_logger(state: AppState) {
         logger.error(message);
     }));
 }
-
-#[cfg(unix)]
-fn install_termination_logger(state: AppState) {
-    tokio::spawn(async move {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-                info!("desktop-server received SIGTERM");
-                state
-                    .logger
-                    .warn("desktop-server received SIGTERM".to_string());
-            }
-            Err(err) => {
-                error!(error = %err, "failed to install SIGTERM handler");
-                state
-                    .logger
-                    .warn(format!("failed to install SIGTERM handler: {err}"));
-            }
-        }
-    });
-}
-
-#[cfg(not(unix))]
-fn install_termination_logger(_state: AppState) {}
 
 async fn bind_first_available(
     host: &str,

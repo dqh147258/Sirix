@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
             let port = ensure_desktop_server().await?;
             ensure_login_prompt(port).await?;
             maybe_warn_tmux_recommendation(port).await;
-            let current_terminal_id = env::var(CURRENT_TERMINAL_ENV).ok();
+            let current_terminal_id = reusable_current_terminal_id();
             let launch = launch_session(port, current_terminal_id.as_deref()).await?;
             if launch.reuse_current_terminal {
                 run_codex_in_current_terminal(&launch)
@@ -102,6 +102,25 @@ async fn resolve_prefer_tmux_terminal(port: u16) -> bool {
     match response.json::<LocalSettingsSnapshot>().await {
         Ok(payload) => payload.prefer_tmux_terminal.unwrap_or(default_value),
         Err(_) => default_value,
+    }
+}
+
+fn reusable_current_terminal_id() -> Option<String> {
+    let terminal_id = env::var(CURRENT_TERMINAL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let terminal_kind = env::var("SIRIX_TERMINAL_KIND")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    match terminal_kind.as_deref() {
+        // 只有普通受管 shell 适合 current-terminal reuse：它的 PTY 已经由
+        // Desktop Server 管理，AI runtime 直接运行即可被上层 terminal 管线捕获。
+        Some("local_pty") | Some("desktop_shell") | None => Some(terminal_id),
+        // AI runtime / hosted / unknown kind 不复用当前 terminal，避免在已经
+        // 具有特殊生命周期的终端里无限嵌套 current-terminal AI launch。
+        Some(_) => None,
     }
 }
 
@@ -149,13 +168,16 @@ async fn list_sessions() -> anyhow::Result<()> {
 }
 
 struct LaunchSessionResult {
-    ai_session_id: String,
     terminal_id: String,
     reuse_current_terminal: bool,
     current_terminal_launch: Option<CurrentTerminalLaunch>,
 }
 
 struct CurrentTerminalLaunch {
+    terminal_id: String,
+    ai_session_id: String,
+    local_api_base: String,
+    terminal_kind: String,
     codex_executable: String,
     workspace_root: String,
     codex_home: String,
@@ -213,6 +235,26 @@ async fn launch_session(
         .get("current_terminal_launch")
         .and_then(serde_json::Value::as_object)
         .map(|item| CurrentTerminalLaunch {
+            terminal_id: item
+                .get("terminal_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(terminal_id.as_str())
+                .to_string(),
+            ai_session_id: item
+                .get("ai_session_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(ai_session_id.as_str())
+                .to_string(),
+            local_api_base: item
+                .get("local_api_base")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            terminal_kind: item
+                .get("terminal_kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("ai_runtime")
+                .to_string(),
             codex_executable: item
                 .get("codex_executable")
                 .and_then(serde_json::Value::as_str)
@@ -253,7 +295,6 @@ async fn launch_session(
                 .map(ToString::to_string),
         });
     Ok(LaunchSessionResult {
-        ai_session_id,
         terminal_id,
         reuse_current_terminal,
         current_terminal_launch,
@@ -269,6 +310,18 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
 
     let mut command = Command::new(&resolved_executable);
     command.current_dir(&current.workspace_root);
+    if !current.terminal_id.trim().is_empty() {
+        command.env(CURRENT_TERMINAL_ENV, &current.terminal_id);
+    }
+    if !current.terminal_kind.trim().is_empty() {
+        command.env("SIRIX_TERMINAL_KIND", &current.terminal_kind);
+    }
+    if !current.ai_session_id.trim().is_empty() {
+        command.env("SIRIX_AI_SESSION_ID", &current.ai_session_id);
+    }
+    if !current.local_api_base.trim().is_empty() {
+        command.env("SIRIX_LOCAL_API_BASE", &current.local_api_base);
+    }
     if !current.codex_home.trim().is_empty() {
         command.env("CODEX_HOME", &current.codex_home);
     }
@@ -468,6 +521,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
     let last_size = current_terminal_size(TerminalSize::new(120, 32));
     let mut viewer_presence_epoch: Option<u64> = None;
     let mut size_rx = spawn_terminal_size_watcher(last_size);
+    let mut attached_once = false;
 
     write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
 
@@ -504,6 +558,9 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
             message = read.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
+                        if message_marks_terminal_ready(&text) {
+                            attached_once = true;
+                        }
                         if handle_terminal_message(&mut stdout, &text, &mut viewer_presence_epoch)? {
                             break Ok(TerminalDetachReason::SessionClosed);
                         }
@@ -526,6 +583,24 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
         Ok(reason) => *reason,
         Err(_) => TerminalDetachReason::TransportClosed,
     };
+    if attached_once {
+        // 对齐 sirix-terminal：成功 attach 后主动 detach，避免只依赖 socket
+        // 关闭后的 debounce 清理，缩短 system_terminal geometry authority 回收时间。
+        let _ = write
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "terminal.detach",
+                    "payload": {
+                        "terminal_id": terminal_id,
+                        "client_kind": "system_terminal",
+                        "viewer_presence_epoch": viewer_presence_epoch,
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await;
+    }
     drop(raw_mode_guard);
     restore_local_terminal(&mut stdout, detach_reason)?;
     match attach_result {
@@ -687,4 +762,16 @@ fn handle_terminal_message(
         "terminal.closed" => Ok(true),
         _ => Ok(false),
     }
+}
+
+fn message_marks_terminal_ready(raw: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|decoded| {
+            decoded
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|event_type| event_type == "terminal.ready")
 }

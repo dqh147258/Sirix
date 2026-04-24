@@ -31,8 +31,9 @@ use crate::app::{
 };
 use crate::scene::{resolve_scene, SIRIX_SCENE_ENV};
 use crate::terminal_launch::{
-    apply_tmux_session_defaults, build_tmux_fallback_warning, preferred_tmux_client_term,
-    select_terminal_launch, TerminalCommandPlan, TerminalLaunchRequest, TerminalLaunchWarning,
+    apply_tmux_session_defaults, build_tmux_fallback_warning, preferred_legacy_pty_term,
+    preferred_tmux_client_term, select_terminal_launch, TerminalCommandPlan, TerminalLaunchRequest,
+    TerminalLaunchWarning,
 };
 
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
@@ -45,6 +46,8 @@ type SharedResizePublishFingerprint = Arc<Mutex<Option<ResizePublishFingerprint>
 const TERMINAL_OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(12);
 const TERMINAL_OUTPUT_MAX_BATCH_BYTES: usize = 16 * 1024;
 const TERMINAL_OUTPUT_REPLAY_MAX_BYTES: usize = 1024 * 1024;
+pub(crate) const TERMINAL_KIND_LOCAL_PTY: &str = "local_pty";
+pub(crate) const TERMINAL_KIND_AI_RUNTIME: &str = "ai_runtime";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalSessionSource {
@@ -430,6 +433,12 @@ impl TerminalManager {
         if let Some(tmux_session_name) = plan.tmux_session_name.as_deref() {
             builder.env("SIRIX_TERMINAL_TMUX_SESSION", tmux_session_name);
             builder.env("TERM", preferred_tmux_client_term());
+        } else {
+            // legacy/fallback PTY 也显式提供稳定 TERM，避免继承 GUI/service
+            // 进程中的空值或 dumb，提升 readline/ncurses/TUI 在上层 xterm
+            // 渲染管线中的一致性。
+            builder.env("TERM", preferred_legacy_pty_term());
+            builder.env("COLORTERM", "truecolor");
         }
 
         self.create_process_terminal(
@@ -490,7 +499,8 @@ impl TerminalManager {
         {
             builder.env(&launch.provider.api_key_env, &launch.provider.api_key);
         }
-        self.apply_sirix_env(&mut builder, None)?;
+        self.apply_sirix_env(&mut builder, Some(terminal_id))?;
+        builder.env("SIRIX_TERMINAL_KIND", TERMINAL_KIND_AI_RUNTIME);
         builder.env("CODEX_HOME", &launch.codex_home);
         builder.env("SIRIX_AI_SESSION_ID", ai_session_id.to_string());
         builder.env(
@@ -526,10 +536,25 @@ impl TerminalManager {
             .get(&terminal_id)
             .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?;
         let TerminalSessionEndpoint::LocalPty { writer, .. } = &handle.endpoint;
-        let mut writer = writer
-            .lock()
-            .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
-        writer.write_all(&bytes)?;
+        let write_result = {
+            let mut writer = writer
+                .lock()
+                .map_err(|_| anyhow::anyhow!("terminal writer poisoned"))?;
+            writer.write_all(&bytes)
+        };
+        if let Err(error) = write_result {
+            warn!(
+                terminal_id = %terminal_id,
+                error = %error,
+                "[TERMINAL_PTY_TRACE] terminal input writer failed; closing local PTY session"
+            );
+            drop(sessions);
+            let message = format!("terminal input writer failed: {error}");
+            let _ = self
+                .close_session(terminal_id, TerminalCloseReason::Error(message.clone()))
+                .await;
+            anyhow::bail!(message);
+        }
         Ok(())
     }
 
@@ -1429,10 +1454,7 @@ impl TerminalManager {
         }
         if let Some(terminal_id) = terminal_id {
             builder.env("SIRIX_TERMINAL_SESSION_ID", terminal_id.to_string());
-            builder.env(
-                "SIRIX_TERMINAL_KIND",
-                TerminalSessionSource::LocalPty.as_api_str(),
-            );
+            builder.env("SIRIX_TERMINAL_KIND", TERMINAL_KIND_LOCAL_PTY);
         }
         Ok(())
     }
@@ -1639,6 +1661,31 @@ impl TerminalManager {
             },
         );
         Ok(())
+    }
+
+    pub async fn shutdown_cleanup(&self, reason: &str) {
+        let terminal_ids = self
+            .sessions
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for terminal_id in terminal_ids {
+            if let Err(error) = self
+                .close_session(
+                    terminal_id,
+                    TerminalCloseReason::Error(format!("desktop-server shutting down: {reason}")),
+                )
+                .await
+            {
+                warn!(
+                    terminal_id = %terminal_id,
+                    error = %error,
+                    "[TERMINAL_PTY_TRACE] failed to cleanup terminal during desktop-server shutdown"
+                );
+            }
+        }
     }
 
     async fn output_context(&self, terminal_id: Uuid) -> Option<TerminalOutputContext> {

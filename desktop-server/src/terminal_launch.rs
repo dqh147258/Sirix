@@ -6,6 +6,10 @@ use anyhow::Context;
 /// - true/1/yes/on  => 优先尝试 tmux
 /// - false/0/no/off => 强制走旧实现
 pub const PREFER_TMUX_ENV: &str = "SIRIX_PREFER_TMUX_TERMINAL";
+/// tmux 生命周期策略：
+/// - takeover/default: desktop-server 异常退出后保留 tmux session，便于下次启动接管。
+/// - server_bound: 尽量让 tmux session 随 desktop-server client 断开而销毁。
+pub const TMUX_LIFECYCLE_ENV: &str = "SIRIX_TMUX_LIFECYCLE";
 
 const ANSI_YELLOW: &str = "\u{1b}[33m";
 const ANSI_RESET: &str = "\u{1b}[0m";
@@ -279,7 +283,26 @@ pub fn apply_tmux_session_defaults(session_name: &str) -> anyhow::Result<()> {
         .context("failed to disable tmux status bar")?;
     run_tmux_set_option(session_name, "mouse", "off")
         .context("failed to disable tmux mouse mode")?;
+    if tmux_lifecycle_server_bound() {
+        // server_bound 是显式 opt-in：它用 tmux 自身的无人 attached 自动销毁
+        // 语义把 session 绑定到 desktop-server 持有的 tmux client 生命周期。
+        // 默认不启用，避免破坏现有 desktop-server 重启后的 tmux takeover 恢复能力。
+        run_tmux_set_option(session_name, "destroy-unattached", "on")
+            .context("failed to enable tmux destroy-unattached lifecycle")?;
+    }
     Ok(())
+}
+
+pub fn tmux_lifecycle_server_bound() -> bool {
+    env::var(TMUX_LIFECYCLE_ENV)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "server_bound" | "server-bound" | "serverbound" | "bound"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn run_tmux_set_option(session_name: &str, option: &str, value: &str) -> anyhow::Result<()> {
@@ -308,6 +331,13 @@ fn run_tmux_set_option(session_name: &str, option: &str, value: &str) -> anyhow:
 /// 避免让 tmux 走过于激进的 xterm 特性探测路径。
 pub fn preferred_tmux_client_term() -> &'static str {
     "screen-256color"
+}
+
+/// fallback/legacy PTY 直接面对 Sirix 的 xterm/state-cache 渲染层，
+/// 明确给一个保守但功能完整的 TERM，避免继承 GUI/service 进程中的
+/// 空值或 dumb 导致 readline/ncurses/TUI 行为不稳定。
+pub fn preferred_legacy_pty_term() -> &'static str {
+    "xterm-256color"
 }
 
 fn tmux_install_commands() -> Vec<String> {

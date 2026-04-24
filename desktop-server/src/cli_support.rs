@@ -3,6 +3,10 @@ use std::{
     io::{self, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
     thread,
     time::Duration,
 };
@@ -166,14 +170,18 @@ pub(crate) fn spawn_terminal_size_watcher(
     initial_size: TerminalSize,
 ) -> UnboundedReceiver<TerminalSize> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let last_reported = Arc::new(AtomicU32::new(pack_terminal_size(initial_size)));
     #[cfg(unix)]
     {
-        if spawn_sigwinch_size_watcher(tx.clone(), initial_size) {
-            return rx;
-        }
+        // 之前 Unix 平台优先只启用 SIGWINCH watcher：前几次拖动能收到 resize，
+        // 但一旦系统信号链路后续漏发/停摆，就再也没有 fallback，表现成
+        // “拖动突然彻底失效”。这里改成 signal + polling 并行，SIGWINCH 负责
+        // 低延迟，polling 负责兜底；共享 last_reported 去重，避免两路同时把
+        // 同一个尺寸重复推给上层。
+        spawn_sigwinch_size_watcher(tx.clone(), initial_size, last_reported.clone());
     }
 
-    spawn_polling_size_watcher(tx, initial_size, Duration::from_millis(120));
+    spawn_polling_size_watcher(tx, initial_size, Duration::from_millis(120), last_reported);
     rx
 }
 
@@ -181,6 +189,7 @@ fn spawn_polling_size_watcher(
     tx: tokio::sync::mpsc::UnboundedSender<TerminalSize>,
     initial_size: TerminalSize,
     interval: Duration,
+    last_reported: Arc<AtomicU32>,
 ) {
     tokio::spawn(async move {
         let mut last_size = initial_size;
@@ -190,7 +199,7 @@ fn spawn_polling_size_watcher(
             let current_size = current_terminal_size(last_size);
             if current_size != last_size {
                 last_size = current_size;
-                if tx.send(current_size).is_err() {
+                if publish_terminal_size_if_new(&tx, &last_reported, current_size).is_err() {
                     break;
                 }
             }
@@ -202,11 +211,12 @@ fn spawn_polling_size_watcher(
 fn spawn_sigwinch_size_watcher(
     tx: tokio::sync::mpsc::UnboundedSender<TerminalSize>,
     initial_size: TerminalSize,
-) -> bool {
+    last_reported: Arc<AtomicU32>,
+) {
     use tokio::signal::unix::{signal, SignalKind};
 
     let Ok(mut signal_stream) = signal(SignalKind::window_change()) else {
-        return false;
+        return;
     };
 
     tokio::spawn(async move {
@@ -215,13 +225,29 @@ fn spawn_sigwinch_size_watcher(
             let current_size = current_terminal_size(last_size);
             if current_size != last_size {
                 last_size = current_size;
-                if tx.send(current_size).is_err() {
+                if publish_terminal_size_if_new(&tx, &last_reported, current_size).is_err() {
                     break;
                 }
             }
         }
     });
-    true
+}
+
+fn publish_terminal_size_if_new(
+    tx: &tokio::sync::mpsc::UnboundedSender<TerminalSize>,
+    last_reported: &AtomicU32,
+    size: TerminalSize,
+) -> Result<(), tokio::sync::mpsc::error::SendError<TerminalSize>> {
+    let packed = pack_terminal_size(size);
+    let previous = last_reported.swap(packed, Ordering::Relaxed);
+    if previous == packed {
+        return Ok(());
+    }
+    tx.send(size)
+}
+
+fn pack_terminal_size(size: TerminalSize) -> u32 {
+    ((u32::from(size.cols)) << 16) | u32::from(size.rows)
 }
 
 async fn probe_running_port() -> anyhow::Result<Option<u16>> {

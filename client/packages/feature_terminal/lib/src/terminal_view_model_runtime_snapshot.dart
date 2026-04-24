@@ -52,8 +52,8 @@ extension _TerminalViewModelRuntimeSnapshot on _TerminalViewModelRuntimeBase {
       return false;
     }
     final streamState = _streamStateFor(terminalId);
-    final transcript = authority.buildTranscript();
-    if (transcript.isEmpty) {
+    final replayBytes = authority.buildReplayBytes();
+    if (replayBytes.isEmpty) {
       return false;
     }
     _runWithSnapshotApplyGuard(terminalId, () {
@@ -63,11 +63,16 @@ extension _TerminalViewModelRuntimeSnapshot on _TerminalViewModelRuntimeBase {
         activeBuffer: authority.activeBuffer,
       );
       streamState.resetDecoder();
-      terminal.write(transcript);
+      final replayText = streamState.decode(replayBytes, replaceStreamState: true);
+      if (replayText.isNotEmpty) {
+        terminal.write(replayText);
+      } else {
+        terminal.notifyListeners();
+      }
       _applyAuthorityCursorIfPresent(terminalId, terminal);
     });
     AppLogger.info(
-      '$_terminalStreamTraceTag rebuild authority history terminalId=$terminalId reason=$reason cachedLines=${authority.historyLines.length} transcriptBytes=${transcript.length}',
+      '$_terminalStreamTraceTag rebuild authority history terminalId=$terminalId reason=$reason cachedLines=${authority.historyLines.length} transcriptBytes=${replayBytes.length} coloredScreen=${authority.screenData.isNotEmpty}',
     );
     return true;
   }

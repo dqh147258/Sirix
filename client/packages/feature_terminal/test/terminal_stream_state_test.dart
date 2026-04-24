@@ -1,8 +1,12 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:feature_terminal/src/terminal_view_model.dart';
+import 'package:infra_api/infra_api.dart';
 import 'package:xterm/xterm.dart';
+
+class _FakeBackendApiClient extends Fake implements BackendApiClient {}
 
 void main() {
   group('TerminalStreamState', () {
@@ -202,6 +206,93 @@ void main() {
       expect(cache.buildTranscript(), 'line-0\r\nnew-1\r\nnew-2');
     });
 
+    test('buildReplayBytes prefers formatted screen data so visible colors survive', () {
+      final cache = TerminalAuthorityCache()
+        ..activeBuffer = 'main'
+        ..historyStartLine = 0
+        ..historyEndLine = 3
+        ..viewportStartLine = 1
+        ..viewportEndLine = 3;
+
+      cache.applyHistoryInvalidated({
+        'history_generation': 11,
+        'history_start_line': 0,
+        'history_end_line': 3,
+        'start_line': 0,
+        'end_line': 3,
+        'reason': 'bootstrap',
+        'lines': [
+          {'text': 'line-0', 'wrapped': false, 'hard_break': true},
+          {'text': 'old-1', 'wrapped': false, 'hard_break': true},
+          {'text': 'old-2', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+      cache.applyScreenSnapshot({
+        'rows': 2,
+        'cols': 40,
+        'cursor_row': 1,
+        'cursor_col': 3,
+        'screen_data_base64': base64Encode(
+          utf8.encode('\u001b[31mnew-1\u001b[0m\r\n\u001b[32mnew-2\u001b[0m'),
+        ),
+        'screen_lines': [
+          {'text': 'new-1', 'wrapped': false, 'hard_break': true},
+          {'text': 'new-2', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+
+      final replay = utf8.decode(cache.buildReplayBytes(), allowMalformed: true);
+      expect(
+        replay,
+        'line-0\r\n\u001b[31mnew-1\u001b[0m\r\n\u001b[32mnew-2\u001b[0m',
+      );
+    });
+
+    test('empty screen_data_base64 clears stale formatted replay bytes', () {
+      final cache = TerminalAuthorityCache()
+        ..activeBuffer = 'main'
+        ..historyStartLine = 0
+        ..historyEndLine = 2
+        ..viewportStartLine = 1
+        ..viewportEndLine = 2;
+
+      cache.applyHistoryInvalidated({
+        'history_generation': 7,
+        'history_start_line': 0,
+        'history_end_line': 2,
+        'start_line': 0,
+        'end_line': 2,
+        'reason': 'bootstrap',
+        'lines': [
+          {'text': 'line-0', 'wrapped': false, 'hard_break': true},
+          {'text': 'old-1', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+      cache.applyScreenSnapshot({
+        'rows': 1,
+        'cols': 40,
+        'cursor_row': 0,
+        'cursor_col': 0,
+        'screen_data_base64': base64Encode(utf8.encode('\u001b[31mold-1\u001b[0m')),
+        'screen_lines': [
+          {'text': 'old-1', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+
+      cache.applyScreenSnapshot({
+        'rows': 1,
+        'cols': 40,
+        'cursor_row': 0,
+        'cursor_col': 0,
+        'screen_data_base64': '',
+        'screen_lines': [
+          {'text': 'new-1', 'wrapped': false, 'hard_break': true},
+        ],
+      });
+
+      expect(utf8.decode(cache.buildReplayBytes()), 'line-0\r\nnew-1');
+    });
+
     test('CRLF hard breaks keep xterm replay left aligned across commands', () {
       final lfOnly = Terminal(maxLines: 100)..resize(40, 6);
       lfOnly.write('prompt> \nprompt> \nprompt> ');
@@ -324,6 +415,71 @@ void main() {
       expect(plan.topOffset, 28);
       expect(plan.cursorRow, 47);
       expect(plan.lines.length, 48);
+    });
+  });
+
+  group('TerminalPageConfig provider identity', () {
+    test('ignores device bootstrap changes so desktop keeps one terminal vm', () {
+      const pendingRegistration = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: null,
+        sessionId: null,
+      );
+      const registeredDevice = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: 'device-001',
+        sessionId: null,
+      );
+
+      expect(pendingRegistration, registeredDevice);
+      expect(pendingRegistration.hashCode, registeredDevice.hashCode);
+
+      final container = ProviderContainer(
+        overrides: [
+          backendApiClientProvider.overrideWithValue(_FakeBackendApiClient()),
+          backendEventClientProvider.overrideWithValue(null),
+          desktopLocalClientProvider.overrideWithValue(
+            DesktopLocalClient(host: '127.0.0.1', portStart: 46111, portEnd: 46119),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final firstVm = container.read(terminalViewModelProvider(pendingRegistration).notifier);
+      final secondVm = container.read(terminalViewModelProvider(registeredDevice).notifier);
+
+      expect(identical(firstVm, secondVm), isTrue);
+    });
+
+    test('same remote session keeps deviceId in provider identity', () {
+      const deviceA = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: 'device-a',
+        sessionId: 'session-1',
+      );
+      const deviceB = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: 'device-b',
+        sessionId: 'session-1',
+      );
+
+      expect(deviceA, isNot(deviceB));
+      expect(deviceA.hashCode, isNot(deviceB.hashCode));
+    });
+
+    test('still isolates different remote sessions into different vms', () {
+      const sessionA = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: 'device-001',
+        sessionId: 'session-a',
+      );
+      const sessionB = TerminalPageConfig(
+        accessToken: 'token',
+        deviceId: 'device-001',
+        sessionId: 'session-b',
+      );
+
+      expect(sessionA, isNot(sessionB));
     });
   });
 }

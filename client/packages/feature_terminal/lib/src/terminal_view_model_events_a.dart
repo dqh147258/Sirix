@@ -27,6 +27,14 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
   @override
   Future<void> _detachChannel() async {
     _flushPendingOutboundOperations();
+    final pendingDesktopLocalList = _pendingDesktopLocalTerminalListCompleter;
+    if (pendingDesktopLocalList != null && !pendingDesktopLocalList.isCompleted) {
+      // 本地 channel 正在关闭时，不要把 terminal.list 请求一直挂住。
+      // 这里回退到当前缓存列表，让上层 load/reconcile 可以继续走降级逻辑，
+      // 同时避免“断链期间等待旧请求超时”再触发一轮额外 connect。
+      pendingDesktopLocalList.complete(state.terminals);
+    }
+    _pendingDesktopLocalTerminalListCompleter = null;
 
     final activeTerminalId = state.activeTerminalId;
     final viewerPresenceEpoch = activeTerminalId == null
@@ -227,6 +235,11 @@ abstract class _TerminalViewModelEventsABase extends _TerminalViewModelRuntimeBa
         .map(_terminalSummaryFromEvent)
         .toList(growable: false);
     _replaceTerminals(terminals);
+    final desktopLocalCompleter = _pendingDesktopLocalTerminalListCompleter;
+    if (desktopLocalCompleter != null && !desktopLocalCompleter.isCompleted) {
+      desktopLocalCompleter.complete(terminals);
+    }
+    _pendingDesktopLocalTerminalListCompleter = null;
     final completer = _pendingSessionTerminalListCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.complete(terminals);

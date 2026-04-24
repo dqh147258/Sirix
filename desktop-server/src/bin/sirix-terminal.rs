@@ -268,7 +268,11 @@ async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<(
                             if message_marks_terminal_ready(&text) {
                                 attached_once = true;
                             }
-                            if handle_terminal_message(&mut stdout, &text, &mut viewer_presence_epoch)? {
+                            if handle_terminal_message(
+                                &mut stdout,
+                                &text,
+                                &mut viewer_presence_epoch,
+                            )? {
                                 break Ok(TerminalDetachReason::SessionClosed);
                             }
                         }

@@ -137,6 +137,7 @@ pub async fn local_ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    let socket_id = Uuid::new_v4();
     let mut counts_as_desktop_client = true;
     let mut attached_viewers: std::collections::HashMap<Uuid, (TerminalClientKind, u64)> =
         std::collections::HashMap::new();
@@ -148,12 +149,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut local_receiver = state.local_events.subscribe();
     let mut raw_attached_terminal_id: Option<Uuid> = None;
     info!(
+        socket_id = %socket_id,
         device_id = %state.config.backend.device_id,
         "desktop flutter client connected to local websocket"
     );
     state.logger.info(format!(
-        "desktop flutter client connected to local websocket device_id={}",
-        state.config.backend.device_id
+        "desktop flutter client connected to local websocket socket_id={} device_id={}",
+        socket_id, state.config.backend.device_id
     ));
 
     let sync_message = {
@@ -296,7 +298,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                                                 .register_viewer(terminal_id, client_kind)
                                                 .await
                                                 .unwrap_or_default();
-                                            if let Some((previous_kind, _)) = attached_viewers.insert(terminal_id, (client_kind, epoch)) {
+                                            let previous = attached_viewers.insert(terminal_id, (client_kind, epoch));
+                                            if let Some((previous_kind, _)) = previous {
                                                 if previous_kind != client_kind {
                                                     let _ = state.terminal_manager.unregister_viewer(terminal_id, previous_kind).await;
                                                 }
@@ -708,12 +711,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 
     info!(
+        socket_id = %socket_id,
         device_id = %state.config.backend.device_id,
         "desktop flutter client disconnected"
     );
     state.logger.info(format!(
-        "desktop flutter client disconnected device_id={}",
-        state.config.backend.device_id
+        "desktop flutter client disconnected socket_id={} device_id={}",
+        socket_id, state.config.backend.device_id
     ));
 }
 

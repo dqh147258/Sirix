@@ -61,6 +61,8 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   final FocusNode _focusNode = FocusNode(debugLabel: 'shared-terminal');
   final Map<String, TerminalController> _terminalControllers = <String, TerminalController>{};
   final Map<String, ScrollController> _terminalScrollControllers = <String, ScrollController>{};
+  final Map<String, ScrollController> _terminalHorizontalScrollControllers =
+      <String, ScrollController>{};
   final Set<String> _pendingControllerCleanupIds = <String>{};
   late TerminalPageConfig _config;
   String? _lastAutoFocusedTerminalId;
@@ -79,14 +81,33 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
   void didUpdateWidget(covariant TerminalPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     final nextConfig = _buildConfig();
-    final viewModel = ref.read(terminalViewModelProvider(nextConfig).notifier);
-    viewModel.updateConfig(nextConfig);
     if (_config == nextConfig) {
+      final viewModel = ref.read(terminalViewModelProvider(_config).notifier);
+      final currentState = ref.read(terminalViewModelProvider(_config));
+      final deviceIdBecameAvailable =
+          (_config.deviceId == null || _config.deviceId!.isEmpty) &&
+          (nextConfig.deviceId?.isNotEmpty ?? false);
+      viewModel.updateConfig(nextConfig);
       _config = nextConfig;
+      if (deviceIdBecameAvailable &&
+          (currentState.terminals.isEmpty ||
+              currentState.activeTerminalId == null ||
+              currentState.errorMessage != null)) {
+        // provider family 已经不再把 deviceId 当作 identity，因此 Desktop
+        // 注册完成后这里不会生成第二个 VM。为了兼顾“启动早期 local ws 失败，
+        // 先退回 API/null-deviceId 查询”的场景，当 deviceId 首次稳定下来且
+        // 当前终端数据仍为空/异常时，主动在同一个 VM 上补一次 force reload。
+        Future.microtask(() => viewModel.load(force: true));
+      }
       return;
     }
 
+    // 先比较旧/新配置，再决定是否切换 provider family key。这样当只有
+    // deviceId 这类“运行时输入”变化时，不会因为提前 `read(nextConfig)` 而
+    // 额外创建一份新的 TerminalViewModel。
     _config = nextConfig;
+    final viewModel = ref.read(terminalViewModelProvider(nextConfig).notifier);
+    viewModel.updateConfig(nextConfig);
     Future.microtask(() => viewModel.load(force: true));
   }
 
@@ -97,6 +118,9 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
       controller.dispose();
     }
     for (final controller in _terminalScrollControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in _terminalHorizontalScrollControllers.values) {
       controller.dispose();
     }
     super.dispose();
@@ -126,6 +150,9 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final terminalScrollController = _terminalScrollControllerFor(
       terminalId: activeTerminalId,
       viewModel: viewModel,
+    );
+    final terminalHorizontalScrollController = _terminalHorizontalScrollControllerFor(
+      terminalId: activeTerminalId,
     );
     final terminalStyle = _terminalStyleForContext(context);
     final approvalRequest = state.activeApprovalRequest;
@@ -342,35 +369,45 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                                           );
                                           return ScrollConfiguration(
                                             behavior: const MaterialScrollBehavior(),
-                                            child: SingleChildScrollView(
-                                              scrollDirection: Axis.horizontal,
-                                              child: SizedBox(
-                                                width: terminalWidth,
-                                                height: constraints.maxHeight,
-                                                child: RepaintBoundary(
-                                                  // 远端桌面画面和 Terminal 会同时刷新；将
-                                                  // xterm 视图包进独立的 repaint boundary，
-                                                  // 可减少父布局重建时对终端栅格的连带重绘，
-                                                  // 降低移动端“闪一下 / 重叠一下”的体感。
-                                                  child: TerminalView(
-                                                    terminal,
-                                                    key: ValueKey(activeTerminalId),
-                                                    controller: terminalController,
-                                                    scrollController: terminalScrollController,
-                                                    theme: _theme,
-                                                    textStyle: terminalStyle,
-                                                    focusNode: _focusNode,
-                                                    autofocus: true,
-                                                    autoResize: false,
-                                                    // Keep the viewport background owned by
-                                                    // the surrounding workspace panel. CLI
-                                                    // color blocks (including Codex/Sirix
-                                                    // TUI highlights) should come from the
-                                                    // terminal escape stream itself rather
-                                                    // than from a forced global fill color.
-                                                    backgroundOpacity: 0,
-                                                    autoScrollToBottomOnUserInput: false,
-                                                    autoStickToBottomOnBufferChange: false,
+                                            child: Scrollbar(
+                                              controller: terminalHorizontalScrollController,
+                                              thumbVisibility: true,
+                                              trackVisibility: true,
+                                              interactive: true,
+                                              scrollbarOrientation: ScrollbarOrientation.bottom,
+                                              child: SingleChildScrollView(
+                                                controller: terminalHorizontalScrollController,
+                                                scrollDirection: Axis.horizontal,
+                                                child: SizedBox(
+                                                  width: terminalWidth,
+                                                  height: constraints.maxHeight,
+                                                  child: RepaintBoundary(
+                                                    // 当前共享终端采用“sirix-terminal /
+                                                    // system-terminal 优先”的几何规则。
+                                                    // 当 Desktop App 只是 viewer 时，authority
+                                                    // 宽度可能比当前 panel 更宽，因此这里补一条
+                                                    // 常驻底部横向滚动条，让用户仍可拖动查看完整
+                                                    // 内容，而不是强行把 PTY 宽度改成 panel 宽度。
+                                                    child: TerminalView(
+                                                      terminal,
+                                                      key: ValueKey(activeTerminalId),
+                                                      controller: terminalController,
+                                                      scrollController: terminalScrollController,
+                                                      theme: _theme,
+                                                      textStyle: terminalStyle,
+                                                      focusNode: _focusNode,
+                                                      autofocus: true,
+                                                      autoResize: false,
+                                                      // Keep the viewport background owned by
+                                                      // the surrounding workspace panel. CLI
+                                                      // color blocks (including Codex/Sirix
+                                                      // TUI highlights) should come from the
+                                                      // terminal escape stream itself rather
+                                                      // than from a forced global fill color.
+                                                      backgroundOpacity: 0,
+                                                      autoScrollToBottomOnUserInput: false,
+                                                      autoStickToBottomOnBufferChange: false,
+                                                    ),
                                                   ),
                                                 ),
                                               ),
@@ -535,6 +572,15 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     final cellHeight = probe.height <= 0 ? terminalStyle.fontSize : probe.height;
     final cols = ((constraints.maxWidth / cellWidth).floor().clamp(20, 400) as num).toInt();
     final rows = ((constraints.maxHeight / cellHeight).floor().clamp(10, 200) as num).toInt();
+    final authority = viewModel.authorityFor(terminalId);
+    if (authority?.authoritySource == 'system_terminal') {
+      // 当前共享终端策略要求：只要 sirix-terminal / system-terminal 仍在线，
+      // 它就是唯一的 PTY 几何权威。Desktop App 只能作为 viewer 观察者，
+      // 通过横向滚动条查看超出 panel 的内容，而不能再把本地 widget
+      // 尺寸回写给终端状态，否则会重新引入“拖动 Desktop App 导致几何歧义”
+      // 的问题。
+      return;
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -578,6 +624,19 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
     });
   }
 
+  ScrollController? _terminalHorizontalScrollControllerFor({
+    required String? terminalId,
+  }) {
+    if (terminalId == null || terminalId.isEmpty) {
+      return null;
+    }
+
+    return _terminalHorizontalScrollControllers.putIfAbsent(
+      terminalId,
+      ScrollController.new,
+    );
+  }
+
   void _disposeInactiveTerminalControllers(Iterable<String> terminalIds) {
     final activeIds = terminalIds.toSet();
     final staleIds = _terminalControllers.keys
@@ -610,6 +669,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
         // 再释放，避免 render object 还在 attach 时读到已 dispose 的 controller。
         _terminalControllers.remove(terminalId)?.dispose();
         _terminalScrollControllers.remove(terminalId)?.dispose();
+        _terminalHorizontalScrollControllers.remove(terminalId)?.dispose();
       }
     });
   }

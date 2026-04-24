@@ -21,6 +21,7 @@ abstract class _TerminalViewModelStateBase extends BaseViewModel<TerminalState> 
   final BackendEventClient? _eventClient;
   final DesktopLocalClient? _desktopLocalClient;
   final SessionTerminalChannelController _sessionTerminalChannelController;
+  final int _vmDebugId = _nextTerminalViewModelDebugId++;
   TerminalPageConfig _config;
   final Map<String, Terminal> _terminalCache = <String, Terminal>{};
   final Map<String, TerminalStreamState> _terminalStreams = <String, TerminalStreamState>{};
@@ -50,6 +51,7 @@ abstract class _TerminalViewModelStateBase extends BaseViewModel<TerminalState> 
   _TerminalViewportSize? _lastObservedViewportSize;
   bool _resizeTrailingWindowActive = false;
   Completer<List<TerminalSessionSummary>>? _pendingSessionTerminalListCompleter;
+  Completer<List<TerminalSessionSummary>>? _pendingDesktopLocalTerminalListCompleter;
   bool _hasLoaded = false;
   bool _loadingInFlight = false;
   bool _creatingInFlight = false;
@@ -62,6 +64,12 @@ abstract class _TerminalViewModelStateBase extends BaseViewModel<TerminalState> 
 
   void _handleSessionChannelEvent(Map<String, dynamic> payload);
   void _disposeInternal();
+
+  TerminalState get _currentStateSnapshot => state;
+
+  void _replaceTerminalState(TerminalState nextState) {
+    state = nextState;
+  }
 
   void _forwardSessionChannelEvent(Map<String, dynamic> payload) {
     _handleSessionChannelEvent(payload);

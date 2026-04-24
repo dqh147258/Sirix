@@ -1,6 +1,47 @@
 part of 'terminal_view_model.dart';
 
 extension _TerminalViewModelTransportHistory on _TerminalViewModelTransportBase {
+  Future<List<TerminalSessionSummary>> _requestDesktopLocalTerminalList() async {
+    final existingCompleter = _pendingDesktopLocalTerminalListCompleter;
+    if (existingCompleter != null) {
+      return existingCompleter.future;
+    }
+
+    final localClient = _desktopLocalClient;
+    if (localClient == null) {
+      throw StateError('desktop local client unavailable');
+    }
+
+    final channel = await _connectDesktopLocalChannel();
+    final completer = Completer<List<TerminalSessionSummary>>();
+    _pendingDesktopLocalTerminalListCompleter = completer;
+    AppLogger.info(
+      '$_terminalStreamTraceTag vm=$_vmDebugId request desktop local terminal list channelHash=${channel.hashCode}',
+    );
+    channel.sink.add(
+      jsonEncode({
+        'type': 'terminal.list',
+      }),
+    );
+
+    try {
+      return await completer.future.timeout(_terminalSessionListTimeout);
+    } on TimeoutException {
+      if (identical(_pendingDesktopLocalTerminalListCompleter, completer)) {
+        _pendingDesktopLocalTerminalListCompleter = null;
+      }
+      AppLogger.warn(
+        '$_terminalStreamTraceTag vm=$_vmDebugId desktop local terminal list timed out channelHash=${channel.hashCode}',
+      );
+      rethrow;
+    } finally {
+      if (identical(_pendingDesktopLocalTerminalListCompleter, completer) &&
+          completer.isCompleted) {
+        _pendingDesktopLocalTerminalListCompleter = null;
+      }
+    }
+  }
+
   Future<void> _requestTerminalHistoryRange({
     required String terminalId,
     required int startLine,
@@ -181,7 +222,7 @@ extension _TerminalViewModelTransportHistory on _TerminalViewModelTransportBase 
     required int rows,
   }) {
     TerminalSessionSummary? current;
-    for (final terminal in state.terminals) {
+    for (final terminal in _currentStateSnapshot.terminals) {
       if (terminal.id == terminalId) {
         current = terminal;
         break;
@@ -226,22 +267,38 @@ extension _TerminalViewModelTransportHistory on _TerminalViewModelTransportBase 
           if (!identical(_channel, channel)) {
             return;
           }
+          AppLogger.warn(
+            '$_terminalStreamTraceTag vm=$_vmDebugId desktop local channel error channelHash=${channel.hashCode} error=$error',
+          );
+          final pendingListCompleter = _pendingDesktopLocalTerminalListCompleter;
+          if (pendingListCompleter != null && !pendingListCompleter.isCompleted) {
+            pendingListCompleter.complete(_currentStateSnapshot.terminals);
+          }
+          _pendingDesktopLocalTerminalListCompleter = null;
           _channel = null;
           _transport = null;
           _desktopLocalChannelConnectFuture = null;
-          state = state.copyWith(
+          _replaceTerminalState(_currentStateSnapshot.copyWith(
             connecting: false,
             errorMessage: AppLocalizations.current.terminalStreamError('$error'),
-          );
+          ));
         },
         onDone: () {
           if (!identical(_channel, channel)) {
             return;
           }
+          AppLogger.warn(
+            '$_terminalStreamTraceTag vm=$_vmDebugId desktop local channel done channelHash=${channel.hashCode}',
+          );
+          final pendingListCompleter = _pendingDesktopLocalTerminalListCompleter;
+          if (pendingListCompleter != null && !pendingListCompleter.isCompleted) {
+            pendingListCompleter.complete(_currentStateSnapshot.terminals);
+          }
+          _pendingDesktopLocalTerminalListCompleter = null;
           _channel = null;
           _transport = null;
           _desktopLocalChannelConnectFuture = null;
-          state = state.copyWith(connecting: false);
+          _replaceTerminalState(_currentStateSnapshot.copyWith(connecting: false));
         },
       );
       return channel;

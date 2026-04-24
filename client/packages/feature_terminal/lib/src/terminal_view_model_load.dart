@@ -68,8 +68,7 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
   Future<void> refresh() => load(force: true);
 
   Future<List<TerminalSessionSummary>> _loadDesktopLocalTerminals() async {
-    final localClient = _desktopLocalClient;
-    if (localClient == null) {
+    if (_desktopLocalClient == null) {
       return _apiClient.listTerminals(
         accessToken: _config.accessToken,
         deviceId: _config.deviceId,
@@ -77,7 +76,11 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
     }
 
     try {
-      return await localClient.listTerminalSessions();
+      // Desktop App 启动期曾出现「list 用一条临时 ws、attach 再起一条数据 ws」
+      // 的重入模式，日志里会留下多次 local websocket connect/disconnect。
+      // 这里改成优先复用 TerminalViewModel 自己的共享 channel，让 terminal
+      // 列表加载与后续 attach/bootstrap 走同一条 terminal data path。
+      return await _requestDesktopLocalTerminalList();
     } catch (error, stackTrace) {
       AppLogger.warn('desktop local terminal list failed error=$error');
       AppLogger.warn('desktop local terminal list stack: $stackTrace');
@@ -320,9 +323,6 @@ abstract class _TerminalViewModelLoadBase extends _TerminalViewModelEventsBBase 
             _lastObservedViewportSize;
         if (inheritedViewport != null) {
           _lastDispatchedResizeByTerminal[terminalId] = inheritedViewport;
-          AppLogger.info(
-            '$_terminalStreamTraceTag seed viewport terminalId=$terminalId from=$previousActiveId size=${inheritedViewport.cols}x${inheritedViewport.rows}',
-          );
         }
       }
 

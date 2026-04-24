@@ -235,6 +235,7 @@ class TerminalAuthorityCache {
   int cursorRow = 0;
   int cursorCol = 0;
   List<TerminalAuthorityLine> screenLines = const <TerminalAuthorityLine>[];
+  List<int> screenData = const <int>[];
   final Map<int, TerminalAuthorityLine> historyLines = <int, TerminalAuthorityLine>{};
   String? _lastHistoryInvalidationSignature;
 
@@ -282,6 +283,13 @@ class TerminalAuthorityCache {
     layoutEpoch = (json['layout_epoch'] as num?)?.toInt() ?? layoutEpoch;
     cursorRow = (json['cursor_row'] as num?)?.toInt() ?? cursorRow;
     cursorCol = (json['cursor_col'] as num?)?.toInt() ?? cursorCol;
+    final encodedScreen = json['screen_data_base64'] as String?;
+    if (encodedScreen != null) {
+      // server 可能显式发送空字符串，表示“当前没有可复用的 formatted screen
+      // bytes”。这里必须同步清空旧缓存，避免下一次 authority rebuild 继续
+      // 重放上一帧的彩色屏幕数据。
+      screenData = encodedScreen.isEmpty ? const <int>[] : base64Decode(encodedScreen);
+    }
     screenLines = (json['screen_lines'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
         .map(TerminalAuthorityLine.fromJson)
@@ -440,6 +448,25 @@ class TerminalAuthorityCache {
     return buffer.toString();
   }
 
+  List<int> buildReplayBytes() {
+    if (screenData.isEmpty) {
+      return utf8.encode(buildTranscript());
+    }
+
+    if (activeBuffer == 'alt') {
+      return List<int>.from(screenData);
+    }
+
+    final prefix = _historyPrefixBytesBeforeViewport();
+    if (prefix.isEmpty) {
+      return List<int>.from(screenData);
+    }
+    return <int>[
+      ...prefix,
+      ...screenData,
+    ];
+  }
+
   String _linesToTranscript(List<TerminalAuthorityLine> lines) {
     if (lines.isEmpty) {
       return '';
@@ -457,6 +484,35 @@ class TerminalAuthorityCache {
       }
     }
     return buffer.toString();
+  }
+
+  List<int> _historyPrefixBytesBeforeViewport() {
+    if (historyLines.isEmpty) {
+      return const <int>[];
+    }
+
+    final boundary = viewportStartLine;
+    final sortedEntries = historyLines.entries
+        .where((entry) => boundary <= historyStartLine || entry.key < boundary)
+        .toList(growable: false)
+      ..sort((left, right) => left.key.compareTo(right.key));
+    if (sortedEntries.isEmpty) {
+      return const <int>[];
+    }
+
+    final bytes = <int>[];
+    for (var index = 0; index < sortedEntries.length; index += 1) {
+      final line = sortedEntries[index].value;
+      bytes.addAll(utf8.encode(line.text));
+      if (line.hardBreak && index < sortedEntries.length - 1) {
+        bytes.addAll(const <int>[13, 10]);
+      }
+    }
+    final lastLine = sortedEntries.last.value;
+    if (lastLine.hardBreak) {
+      bytes.addAll(const <int>[13, 10]);
+    }
+    return bytes;
   }
 
   void _pruneHistoryCacheWindow() {

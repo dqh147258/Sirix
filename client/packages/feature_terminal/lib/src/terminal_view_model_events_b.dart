@@ -342,6 +342,7 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
         terminalId: terminalId,
         protocolVersion: authorityTerminalProtocolVersion,
         syncMode: authorityTerminalSyncMode,
+        clientKind: 'desktop_app',
       );
     }
 
@@ -351,8 +352,7 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
   Future<void> _reconcileDesktopLocalTerminalList({
     String? activeTerminalIdHint,
   }) async {
-    final localClient = _desktopLocalClient;
-    if (localClient == null || !_shouldUseDesktopLocalTransport) {
+    if (_desktopLocalClient == null || !_shouldUseDesktopLocalTransport) {
       return;
     }
 
@@ -362,7 +362,7 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
     }
 
     try {
-      final terminals = await localClient.listTerminalSessions();
+      final terminals = await _requestDesktopLocalTerminalList();
       _replaceTerminals(terminals);
       final requestedTerminalId = activeTerminalIdHint ?? state.activeTerminalId;
       if (requestedTerminalId == null || requestedTerminalId.isEmpty) {

@@ -89,6 +89,34 @@
 - 在 `row.rs` 的 `Row::resize()` 中补上缩窄后最后一列 wide lead 清理，提前修复被截断后的坏状态。
 - 在 `state_cache.rs` 中新增接近真实日志的 narrow-width jitter 回归测试，覆盖 `51 -> ... -> 1` 列与双宽字符混排场景。
 
+### 6. Desktop terminal viewer 与本地 channel 生命周期收敛
+
+相关文件：
+- `client/packages/feature_terminal/lib/src/terminal_page.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_events_a.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_events_b.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_load.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_models.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_state_base.dart`
+- `client/packages/feature_terminal/lib/src/terminal_view_model_transport_history.dart`
+- `client/packages/feature_terminal/test/terminal_stream_state_test.dart`
+- `desktop-server/src/api/ws.rs`
+- `desktop-server/src/bin/sirix-terminal.rs`
+- `desktop-server/src/cli_support.rs`
+
+实现方式：
+- `TerminalPageConfig` 的 provider identity 改成只在本地 desktop workspace（`sessionId == null`）忽略 bootstrap 阶段的 `deviceId` 变化，避免 `null -> real deviceId` 期间创建第二个 `TerminalViewModel`；remote session 仍保留 `deviceId` 作为 identity，避免切换远端设备后错误复用旧 VM。
+- `terminal_page.dart` 在 `authoritySource == system_terminal` 时不再把本地 panel 几何回写给 PTY，而是通过底部横向滚动条查看超宽内容，避免 Desktop App 再次与 `sirix-terminal` 争抢几何权威。
+- `TerminalAuthorityCache` 新增 `screenData` / `buildReplayBytes()`，优先用服务端下发的 formatted `screen_data_base64` 重建可见屏幕，保留彩色内容；同时在 `screen_data_base64 == ""` 时显式清空旧缓存，避免 authority rebuild 误重放陈旧屏幕。
+- desktop-local terminal 列表查询改为复用 `TerminalViewModel` 自己的共享 local websocket channel，通过 `_requestDesktopLocalTerminalList()` 合并 list/attach/bootstrap 路径，减少临时 ws 重连和 duplicate attach。
+- `_connectDesktopLocalChannel()` 增加 in-flight connect coalescing，并在 channel `error/done` 时回填 pending terminal-list completer，避免关闭期 list 请求悬挂。
+- `_retryDesktopLocalAttachUntilReady()` 显式携带 `clientKind: desktop_app`，避免未来默认值调整后 attach 重试语义漂移。
+- `sirix-terminal` 的 terminal size watcher 调整为 Unix 平台 `SIGWINCH + polling` 并行，使用去重逻辑避免重复上报；解决“前几次拖动有效，后来突然完全失效”的窗口尺寸监听问题。
+- 清理大批排障期高频 trace，只保留 authority divergence、channel error/done、truncated snapshot skip 等低频边界日志，避免 runtime logs 被调试噪音淹没。
+
 ## 已完成验证
 
 ### Rust
@@ -101,6 +129,8 @@
 - `cargo test --manifest-path desktop-server/Cargo.toml app::terminal::manager::tests::resize_publish_fingerprint_changes_when_resize_bundle_changes -- --exact`
 - `cargo test --manifest-path third_party/vt100/Cargo.toml --lib`
 - `cargo test --manifest-path desktop-server/Cargo.toml replay_resize_with_wide_chars_does_not_crash_on_narrow_width_jitter -- --nocapture`
+- `flutter analyze client/packages/feature_terminal/lib/src/terminal_page.dart client/packages/feature_terminal/lib/src/terminal_view_model.dart client/packages/feature_terminal/lib/src/terminal_view_model_events_a.dart client/packages/feature_terminal/lib/src/terminal_view_model_events_b.dart client/packages/feature_terminal/lib/src/terminal_view_model_load.dart client/packages/feature_terminal/lib/src/terminal_view_model_models.dart client/packages/feature_terminal/lib/src/terminal_view_model_runtime.dart client/packages/feature_terminal/lib/src/terminal_view_model_runtime_snapshot.dart client/packages/feature_terminal/lib/src/terminal_view_model_state_base.dart client/packages/feature_terminal/lib/src/terminal_view_model_transport_history.dart client/packages/feature_terminal/test/terminal_stream_state_test.dart`
+- `flutter test client/packages/feature_terminal/test/terminal_stream_state_test.dart`
 
 ### Flutter
 - `flutter analyze client/packages/feature_terminal/lib/src/terminal_view_model.dart client/packages/infra_api/lib/src/desktop_local_client.dart`

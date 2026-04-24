@@ -234,9 +234,21 @@ abstract class _TerminalViewModelRuntimeBase extends _TerminalViewModelTransport
         : _lastObservedViewportSize != null
             ? 'global'
             : 'unknown';
+    final viewerViewport = _lastDispatchedResizeByTerminal[terminalId] ?? _lastObservedViewportSize;
     AppLogger.info(
-      '$_terminalStreamTraceTag apply authority viewport terminalId=$terminalId authority=${authority.cols}x${authority.rows} viewportSource=$viewportSource target=${authority.cols}x$targetRows current=${terminal.viewWidth}x${terminal.viewHeight}',
+      '$_terminalStreamTraceTag apply authority viewport terminalId=$terminalId authority=${authority.cols}x${authority.rows} authoritySource=${authority.authoritySource} viewportSource=$viewportSource viewer=${viewerViewport?.cols ?? 0}x${viewerViewport?.rows ?? 0} target=${authority.cols}x$targetRows current=${terminal.viewWidth}x${terminal.viewHeight}',
     );
+    if (viewerViewport != null &&
+        authority.authoritySource == 'system_terminal' &&
+        (viewerViewport.cols != authority.cols || viewerViewport.rows != authority.rows)) {
+      // 用户要求继续排查 Desktop App 拖动窗口后的异常，这里补充一条专门的
+      // divergence 日志：当 Flutter panel 量出的 viewer 尺寸与 system
+      // terminal authority 尺寸不一致时，明确记录双方几何，方便下一轮
+      // 判断异常是否来自“本地视口已变、远端权威尚未变更”的几何分叉。
+      AppLogger.warn(
+        '$_terminalStreamTraceTag authority/viewer divergence terminalId=$terminalId viewer=${viewerViewport.cols}x${viewerViewport.rows} authority=${authority.cols}x${authority.rows} source=${authority.authoritySource}',
+      );
+    }
     terminal.resize(authority.cols, targetRows);
   }
 

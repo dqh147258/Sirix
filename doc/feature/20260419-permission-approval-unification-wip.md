@@ -139,7 +139,7 @@ Shell 继续保留独立的前缀 / exec-policy 规则体系，但 Ask 场景已
 - TUI 收到 shell exec approval 时，会镜像一份 shell approval request 到 Desktop Server
 - Desktop Server 再把请求广播给本地桌面端与 backend（从而到 mobile）
 - 远端批准后，TUI 轮询本地 API 读取 shell resolution，并自动把 approval 回注给运行中的 Codex turn
-- raw CLI viewer 收到同一个 request 后会暂停 stdin 透传，把按键解释为 `allow/deny + scope`，提交到 `/ai/sessions/approvals/resolve`；收到其它端的 resolved 事件后会清除本地 prompt，避免同一请求被重复操作
+- raw CLI viewer 收到同一个 request 后会暂停 stdin 透传，把单个按键（无需 Enter）解释为 `allow/deny + scope`，提交到 `/ai/sessions/approvals/resolve`；提交失败时保留并重绘当前 prompt，收到其它端的 resolved 事件后会清除本地 prompt / 晋级 queued request，避免同一请求被重复操作
 - 复杂 shell / 解释器命令只暴露 `once / session` 两种 scope；其中 `session` 默认只允许当前完整命令前缀，不允许提升到 workspace/global
 - 简单 shell 命令仍可选择更短的 prefix，并支持 `session / workspace / global`
 

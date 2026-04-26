@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::Write;
 
 use anyhow::Context;
 
@@ -36,9 +36,9 @@ impl CliApprovalPrompt {
         self.active.is_some()
     }
 
-    pub(crate) fn handle_request_event(
+    pub(crate) fn handle_request_event<W: Write>(
         &mut self,
-        stdout: &mut io::Stdout,
+        stdout: &mut W,
         body: &serde_json::Value,
     ) -> anyhow::Result<()> {
         let Some(request) = ApprovalRequest::from_payload(body) else {
@@ -57,9 +57,9 @@ impl CliApprovalPrompt {
         Ok(())
     }
 
-    pub(crate) fn handle_resolved_event(
+    pub(crate) fn handle_resolved_event<W: Write>(
         &mut self,
-        stdout: &mut io::Stdout,
+        stdout: &mut W,
         body: &serde_json::Value,
     ) -> anyhow::Result<()> {
         let request_id = body
@@ -104,9 +104,9 @@ impl CliApprovalPrompt {
         Ok(())
     }
 
-    pub(crate) async fn handle_stdin_bytes(
+    pub(crate) async fn handle_stdin_bytes<W: Write>(
         &mut self,
-        stdout: &mut io::Stdout,
+        stdout: &mut W,
         bytes: &[u8],
     ) -> anyhow::Result<()> {
         let Some(choice) = self.choice_from_input(bytes) else {
@@ -141,6 +141,13 @@ impl CliApprovalPrompt {
                     name = self.client_name,
                 )
                 .context("failed to write approval error")?;
+                writeln!(
+                    stdout,
+                    "\x1b[33m[{name}] approval is still pending; choose again or wait for another endpoint to resolve it.\x1b[0m",
+                    name = self.client_name,
+                )
+                .context("failed to write approval retry hint")?;
+                self.render_active(stdout)?;
             }
         }
         stdout.flush().ok();
@@ -157,7 +164,7 @@ impl CliApprovalPrompt {
                 .any(|queued| queued.dedupe_key() == request.dedupe_key())
     }
 
-    fn render_active(&self, stdout: &mut io::Stdout) -> anyhow::Result<()> {
+    fn render_active<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
         let Some(request) = self.active.as_ref() else {
             return Ok(());
         };
@@ -209,13 +216,19 @@ impl CliApprovalPrompt {
             )
             .context("failed to write approval choice")?;
         }
-        writeln!(stdout, "  press number; Esc/Ctrl-C = deny once")
-            .context("failed to write approval hint")?;
+        // Raw terminal mode delivers each key immediately.  Call out that Enter
+        // is not required so an extra newline does not get forwarded to the PTY
+        // after the approval prompt clears.
+        writeln!(
+            stdout,
+            "  press one listed number (no Enter); Esc/Ctrl-C = deny once"
+        )
+        .context("failed to write approval hint")?;
         stdout.flush().ok();
         Ok(())
     }
 
-    fn render_queue_notice(&self, stdout: &mut io::Stdout) -> anyhow::Result<()> {
+    fn render_queue_notice<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
         writeln!(
             stdout,
             "\r\n\x1b[33m[{name}] another approval is queued ({count} waiting).\x1b[0m",
@@ -227,11 +240,11 @@ impl CliApprovalPrompt {
         Ok(())
     }
 
-    fn render_short_hint(&self, stdout: &mut io::Stdout) -> anyhow::Result<()> {
+    fn render_short_hint<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
         if let Some(request) = self.active.as_ref() {
             writeln!(
                 stdout,
-                "\r\n\x1b[33m[{name}] approval pending for {}; press a listed number, Esc, or Ctrl-C.\x1b[0m",
+                "\r\n\x1b[33m[{name}] approval pending for {}; press one listed number (no Enter), Esc, or Ctrl-C.\x1b[0m",
                 request.capability_key,
                 name = self.client_name,
             )
@@ -466,5 +479,114 @@ mod tests {
         let request = ApprovalRequest::from_payload(&body).expect("request");
         assert_eq!(request.prefix_for_scope("once"), None);
         assert_eq!(request.prefix_for_scope("session"), Some("npm test"));
+    }
+
+    #[test]
+    fn resolved_event_promotes_next_queued_request() {
+        let mut prompt = CliApprovalPrompt::new(9, "test");
+        let mut stdout = Vec::new();
+        prompt
+            .handle_request_event(&mut stdout, &request_body("request-1", "skill.alpha"))
+            .expect("first request should render");
+        prompt
+            .handle_request_event(&mut stdout, &request_body("request-2", "skill.beta"))
+            .expect("second request should queue");
+
+        assert_eq!(active_request_id(&prompt), Some("request-1"));
+        assert_eq!(prompt.queue.len(), 1);
+
+        prompt
+            .handle_resolved_event(
+                &mut stdout,
+                &serde_json::json!({
+                    "request_id": "request-1",
+                    "decision": "allow",
+                }),
+            )
+            .expect("resolution should advance queue");
+
+        assert_eq!(active_request_id(&prompt), Some("request-2"));
+        assert_eq!(prompt.queue.len(), 0);
+        let rendered = String::from_utf8(stdout).expect("approval prompt should be utf8");
+        assert!(rendered.contains("capability: skill.beta"));
+        assert!(rendered.contains("no Enter"));
+    }
+
+    #[test]
+    fn resolved_event_removes_matching_queued_request_without_touching_active() {
+        let mut prompt = CliApprovalPrompt::new(9, "test");
+        let mut stdout = Vec::new();
+        prompt
+            .handle_request_event(&mut stdout, &request_body("request-1", "skill.alpha"))
+            .expect("first request should render");
+        prompt
+            .handle_request_event(&mut stdout, &request_body("request-2", "skill.beta"))
+            .expect("second request should queue");
+
+        prompt
+            .handle_resolved_event(
+                &mut stdout,
+                &serde_json::json!({
+                    "request_id": "request-2",
+                    "decision": "deny",
+                }),
+            )
+            .expect("queued resolution should be accepted");
+
+        assert_eq!(active_request_id(&prompt), Some("request-1"));
+        assert_eq!(prompt.queue.len(), 0);
+    }
+
+    #[test]
+    fn request_id_match_takes_precedence_over_capability_fields() {
+        let request = request("request-1", "skill.alpha");
+
+        assert!(request.matches_resolution(
+            "request-1",
+            "wrong-session",
+            "wrong-agent",
+            "skill.beta"
+        ));
+        assert!(!request.matches_resolution("request-2", "session-1", "agent-1", "skill.alpha"));
+        assert!(request.matches_resolution("", "session-1", "agent-1", "skill.alpha"));
+    }
+
+    #[test]
+    fn duplicate_request_event_is_not_queued_twice() {
+        let mut prompt = CliApprovalPrompt::new(9, "test");
+        let mut stdout = Vec::new();
+        let body = request_body("request-1", "skill.alpha");
+
+        prompt
+            .handle_request_event(&mut stdout, &body)
+            .expect("first request should render");
+        prompt
+            .handle_request_event(&mut stdout, &body)
+            .expect("duplicate request should be ignored");
+
+        assert_eq!(active_request_id(&prompt), Some("request-1"));
+        assert_eq!(prompt.queue.len(), 0);
+    }
+
+    fn active_request_id(prompt: &CliApprovalPrompt) -> Option<&str> {
+        prompt
+            .active
+            .as_ref()
+            .map(|request| request.request_id.as_str())
+    }
+
+    fn request(request_id: &str, capability_key: &str) -> ApprovalRequest {
+        ApprovalRequest::from_payload(&request_body(request_id, capability_key)).expect("request")
+    }
+
+    fn request_body(request_id: &str, capability_key: &str) -> serde_json::Value {
+        serde_json::json!({
+            "ai_session_id": "session-1",
+            "request_id": request_id,
+            "capability_key": capability_key,
+            "agent_id": "agent-1",
+            "model_id": "model-1",
+            "supported_scopes": ["once", "session"],
+        })
     }
 }

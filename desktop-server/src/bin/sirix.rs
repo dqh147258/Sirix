@@ -1,3 +1,5 @@
+#[path = "../cli_approval.rs"]
+mod cli_approval;
 #[path = "../cli_support.rs"]
 mod cli_support;
 #[path = "../scene.rs"]
@@ -25,6 +27,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use cli_approval::CliApprovalPrompt;
 use cli_support::{
     current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
     local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
@@ -522,12 +525,22 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
     let mut viewer_presence_epoch: Option<u64> = None;
     let mut size_rx = spawn_terminal_size_watcher(last_size);
     let mut attached_once = false;
+    let mut approval_prompt = CliApprovalPrompt::new(port, "sirix");
 
     write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
 
     let attach_result: anyhow::Result<TerminalDetachReason> = loop {
         tokio::select! {
             Some(bytes) = stdin_rx.recv() => {
+                if approval_prompt.has_pending() {
+                    if let Err(error) = approval_prompt
+                        .handle_stdin_bytes(&mut stdout, bytes.as_slice())
+                        .await
+                    {
+                        break Err(error.context("failed to handle approval input"));
+                    }
+                    continue;
+                }
                 if let Err(error) = write
                     .send(Message::Text(
                         serde_json::json!({
@@ -561,7 +574,12 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                         if message_marks_terminal_ready(&text) {
                             attached_once = true;
                         }
-                        if handle_terminal_message(&mut stdout, &text, &mut viewer_presence_epoch)? {
+                        if handle_terminal_message(
+                            &mut stdout,
+                            &text,
+                            &mut viewer_presence_epoch,
+                            &mut approval_prompt,
+                        )? {
                             break Ok(TerminalDetachReason::SessionClosed);
                         }
                     }
@@ -696,6 +714,7 @@ fn handle_terminal_message(
     stdout: &mut io::Stdout,
     raw: &str,
     viewer_presence_epoch: &mut Option<u64>,
+    approval_prompt: &mut CliApprovalPrompt,
 ) -> anyhow::Result<bool> {
     let decoded = serde_json::from_str::<serde_json::Value>(raw)
         .with_context(|| format!("failed to decode websocket payload: {raw}"))?;
@@ -760,6 +779,18 @@ fn handle_terminal_message(
             Ok(false)
         }
         "terminal.closed" => Ok(true),
+        "ai.approval.request" => {
+            if let Some(body) = decoded.get("payload") {
+                approval_prompt.handle_request_event(stdout, body)?;
+            }
+            Ok(false)
+        }
+        "ai.approval.resolved" => {
+            if let Some(body) = decoded.get("payload") {
+                approval_prompt.handle_resolved_event(stdout, body)?;
+            }
+            Ok(false)
+        }
         _ => Ok(false),
     }
 }

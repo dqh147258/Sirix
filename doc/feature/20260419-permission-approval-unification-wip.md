@@ -117,6 +117,7 @@ Desktop Server 的 MCP 状态探测已扩展为可做 tool discovery：
 ## 7. Shell 审批多端协同与复杂命令边界
 Shell 继续保留独立的前缀 / exec-policy 规则体系，但 Ask 场景已补齐到 CLI / Desktop / Mobile 的统一广播与收敛：
 - CLI 仍使用 Codex TUI 原生审批弹层
+- `sirix` / `sirix-terminal` 这种 raw terminal viewer 同时直接消费统一的 `ai.approval.request` / `ai.approval.resolved` 事件；当 Skill / MCP / Builtin 审批不会进入 Codex TUI 原生弹层时，CLI 也会在当前终端展示同一请求并调用统一 resolve API
 - Desktop / Mobile 通过 `ai.approval.request` / `ai.approval.resolved` 接收与消除同一审批请求
 - Desktop Server 新增 shell approval registry，负责在 CLI 与远端审批之间做桥接
 - 任一端批准 / 拒绝后，其它端会收到 resolved 事件并清除同一请求
@@ -128,6 +129,9 @@ Shell 继续保留独立的前缀 / exec-policy 规则体系，但 Ask 场景已
 - `third_party/codex-rs/tui/src/app.rs`
 - `third_party/codex-rs/tui/src/bottom_pane/approval_overlay.rs`
 - `third_party/codex-rs/tui/src/sirix_local_api.rs`
+- `desktop-server/src/cli_approval.rs`
+- `desktop-server/src/bin/sirix.rs`
+- `desktop-server/src/bin/sirix-terminal.rs`
 - `client/packages/feature_terminal/lib/src/terminal_page.dart`
 - `client/packages/feature_terminal/lib/src/terminal_view_model.dart`
 
@@ -135,6 +139,7 @@ Shell 继续保留独立的前缀 / exec-policy 规则体系，但 Ask 场景已
 - TUI 收到 shell exec approval 时，会镜像一份 shell approval request 到 Desktop Server
 - Desktop Server 再把请求广播给本地桌面端与 backend（从而到 mobile）
 - 远端批准后，TUI 轮询本地 API 读取 shell resolution，并自动把 approval 回注给运行中的 Codex turn
+- raw CLI viewer 收到同一个 request 后会暂停 stdin 透传，把按键解释为 `allow/deny + scope`，提交到 `/ai/sessions/approvals/resolve`；收到其它端的 resolved 事件后会清除本地 prompt，避免同一请求被重复操作
 - 复杂 shell / 解释器命令只暴露 `once / session` 两种 scope；其中 `session` 默认只允许当前完整命令前缀，不允许提升到 workspace/global
 - 简单 shell 命令仍可选择更短的 prefix，并支持 `session / workspace / global`
 
@@ -157,6 +162,9 @@ MCP 权限页和 MCP 管理页已分离：
 ## 相关文件
 - `desktop-server/src/app/ai/config.rs`
 - `desktop-server/src/api/ai.rs`
+- `desktop-server/src/cli_approval.rs`
+- `desktop-server/src/bin/sirix.rs`
+- `desktop-server/src/bin/sirix-terminal.rs`
 - `desktop-server/src/app/ai/approval.rs`
 - `desktop-server/src/app/status.rs`
 - `desktop-server/src/app/tasks.rs`

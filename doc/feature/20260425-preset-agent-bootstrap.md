@@ -32,6 +32,8 @@ Agent 配置不再以内联 `[[agents]]` 保存在 `config.toml` 中。Desktop A
   - `ensure_layout()` 会创建 `SIRIX_HOME/agents/`，生成总路由 Skill `SIRIX_HOME/skills/sirix-preset-agents/SKILL.md`，并为每个预置 Agent 生成独立 Skill：`SIRIX_HOME/skills/<agent-id>/SKILL.md`。
   - `SIRIX_HOME/skills/sirix-preset-agents/agents/<agent>.md` 继续保留每个预置 Agent 的说明索引；独立 Skill 里会嵌入对应 Agent 的调度说明和系统提示词。
   - 生成的每个 `SKILL.md` 都带 Codex Skill loader 要求的 YAML frontmatter，`name` 使用 Agent ID（例如 `debugger`），确保 Sirix CLI `/skills` 的 List skills 与 `$<agent-id>` 唤醒都能识别预置 Skill。
+  - 预置总路由 Skill 会显式声明“选择或委托 Sirix 预置 Agent”属于授权场景：简单单步问题和微小修改继续内联处理，非平凡的检索、规划、实现、评审、验证切片应通过 `spawn_agent` 交给最匹配的 Agent。
+  - 每个独立 Agent Skill 会说明在父 Agent 内如何用 `spawn_agent` 委托该角色，包括任务目标、文件/检索范围、允许编辑范围、期望证据和输出格式；涉及代码修改时要求文件范围与其它子 Agent 解耦，并提醒不要回退他人修改。
   - `load_global()` 会自动注册预置 Skill `sirix-preset-agents` 以及每个预置 Agent 同名 Skill，用于支持 `$debugger`、`$orchestrator` 等快速唤醒。
   - 首次生成的 `codex` 默认 `sub_agent_ids` 指向核心预置专家，使初始会话可以直接委托这些角色。
   - 新增 `default_agent_id`，用于控制启动 `sirix` CLI 且未显式传入 Agent 时默认使用的 Agent。
@@ -69,6 +71,9 @@ Agent 配置不再以内联 `[[agents]]` 保存在 `config.toml` 中。Desktop A
   - `/subagent` Picker 直接读取当前 bridge config 中的 `[agents.<role>]`（即当前 Agent 经过 `subAgentsEnabled` / `subAgentIds` 过滤后的可委托角色），选择后会在输入框预填 `/subagent <role> `。
   - 用户继续输入任务并回车后，TUI 会把该命令转换为显式的 native `spawn_agent` 调度意图，让父 Agent 调度所选 role，而不是把 `/subagent` 原样发送成普通对话。
   - 切换 Sirix Agent 后会刷新 TUI 内存中的 bridge config，确保 `/subagent` 列表跟随当前 Agent 更新。
+- `third_party/codex-rs/tools/src/agent_tool.rs`
+  - `spawn_agent` 默认工具说明改为按任务复杂度主动选择子 Agent：当委派能提升质量、速度或正确性时主动使用；仅当任务简单、单步、低风险且不需要专家上下文、并行检索或独立验证时保持本地执行。
+  - 原先要求用户显式提出“子 Agent / 委派 / 并行 Agent”才允许调用的保守说明已注释保留，便于后续回滚。
 - `client/packages/infra_api/lib/src/ai_models.dart`
   - AI 配置模型新增 `defaultAgentId` 字段。
   - Model 配置模型新增可选 `supportedReasoningEfforts`；`null` 表示无法判断，空列表表示明确不支持。
@@ -138,8 +143,10 @@ scripts/migrate-sirix-agents-to-files.sh --sirix-home ~/.sirix
 ## 验证
 
 - `cargo fmt --manifest-path desktop-server/Cargo.toml`
+- `cargo fmt --manifest-path third_party/codex-rs/core/Cargo.toml --package codex-tools --package codex-core`
 - `cargo test --manifest-path desktop-server/Cargo.toml default_config_seeds_editable_specialist_agents`
 - `cargo test --manifest-path desktop-server/Cargo.toml ensure_layout_writes_preset_agent_skill_docs -- --nocapture`
+- `cargo test --manifest-path third_party/codex-rs/core/Cargo.toml -p codex-core spawn_agent_description -- --nocapture`
 - `cargo test --manifest-path third_party/codex-rs/Cargo.toml -p codex-core-skills explicit_skill_directory -- --nocapture`
 - `cargo test --manifest-path desktop-server/Cargo.toml embedded_catalog_has_bilingual_prompts`
 - `cargo test --manifest-path desktop-server/Cargo.toml agent_resource_switches_support_all_allowlist_and_disabled_modes`

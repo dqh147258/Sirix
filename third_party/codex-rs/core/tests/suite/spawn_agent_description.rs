@@ -191,21 +191,21 @@ async fn spawn_agent_description_omits_visible_models_but_keeps_usage_guidance()
     );
     assert!(
         description.contains(
-            "Only use `spawn_agent` if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work."
+            "Use it proactively when delegation improves quality, speed, or correctness; keep work local only when the task is simple enough to finish safely in one focused thread."
         ),
-        "expected explicit authorization rule in spawn_agent description: {description:?}"
+        "expected proactive delegation rule in spawn_agent description: {description:?}"
     );
     assert!(
         description.contains(
-            "Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn."
+            "Keep work local for simple, single-step, low-risk tasks that do not need specialist context, parallel repo exploration, independent verification, or a bounded implementation owner."
         ),
-        "expected non-authorization clarification in spawn_agent description: {description:?}"
+        "expected simple-task local execution rule in spawn_agent description: {description:?}"
     );
     assert!(
         description.contains(
-            "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
+            "Agent-role guidance below is part of the routing surface: use it to select the most suitable sub-agent for delegated work."
         ),
-        "expected agent-role clarification in spawn_agent description: {description:?}"
+        "expected agent-role routing clarification in spawn_agent description: {description:?}"
     );
 
     Ok(())

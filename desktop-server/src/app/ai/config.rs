@@ -652,12 +652,23 @@ fn render_preset_agent_skill(entries: &[(&PresetAgentDefinition, String)]) -> St
     let mut markdown = format!(
         "{}# Sirix Preset Agent Routing\n\n\
 Use this skill when a task should be dispatched to Sirix preset Agents or when you need to choose the right preset Agent.\n\n\
+## Invocation Contract\n\n\
+- Treat this skill as explicit permission to select or delegate to Sirix preset Agents.\n\
+- Use Codex native `spawn_agent` for bounded in-session delegation when a parent Agent has the tool available.\n\
+- Keep simple one-step questions or tiny edits inline; delegate non-trivial investigation, planning, implementation, review, or verification slices.\n\
+- Keep the parent Agent responsible for integration, user-facing decisions, and final verification evidence.\n\n\
 ## Routing Rules\n\n\
 - Prefer `orchestrator` for broad tasks that need staged planning, execution, and verification.\n\
 - Prefer planner Agents for product or implementation planning before code changes.\n\
 - Prefer coordinator Agents for bug-fix and code-review workflows that need multiple specialist passes.\n\
 - Prefer focused specialist Agents when the task maps directly to one role.\n\
 - Check the per-Agent docs in `agents/` before delegating when role boundaries are unclear.\n\n\
+## Delegation Workflow\n\n\
+1. Decide what the parent Agent must do now and what can run independently.\n\
+2. Spawn only concrete, self-contained subtasks with the closest matching `agent_type`.\n\
+3. Give each sub-Agent ownership boundaries, expected output, and any disjoint file scope.\n\
+4. Continue useful parent work while sub-Agents run; wait only when their result is needed.\n\
+5. Review returned evidence before integrating changes or declaring completion.\n\n\
 ## Preset Agents\n\n",
         skill_frontmatter(
             SIRIX_PRESET_AGENT_SKILL_ID,
@@ -718,7 +729,10 @@ Use this skill when the user invokes `${}` or when the task should run through t
 ## Activation\n\n\
 - Treat this skill as an explicit request to use Agent `{}`.\n\
 - If Sirix Agent switching is available, switch/select `agent_id = \"{}\"` before continuing.\n\
-- If working inside a parent Agent, delegate with `spawn_agent` / Sirix sub-agent routing to `{}` when delegation is safer than continuing inline.\n\
+- If working inside a parent Agent, delegate with `spawn_agent` / Sirix sub-agent routing to `{}` for non-trivial bounded work that fits this Agent.\n\
+- Keep the work inline only when it is simple, single-step, and safer to finish directly than to coordinate a child Agent.\n\
+- When spawning this Agent, set the subtask scope clearly: goal, relevant files or search target, allowed edits, expected evidence, and output format.\n\
+- If this Agent edits code, ensure the assigned file scope is disjoint from other active sub-Agents and remind it not to revert others' work.\n\
 - If neither switching nor delegation is available, follow this Agent's instructions inline and state that Agent switching was unavailable.\n\n\
 {}\n",
         skill_frontmatter(
@@ -5087,6 +5101,22 @@ mod tests {
             "per-agent preset skill should be invokable by its agent id"
         );
         assert!(debugger_skill.contains("Agent `debugger`"));
+        assert!(
+            skill.contains("Treat this skill as explicit permission to select or delegate"),
+            "routing skill should make preset Agent delegation explicit"
+        );
+        assert!(
+            skill.contains("Keep simple one-step questions or tiny edits inline"),
+            "routing skill should preserve inline execution for simple work"
+        );
+        assert!(
+            debugger_skill.contains("delegate with `spawn_agent`"),
+            "per-agent skill should describe native sub-agent delegation"
+        );
+        assert!(
+            debugger_skill.contains("Keep the work inline only when it is simple"),
+            "per-agent skill should avoid unnecessary child Agents for simple work"
+        );
     }
 
     fn test_agent(provider_id: &str, model_id: &str, prompt: &str) -> AgentConfig {

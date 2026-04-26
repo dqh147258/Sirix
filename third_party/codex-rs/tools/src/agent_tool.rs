@@ -578,21 +578,35 @@ fn spawn_agent_tool_description(
     }
     let agent_role_usage_hint = include_agent_role_guidance
         .then_some(
-            "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
+            "Agent-role guidance below is part of the routing surface: use it to select the most suitable sub-agent for delegated work."
         )
         .unwrap_or_default();
+    // Previous conservative default kept as a rollback reference:
+    //
+    // This spawn_agent tool provides you access to smaller but more efficient sub-agents.
+    // A mini model can solve many tasks faster than the main model. You should follow the
+    // rules and guidelines below to use this tool.
+    //
+    // Only use `spawn_agent` if and only if the user explicitly asks for sub-agents,
+    // delegation, or parallel agent work.
+    // Requests for depth, thoroughness, research, investigation, or detailed codebase
+    // analysis do not count as permission to spawn.
+    // Agent-role guidance below only helps choose which agent to use after spawning is
+    // already authorized; it never authorizes spawning by itself.
+    //
+    // The remainder of the old hint matched the delegation design, after-delegation, and
+    // parallel-pattern sections below.
     format!(
         r#"
         {tool_description}
-This spawn_agent tool provides you access to smaller but more efficient sub-agents. A mini model can solve many tasks faster than the main model. You should follow the rules and guidelines below to use this tool.
-
-Only use `spawn_agent` if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work.
-Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.
+This spawn_agent tool provides access to specialized sub-agents that can research, plan, implement, review, or verify bounded slices of a larger task. Use it proactively when delegation improves quality, speed, or correctness; keep work local only when the task is simple enough to finish safely in one focused thread.
 {agent_role_usage_hint}
 
 ### When to delegate vs. do the subtask yourself
 - First, quickly analyze the overall user task and form a succinct high-level plan. Identify which tasks are immediate blockers on the critical path, and which tasks are sidecar tasks that are needed but can run in parallel without blocking the next local step. As part of that plan, explicitly decide what immediate task you should do locally right now. Do this planning step before delegating to agents so you do not hand off the immediate blocking task to a submodel and then waste time waiting on it.
-- Use the smaller subagent when a subtask is easy enough for it to handle and can run in parallel with your local work. Prefer delegating concrete, bounded sidecar tasks that materially advance the main task without blocking your immediate next local step.
+- Use `spawn_agent` for non-trivial tasks with independent investigation, planning, implementation, review, or verification slices. Prefer a specialist sub-agent when the available agent roles clearly match the subtask.
+- Keep work local for simple, single-step, low-risk tasks that do not need specialist context, parallel repo exploration, independent verification, or a bounded implementation owner.
+- Delegate concrete, bounded sidecar tasks that materially advance the main task without blocking your immediate next local step.
 - Do not delegate urgent blocking work when your immediate next step depends on that result. If the very next action is blocked on that task, the main rollout should usually do it locally to keep the critical path moving.
 - Keep work local when the subtask is too difficult to delegate well and when it is tightly coupled, urgent, or likely to block your immediate next step.
 

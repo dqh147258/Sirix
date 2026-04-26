@@ -129,5 +129,15 @@ fn skill_config_rule_selector(entry: &SkillConfig) -> Option<SkillConfigRuleSele
 }
 
 fn normalize_rule_path(path: &Path) -> PathBuf {
-    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    // Codex's manage-skills UI stores paths to SKILL.md, while Sirix bridge
+    // configs store editable skill directories.  Normalize both shapes to the
+    // concrete SKILL.md path because `SkillMetadata.path_to_skills_md` is the
+    // key used by loaded skill outcomes and disabled-path sets.
+    let skill_doc = path.join("SKILL.md");
+    let comparable_path = if skill_doc.is_file() {
+        &skill_doc
+    } else {
+        path
+    };
+    dunce::canonicalize(comparable_path).unwrap_or_else(|_| comparable_path.to_path_buf())
 }

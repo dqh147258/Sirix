@@ -28,6 +28,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -3280,6 +3281,28 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected.permissions.file_system_sandbox_policy = file_system_sandbox_policy;
     expected.permissions.network_sandbox_policy = network_sandbox_policy;
     assert_eq!(config, expected);
+}
+
+#[tokio::test]
+async fn spawn_agent_reasoning_policy_clears_unsupported_effort_without_failing() {
+    let (session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.model = Some("provider-model-without-reasoning-levels".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+
+    apply_spawn_agent_reasoning_policy(
+        &session,
+        &turn,
+        &mut config,
+        // Stale prompts may still send this removed field.  The scheduler should ignore it
+        // instead of rejecting the whole child-Agent spawn for providers that do not advertise
+        // OpenAI-style reasoning-effort levels.
+        Some(ReasoningEffort::XHigh),
+    )
+    .await
+    .expect("reasoning policy should degrade unsupported efforts instead of failing");
+
+    assert_eq!(config.model_reasoning_effort, None);
 }
 
 #[tokio::test]

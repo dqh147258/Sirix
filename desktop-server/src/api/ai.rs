@@ -39,11 +39,11 @@ use crate::app::{
             build_agent_system_prompt, build_agent_system_prompt_preview,
             duplicate_session_text_model_ids, effective_model_context_window,
             effective_model_runtime_context_window, infer_provider_default_context_window,
-            normalized_sirix_config, resolve_session_picker_model, session_picker_model_id,
-            validate_sirix_config, ApprovalMode, CapabilityApprovalRule, CapabilityRulesConfig,
-            ModelConfig, ModelKind, ProviderConfig, ProviderKind, RecentWorkspaceItem,
-            ShellRulesConfig, SirixConfig, ToolRulesConfig, WorkspaceEditableConfig,
-            WorkspaceSettingsSnapshot,
+            normalized_sirix_config, resolve_agent_model, resolve_session_picker_model,
+            session_picker_model_id, validate_sirix_config, ApprovalMode, CapabilityApprovalRule,
+            CapabilityRulesConfig, ModelConfig, ModelKind, ProviderConfig, ProviderKind,
+            RecentWorkspaceItem, ShellRulesConfig, SirixConfig, ToolRulesConfig,
+            WorkspaceEditableConfig, WorkspaceSettingsSnapshot,
         },
         openai_auth::{provider_auth_manager, OpenAiAuthStatus, StartOpenAiAuthResponse},
         session::{
@@ -560,22 +560,14 @@ pub async fn list_session_agents(
         .iter()
         .filter(|agent| agent.enabled)
         .filter_map(|agent| {
-            let provider = effective
-                .config
-                .providers
-                .iter()
-                .find(|provider| provider.id == agent.provider_id)?;
-            let model = provider
-                .models
-                .iter()
-                .find(|model| model.id == agent.model_id)?;
+            let (provider, model) = resolve_agent_model(&effective.config, agent)?;
             Some(SessionAgentSummary {
                 id: agent.id.clone(),
                 name: agent.name.clone(),
                 description: agent.description.clone(),
-                provider_id: agent.provider_id.clone(),
-                model_id: agent.model_id.clone(),
-                effective_context_window: effective_model_runtime_context_window(provider, model),
+                provider_id: provider.id.clone(),
+                model_id: model.id.clone(),
+                effective_context_window: effective_model_runtime_context_window(&provider, &model),
                 enabled: agent.enabled,
             })
         })
@@ -2047,6 +2039,13 @@ fn convert_openai_codex_model_infos(models: Vec<ModelInfo>) -> Vec<ModelConfig> 
                 .context_window
                 .and_then(|value| u32::try_from(value).ok()),
             supports_images: model.input_modalities.contains(&InputModality::Image),
+            supported_reasoning_efforts: Some(
+                model
+                    .supported_reasoning_levels
+                    .iter()
+                    .map(|preset| preset.effort.to_string())
+                    .collect(),
+            ),
             enabled: true,
         })
         .collect::<Vec<_>>();
@@ -2217,6 +2216,7 @@ fn parse_provider_models(
             model_kind: infer_model_kind(id, object),
             context_window: Some(infer_context_window(provider, id, object)),
             supports_images: infer_supports_images(provider, id, object),
+            supported_reasoning_efforts: infer_supported_reasoning_efforts(object),
             enabled: true,
         });
     }
@@ -2320,6 +2320,36 @@ fn infer_supports_images(
         .iter()
         .any(|token| model_id.contains(token)),
     }
+}
+
+fn infer_supported_reasoning_efforts(
+    object: &serde_json::Map<String, JsonValue>,
+) -> Option<Vec<String>> {
+    let raw = object
+        .get("supported_reasoning_efforts")
+        .or_else(|| object.get("supported_reasoning_levels"))
+        .or_else(|| object.get("reasoning_efforts"))
+        .or_else(|| object.get("reasoning_levels"))?;
+    let items = raw.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| {
+                item.as_str().or_else(|| {
+                    item.as_object()
+                        .and_then(|object| object.get("effort"))
+                        .and_then(JsonValue::as_str)
+                })
+            })
+            .map(|item| item.trim().to_ascii_lowercase())
+            .filter(|item| {
+                matches!(
+                    item.as_str(),
+                    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+                )
+            })
+            .collect(),
+    )
 }
 
 fn input_modalities(object: &serde_json::Map<String, JsonValue>) -> Vec<String> {
@@ -3316,6 +3346,7 @@ mod tests {
             model_kind: ModelKind::Text,
             context_window: Some(128_000),
             supports_images: false,
+            supported_reasoning_efforts: None,
             enabled: true,
         }];
 
@@ -3329,6 +3360,7 @@ mod tests {
                 model_kind: ModelKind::Text,
                 context_window: Some(400_000),
                 supports_images: true,
+                supported_reasoning_efforts: None,
                 enabled: true,
             },
             ModelConfig {
@@ -3337,6 +3369,7 @@ mod tests {
                 model_kind: ModelKind::Text,
                 context_window: Some(400_000),
                 supports_images: true,
+                supported_reasoning_efforts: None,
                 enabled: true,
             },
         ];

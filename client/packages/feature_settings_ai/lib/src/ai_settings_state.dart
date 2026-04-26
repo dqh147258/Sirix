@@ -139,6 +139,9 @@ class AiSettingsState {
 
     final global = globalReferenceConfig;
     return global.copyWith(
+      defaultAgentId: config.defaultAgentId.trim().isEmpty
+          ? global.defaultAgentId
+          : config.defaultAgentId,
       skills: _mergeById(global.skills, config.skills, (item) => item.id),
       mcp: _isDefaultMcpGlobalConfig(config.mcp) ? global.mcp : config.mcp,
       builtinApprovals: _mergeCapabilityRulesLikeServer(

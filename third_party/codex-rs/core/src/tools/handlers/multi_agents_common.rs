@@ -13,7 +13,6 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::CollabAgentRef;
 use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::Op;
@@ -270,12 +269,11 @@ pub(crate) fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32)
     }
 }
 
-pub(crate) async fn apply_requested_spawn_agent_reasoning_override(
+pub(crate) async fn apply_spawn_agent_reasoning_policy(
     session: &Session,
     turn: &TurnContext,
     config: &mut Config,
     requested_reasoning_effort: Option<ReasoningEffort>,
-    role_locks_reasoning_effort: bool,
 ) -> Result<(), FunctionCallError> {
     let effective_model = config
         .model
@@ -287,49 +285,26 @@ pub(crate) async fn apply_requested_spawn_agent_reasoning_override(
         .get_model_info(effective_model.as_str(), &config.to_models_manager_config())
         .await;
 
-    if let Some(reasoning_effort) = requested_reasoning_effort {
-        if role_locks_reasoning_effort && config.model_reasoning_effort != Some(reasoning_effort) {
-            return Err(FunctionCallError::RespondToModel(
-                "The selected agent_type locks reasoning_effort and cannot be overridden."
-                    .to_string(),
-            ));
-        }
-        validate_spawn_agent_reasoning_effort(
-            effective_model.as_str(),
-            &effective_model_info.supported_reasoning_levels,
-            reasoning_effort,
-        )?;
-        config.model_reasoning_effort = Some(reasoning_effort);
+    if requested_reasoning_effort.is_some() {
+        // Sirix no longer exposes `reasoning_effort` on spawn_agent because provider/model
+        // compatibility is owned by the single CLI model setting.  Keep accepting stale tool
+        // calls from already-loaded prompts, but ignore the value so an unsupported effort can
+        // never prevent a dispatcher from spawning the child Agent.
     }
 
     if let Some(effective_reasoning_effort) = config.model_reasoning_effort {
-        validate_spawn_agent_reasoning_effort(
-            effective_model.as_str(),
-            &effective_model_info.supported_reasoning_levels,
-            effective_reasoning_effort,
-        )?;
+        let supports_effective_effort = effective_model_info
+            .supported_reasoning_levels
+            .iter()
+            .any(|preset| preset.effort == effective_reasoning_effort);
+        if !supports_effective_effort {
+            // Some non-OpenAI providers expose no reasoning-effort levels.  Inherited or
+            // role-sourced efforts must degrade to provider/model defaults instead of failing
+            // the scheduling path; the request builder will only send reasoning metadata when
+            // the resolved model advertises support for it.
+            config.model_reasoning_effort = None;
+        }
     }
 
     Ok(())
-}
-fn validate_spawn_agent_reasoning_effort(
-    model: &str,
-    supported_reasoning_levels: &[ReasoningEffortPreset],
-    requested_reasoning_effort: ReasoningEffort,
-) -> Result<(), FunctionCallError> {
-    if supported_reasoning_levels
-        .iter()
-        .any(|preset| preset.effort == requested_reasoning_effort)
-    {
-        return Ok(());
-    }
-
-    let supported = supported_reasoning_levels
-        .iter()
-        .map(|preset| preset.effort.to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(FunctionCallError::RespondToModel(format!(
-        "Reasoning effort `{requested_reasoning_effort}` is not supported for model `{model}`. Supported reasoning efforts: {supported}"
-    )))
 }

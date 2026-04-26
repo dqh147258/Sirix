@@ -522,13 +522,6 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
                     .to_string(),
             )),
         ),
-        (
-            "reasoning_effort".to_string(),
-            JsonSchema::string(Some(
-                "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
-                    .to_string(),
-            )),
-        ),
     ])
 }
 
@@ -549,19 +542,11 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
                     .to_string(),
             )),
         ),
-        (
-            "reasoning_effort".to_string(),
-            JsonSchema::string(Some(
-                "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
-                    .to_string(),
-            )),
-        ),
     ])
 }
 
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
-    properties.remove("reasoning_effort");
 }
 
 fn spawn_agent_tool_description(

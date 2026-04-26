@@ -1208,6 +1208,7 @@ Future<AiModelConfig?> _showModelDialog(
     modelKind: kind,
     contextWindow: int.tryParse(contextController.text.trim()),
     supportsImages: supportsImages,
+    supportedReasoningEfforts: existing?.supportedReasoningEfforts,
     enabled: enabled,
   );
 }

@@ -9,6 +9,7 @@ use crate::system::system_cache_root_dir;
 use codex_app_server_protocol::ConfigLayerSource;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigLayerStackOrdering;
+use codex_config::SkillsConfig;
 use codex_config::default_project_root_markers;
 use codex_config::merge_toml_values;
 use codex_config::project_root_markers_from_config;
@@ -207,9 +208,63 @@ fn skill_roots_with_home_dir(
         path,
         scope: SkillScope::User,
     }));
+    roots.extend(configured_skill_roots_from_stack(config_layer_stack));
     roots.extend(repo_agents_skill_roots(config_layer_stack, cwd));
     dedupe_skill_roots_by_path(&mut roots);
     roots
+}
+
+fn configured_skill_roots_from_stack(config_layer_stack: &ConfigLayerStack) -> Vec<SkillRoot> {
+    let mut roots = Vec::new();
+    for layer in config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::HighestPrecedenceFirst,
+        /*include_disabled*/ true,
+    ) {
+        if !matches!(
+            layer.name,
+            ConfigLayerSource::User { .. } | ConfigLayerSource::SessionFlags
+        ) {
+            continue;
+        }
+
+        let Some(skills_value) = layer.config.get("skills") else {
+            continue;
+        };
+        let skills: SkillsConfig = match skills_value.clone().try_into() {
+            Ok(skills) => skills,
+            Err(err) => {
+                tracing::warn!("invalid skills config while resolving skill roots: {err}");
+                continue;
+            }
+        };
+
+        roots.extend(skills.config.into_iter().filter_map(|entry| {
+            let path = entry.path?;
+            let root = configured_skill_root_from_path(path.as_path())?;
+            Some(SkillRoot {
+                path: root,
+                scope: SkillScope::User,
+            })
+        }));
+    }
+    roots
+}
+
+fn configured_skill_root_from_path(path: &Path) -> Option<PathBuf> {
+    // Sirix bridge configs point `[[skills.config]].path` at editable skill
+    // directories under SIRIX_HOME/skills, while Codex's own manage-skills UI
+    // writes the concrete SKILL.md path.  Treat both shapes as explicit roots
+    // so configured skills outside CODEX_HOME/skills are visible in `/skills`
+    // and available for `$skill` mentions.
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == SKILLS_FILENAME)
+    {
+        path.parent().map(Path::to_path_buf)
+    } else {
+        Some(path.to_path_buf())
+    }
 }
 
 fn skill_roots_from_layer_stack_inner(

@@ -17,7 +17,7 @@
   - `ProviderConfig` 增加 `default_context_window`
   - `ModelConfig.context_window` 改为可选
   - 增加统一的上下文长度生效解析逻辑
-  - 默认启动时优先解析 `default-agent`，使 Provider / Model 页设置的默认模型能够直接作用到 Sirix CLI
+  - 默认启动时优先解析内置 `codex` Agent，使 Provider / Model 页设置的唯一 CLI 默认模型能够直接作用到 Sirix CLI
   - Bridge models 输出 `is_default`，让 runtime picker 与当前默认模型保持一致
 
 ### 2. Provider 模型发现与 API 兼容
@@ -33,8 +33,8 @@
   - Provider 默认上下文长度改为可序列化字段
   - Model 上下文长度改为可空字段
 - `client/packages/feature_settings_ai/lib/src/ai_settings_view_model.dart`
-  - 增加默认模型与 Provider 默认上下文的状态维护
-  - 通过收敛到 `default-agent` 保持默认模型与 Sirix CLI 启动链路一致
+  - 增加 CLI 默认模型与 Provider 默认上下文的状态维护
+  - 通过收敛到内置 `codex` Agent 的 provider/model 字段保持唯一 CLI 默认模型与 Sirix CLI 启动链路一致
 - `client/packages/feature_settings_ai/lib/src/sections/provider_settings_section.dart`
   - Provider 卡片增加默认上下文编辑入口
   - Model 编辑弹窗支持上下文长度留空
@@ -54,10 +54,10 @@
 
 ### 2. 默认模型落点
 
-Sirix 当前默认启动链路本质上仍然依赖 agent 配置，因此没有额外引入第二套“默认模型”持久化字段，而是把 Provider / Model 页上的默认模型收敛到 `default-agent`：
+Sirix 当前默认启动链路本质上仍然依赖 agent 配置，因此没有额外引入第二套“默认模型”持久化字段，而是把 Provider / Model 页上的默认模型收敛到内置 `codex` Agent：
 
-- 设置页点击默认模型时，会同步更新 `default-agent` 的 `provider_id` / `model_id`
-- 启动 Sirix CLI 且未显式指定 agent 时，优先解析 `default-agent`
+- 设置页点击默认模型时，会同步更新内置 `codex` Agent 的 `provider_id` / `model_id`
+- 启动 Sirix CLI 且未显式指定 agent 时，优先解析配置的默认 Agent；默认 Agent 未设置或不可用时回退到内置 `codex`
 - runtime bridge 输出的模型 catalog 会把当前默认模型标记成 `is_default`
 
 这样可以最小改动现有启动链路，同时保证设置页行为、Sirix CLI 默认启动行为和运行时模型选择器一致。

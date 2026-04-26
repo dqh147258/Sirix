@@ -5,7 +5,6 @@ use crate::agent::control::render_input_preview;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
-use crate::agent::role::role_locks_reasoning_effort;
 use codex_protocol::AgentPath;
 use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -58,18 +57,14 @@ impl ToolHandler for Handler {
         }
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        let role_locks_reasoning_effort = role_locks_reasoning_effort(&config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
-        apply_requested_spawn_agent_reasoning_override(
+        apply_spawn_agent_reasoning_policy(
             session.as_ref(),
             turn.as_ref(),
             &mut config,
             args.reasoning_effort,
-            role_locks_reasoning_effort,
         )
         .await?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;

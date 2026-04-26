@@ -148,8 +148,8 @@ impl AiSessionRegistry {
                     deny: Vec::new(),
                 },
                 fallback: SessionFallbackState {
-                    primary_provider_id: launch.agent.provider_id.clone(),
-                    primary_model_id: launch.agent.model_id.clone(),
+                    primary_provider_id: launch.provider.id.clone(),
+                    primary_model_id: launch.model.id.clone(),
                     fallback_provider_id: launch.agent.fallback_provider_id.clone(),
                     fallback_model_id: launch.agent.fallback_model_id.clone(),
                     primary_failure_count: 0,
@@ -227,8 +227,8 @@ impl AiSessionRegistry {
         routing.builtin_tool_ids = runtime.builtin_tool_ids;
         routing.current_effective_context_window = runtime.effective_context_window;
         routing.fallback = SessionFallbackState {
-            primary_provider_id: launch.agent.provider_id.clone(),
-            primary_model_id: launch.agent.model_id.clone(),
+            primary_provider_id: launch.provider.id.clone(),
+            primary_model_id: launch.model.id.clone(),
             fallback_provider_id: launch.agent.fallback_provider_id.clone(),
             fallback_model_id: launch.agent.fallback_model_id.clone(),
             primary_failure_count: 0,
@@ -730,6 +730,7 @@ mod tests {
                 model_kind: ModelKind::Text,
                 context_window: None,
                 supports_images: false,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         }
@@ -911,6 +912,7 @@ mod tests {
             model_kind: ModelKind::Text,
             context_window: Some(128_000),
             supports_images: false,
+            supported_reasoning_efforts: None,
             enabled: true,
         }];
 
@@ -923,6 +925,7 @@ mod tests {
             model_kind: ModelKind::Text,
             context_window: Some(400_000),
             supports_images: false,
+            supported_reasoning_efforts: None,
             enabled: true,
         }];
 

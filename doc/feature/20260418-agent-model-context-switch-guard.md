@@ -4,7 +4,7 @@
 
 本次改动把两条原本容易产生误判的运行时路径收口成一致行为：
 
-- `spawn_agent` 不再向模型暴露可直接覆盖 child model 的 `model` 参数，SubAgent 默认继承当前会话/角色已经解析完成的模型，只允许可校验的 `reasoning_effort` 覆盖。
+- `spawn_agent` 不再向模型暴露可直接覆盖 child model 或 child reasoning effort 的参数，SubAgent 默认继承当前会话/角色已经解析完成的模型；推理档位由目标模型自身能力与 CLI 模型设置决定。
 - Sirix 本地 Agent 切换与 TUI `/model` 切换都会先检查“当前上下文 token 使用量是否已经超过目标模型的有效上下文窗口”，超出时直接阻断切换，并给出明确错误提示。
 
 这样可以避免两类问题：
@@ -16,13 +16,13 @@
 
 - `third_party/codex-rs/tools/src/agent_tool.rs`
   - 移除 `spawn_agent` 的 `model` 参数 schema 与 picker-visible model 描述。
-  - 保留 `reasoning_effort` 作为唯一可显式覆盖的运行时推理强度入口。
+  - 移除 `spawn_agent` 的 `reasoning_effort` 参数 schema，避免调度 Agent 给不支持推理档位的 Provider/模型传入无效覆盖。
 - `third_party/codex-rs/core/src/tools/handlers/multi_agents_common.rs`
   - 删除 SubAgent model override 逻辑。
-  - 改为只校验并应用 `reasoning_effort` override。
+  - 改为忽略旧提示词中残留的 `reasoning_effort` override；如果继承或角色配置带来的推理档位不被目标模型支持，则清空并回退到目标模型默认行为，而不是中断调度。
 - `third_party/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`
 - `third_party/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs`
-  - `spawn_agent` 参数结构删除 `model`。
+  - `spawn_agent` 参数结构删除 `model`，并对旧上下文可能传入的 `reasoning_effort` 做兼容忽略。
   - Begin / End 事件统一记录“最终生效”的模型与推理强度，而不是记录请求侧想覆盖的值。
 - `third_party/codex-rs/protocol/src/openai_models.rs`
   - `ModelPreset` 增加 `effective_context_window`，把模型原始窗口与运行时 headroom 收口为一个可直接消费的字段。
@@ -60,9 +60,9 @@
 三者并存时很难判断“哪个才是最终真值”。这次改成：
 
 - child model 只来自当前线程继承值，或 role config 的显式锁定值
-- 请求侧只能覆盖 `reasoning_effort`
+- 请求侧不能覆盖 `model` 或 `reasoning_effort`
 - 若 role config 同时锁定 model / reasoning，则 role 仍然是最终优先级
-- role 变更后的最终模型会重新用于 reasoning 校验，避免先按父模型校验、再切到子模型导致的能力错配
+- role 变更后的最终模型会重新用于 reasoning 兼容性收口；不支持时清空推理档位，避免先按父模型继承、再切到子模型导致的能力错配
 
 这样 `spawn_agent` 的输入面更小，Begin / End 事件和 thread snapshot 也都只会反映最终生效配置。
 
@@ -93,12 +93,12 @@ Sirix 配置中的 `context_window` 是原始窗口，不等于 runtime 真正�
 ## 测试
 
 - `third_party/codex-rs/tools/src/agent_tool_tests.rs`
-  - 校验 `spawn_agent` schema 不再暴露 `model`。
+  - 校验 `spawn_agent` schema 不再暴露 `model` / `reasoning_effort`。
 - `third_party/codex-rs/core/tests/suite/spawn_agent_description.rs`
 - `third_party/codex-rs/core/tests/suite/subagent_notifications.rs`
   - 校验工具描述不再列模型。
-  - 校验 child thread 默认继承模型，只允许 reasoning override。
-  - 校验 role 锁定依旧优先于请求侧 reasoning。
+- `third_party/codex-rs/core/src/tools/handlers/multi_agents_tests.rs`
+  - 校验旧上下文传入 `reasoning_effort` 时不会让不支持推理档位的模型调度失败，而是清空并回退到默认行为。
 - `third_party/codex-rs/tui/src/chatwidget/tests/status_and_layout.rs`
   - 校验 runtime context window 会优先驱动状态栏展示。
   - 校验超出目标有效窗口时会生成阻断提示。

@@ -54,27 +54,6 @@ pub(crate) async fn apply_role_to_config(
         })
 }
 
-pub(crate) async fn role_locks_reasoning_effort(
-    config: &Config,
-    role_name: Option<&str>,
-) -> Result<bool, String> {
-    let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
-    let role = resolve_role_config(config, role_name)
-        .cloned()
-        .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
-    let Some(config_file) = role.config_file.as_ref() else {
-        return Ok(false);
-    };
-    let is_built_in = !config.agent_roles.contains_key(role_name);
-    let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name)
-        .await
-        .map_err(|err| {
-            tracing::warn!("failed to inspect role lock metadata: {err}");
-            AGENT_TYPE_UNAVAILABLE_ERROR.to_string()
-        })?;
-    Ok(role_layer_toml.get("model_reasoning_effort").is_some())
-}
-
 async fn apply_role_to_config_inner(
     config: &mut Config,
     role_name: &str,

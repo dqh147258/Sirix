@@ -103,6 +103,10 @@ pub(crate) enum AppEvent {
     OpenSirixAgentPicker,
     /// Switch the current Sirix Agent profile.
     SwitchSirixAgent(String),
+    /// Open a picker of Sirix sub-agent roles the current Agent may delegate to.
+    OpenSubAgentRolePicker,
+    /// Prefill the composer so the next submitted task dispatches this Sirix sub-agent role.
+    SelectSubAgentRole(String),
     /// Update runtime context-window metadata before the next token usage event arrives.
     UpdateModelContextWindow(Option<i64>),
     /// Open the agent picker for switching active threads.

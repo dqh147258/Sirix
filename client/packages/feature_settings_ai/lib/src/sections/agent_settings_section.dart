@@ -10,8 +10,48 @@ import '../ai_settings_view_model.dart';
 import '../settings_ui.dart';
 
 const String _builtinCodexAgentId = 'codex';
+const String _cliDefaultModelSentinel = '__sirix_cli_default_model__';
+const List<String> _allReasoningEfforts = ['minimal', 'low', 'medium', 'high', 'xhigh'];
+const String _defaultAgentReasoningEffort = 'high';
 
 bool _isBuiltinCodexAgent(AgentConfigModel agent) => agent.id == _builtinCodexAgentId;
+
+String _normalizeReasoningEffort(String? value) {
+  final normalized = (value ?? '').trim().toLowerCase();
+  return _allReasoningEfforts.contains(normalized) ? normalized : _defaultAgentReasoningEffort;
+}
+
+String _reasoningEffortLabel(String effort) {
+  return switch (effort) {
+    'minimal' => 'Minimal',
+    'low' => 'Low',
+    'medium' => 'Medium',
+    'high' => 'High',
+    'xhigh' => 'XHigh',
+    _ => effort,
+  };
+}
+
+List<String> _reasoningEffortsForModel(AiModelConfig model) {
+  final supported = model.supportedReasoningEfforts;
+  if (supported == null) {
+    return _allReasoningEfforts;
+  }
+  return supported
+      .map((item) => item.trim().toLowerCase())
+      .where(_allReasoningEfforts.contains)
+      .toList(growable: false);
+}
+
+class _ResolvedAgentModel {
+  const _ResolvedAgentModel({
+    required this.provider,
+    required this.model,
+  });
+
+  final AiProviderConfig provider;
+  final AiModelConfig model;
+}
 
 class AgentSettingsSection extends StatefulWidget {
   const AgentSettingsSection({
@@ -89,6 +129,7 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
         );
 
         final visibleAgents = widget.state.visibleAgents;
+        final effectiveDefaultAgentId = _effectiveDefaultAgentId(widget.state);
         final selectedAgent = _selectedAgentId == null
             ? null
             : visibleAgents.firstWhere(
@@ -104,6 +145,7 @@ class _AgentSettingsSectionState extends State<AgentSettingsSection> {
                   workspaceOwned: widget.state.workspaceOwnsAgent(selectedAgent.id),
                   globalOwned: widget.state.globalOwnsAgent(selectedAgent.id),
                 ),
+                isDefaultAgent: selectedAgent.id == effectiveDefaultAgentId,
                 onEdit: () async {
                   final updated = await _showAgentDialog(
                     context,
@@ -162,10 +204,12 @@ class _AgentListPane extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = context.sirix;
     final visibleAgents = state.visibleAgents;
+    final effectiveDefaultAgentId = _effectiveDefaultAgentId(state);
     final agentCards = [
       for (final agent in visibleAgents) _AgentListItem(
         agent: agent,
         selected: agent.id == selectedAgentId,
+        isDefaultAgent: agent.id == effectiveDefaultAgentId,
         compact: compact,
         sourceLabel: state.sourceLabelForResource(
           workspaceOwned: state.workspaceOwnsAgent(agent.id),
@@ -226,6 +270,16 @@ class _AgentListPane extends StatelessWidget {
                                 color: palette.textMuted,
                               ),
                         ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Default: ${_defaultAgentLabel(state)}',
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                color: palette.primaryBright,
+                                fontWeight: FontWeight.w700,
+                              ),
+                        ),
                       ],
                     ),
                   ),
@@ -264,6 +318,7 @@ class _AgentListItem extends StatelessWidget {
   const _AgentListItem({
     required this.agent,
     required this.selected,
+    required this.isDefaultAgent,
     required this.compact,
     required this.sourceLabel,
     required this.onTap,
@@ -271,6 +326,7 @@ class _AgentListItem extends StatelessWidget {
 
   final AgentConfigModel agent;
   final bool selected;
+  final bool isDefaultAgent;
   final bool compact;
   final String? sourceLabel;
   final VoidCallback onTap;
@@ -340,15 +396,24 @@ class _AgentListItem extends StatelessWidget {
                     ),
                     if (!compact) ...[
                       const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        if (sourceLabel != null && sourceLabel!.trim().isNotEmpty)
-                          AiSettingsChip(label: sourceLabel!),
-                        AiSettingsChip(label: agent.providerId),
-                        AiSettingsChip(label: agent.modelId),
-                        AiSettingsChip(label: agent.enabled ? 'Enabled' : 'Disabled'),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          if (sourceLabel != null && sourceLabel!.trim().isNotEmpty)
+                            AiSettingsChip(label: sourceLabel!),
+                          if (isDefaultAgent) const AiSettingsChip(label: 'Default'),
+                          AiSettingsChip(
+                            label: agent.providerId.trim().isEmpty
+                                ? 'CLI default provider'
+                                : agent.providerId,
+                          ),
+                          AiSettingsChip(
+                            label: agent.modelId.trim().isEmpty
+                                ? 'CLI default model'
+                                : agent.modelId,
+                          ),
+                          AiSettingsChip(label: agent.enabled ? 'Enabled' : 'Disabled'),
                         ],
                       ),
                     ],
@@ -369,6 +434,7 @@ class _AgentDetailPane extends StatelessWidget {
     required this.state,
     required this.vm,
     required this.sourceLabel,
+    required this.isDefaultAgent,
     required this.onEdit,
   });
 
@@ -376,6 +442,7 @@ class _AgentDetailPane extends StatelessWidget {
   final AiSettingsState state;
   final AiSettingsViewModel vm;
   final String? sourceLabel;
+  final bool isDefaultAgent;
   final Future<void> Function() onEdit;
 
   @override
@@ -442,8 +509,13 @@ class _AgentDetailPane extends StatelessWidget {
                                 AiSettingsChip(label: 'id: ${agent.id}'),
                                 if (sourceLabel != null && sourceLabel!.trim().isNotEmpty)
                                   AiSettingsChip(label: sourceLabel!),
-                                AiSettingsChip(label: agent.providerId),
-                                AiSettingsChip(label: agent.modelId),
+                                if (isDefaultAgent) const AiSettingsChip(label: 'Default Agent'),
+                                AiSettingsChip(
+                                  label: agent.providerId.trim().isEmpty ? 'CLI default provider' : agent.providerId,
+                                ),
+                                AiSettingsChip(
+                                  label: agent.modelId.trim().isEmpty ? 'CLI default model' : agent.modelId,
+                                ),
                                 AiSettingsChip(label: approvalModeLabel(agent.approvalMode)),
                               ],
                             ),
@@ -469,6 +541,13 @@ class _AgentDetailPane extends StatelessWidget {
                         onPressed: onEdit,
                         icon: const Icon(Icons.edit_rounded),
                         label: const Text('Edit Agent'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: agent.enabled && !isDefaultAgent
+                            ? () => vm.setDefaultAgent(agent.id)
+                            : null,
+                        icon: const Icon(Icons.flag_rounded),
+                        label: Text(isDefaultAgent ? 'Current Default' : 'Set as Default'),
                       ),
                       OutlinedButton.icon(
                         onPressed: () => _showPromptPreviewDialog(
@@ -499,8 +578,20 @@ class _AgentDetailPane extends StatelessWidget {
                   child: _InfoList(
                     rows: [
                       ('Description', agent.description),
-                      ('Primary Provider', agent.providerId),
-                      ('Primary Model', agent.modelId),
+                      (
+                        'Primary Provider',
+                        agent.providerId.trim().isEmpty
+                            ? 'CLI default provider'
+                            : agent.providerId,
+                      ),
+                      (
+                        'Primary Model',
+                        agent.modelId.trim().isEmpty ? 'CLI default model' : agent.modelId,
+                      ),
+                      (
+                        'Reasoning Effort',
+                        _agentReasoningEffortSummary(state, agent),
+                      ),
                       (
                         'Built-in Profile',
                         isBuiltinCodex
@@ -525,19 +616,24 @@ class _AgentDetailPane extends StatelessWidget {
                       ('Builtin Tools', '${agent.builtinToolIds.length} selected'),
                       (
                         'Skills',
-                        skills.isEmpty ? 'None selected' : skills.map((item) => item.name).join(', '),
+                        _resourceAccessSummary(
+                          enabled: agent.skillsEnabled,
+                          selectedNames: skills.map((item) => item.name).toList(growable: false),
+                        ),
                       ),
                       (
                         'MCP Servers',
-                        mcpServers.isEmpty
-                            ? 'None selected'
-                            : mcpServers.map((item) => item.name).join(', '),
+                        _resourceAccessSummary(
+                          enabled: agent.mcpServersEnabled,
+                          selectedNames: mcpServers.map((item) => item.name).toList(growable: false),
+                        ),
                       ),
                       (
                         'Sub Agents',
-                        subAgents.isEmpty
-                            ? 'None selected'
-                            : subAgents.map((item) => item.name).join(', '),
+                        _resourceAccessSummary(
+                          enabled: agent.subAgentsEnabled,
+                          selectedNames: subAgents.map((item) => item.name).toList(growable: false),
+                        ),
                       ),
                     ],
                   ),
@@ -640,6 +736,59 @@ class _AgentDialogResult {
   final AgentConfigModel agent;
 }
 
+List<AiModelConfig> _enabledTextModels(AiProviderConfig provider) {
+  return provider.models
+      .where((model) => model.enabled && model.modelKind == ModelKind.text)
+      .toList(growable: false);
+}
+
+_ResolvedAgentModel? _resolveExplicitAgentModel(
+  List<AiProviderConfig> providers,
+  AgentConfigModel? agent,
+) {
+  if (agent == null || agent.modelId.trim().isEmpty) {
+    return null;
+  }
+  final requestedProviderId = agent.providerId.trim();
+  final requestedModelId = agent.modelId.trim();
+  for (final provider in providers) {
+    if (requestedProviderId.isNotEmpty && provider.id != requestedProviderId) {
+      continue;
+    }
+    final model = _enabledTextModels(provider)
+        .where((candidate) => candidate.id == requestedModelId)
+        .firstOrNull;
+    if (model != null) {
+      return _ResolvedAgentModel(provider: provider, model: model);
+    }
+  }
+  return null;
+}
+
+_ResolvedAgentModel? _resolveCliDefaultModel(
+  AiSettingsState state,
+  List<AiProviderConfig> providers,
+) {
+  final codexAgent = state.globalReferenceConfig.agents
+      .where((agent) => agent.id == _builtinCodexAgentId)
+      .firstOrNull;
+  final explicit = _resolveExplicitAgentModel(providers, codexAgent);
+  if (explicit != null) {
+    return explicit;
+  }
+  for (final provider in providers) {
+    final model = _enabledTextModels(provider).firstOrNull;
+    if (model != null) {
+      return _ResolvedAgentModel(provider: provider, model: model);
+    }
+  }
+  return null;
+}
+
+String _cliDefaultModelLabel(_ResolvedAgentModel defaultModel) {
+  return 'CLI Default (${defaultModel.provider.name} / ${defaultModel.model.displayName})';
+}
+
 Future<_AgentDialogResult?> _showAgentDialog(
   BuildContext context, {
   required AiSettingsState state,
@@ -671,9 +820,7 @@ Future<_AgentDialogResult?> _showAgentDialog(
 
   List<AiModelConfig> textModelsForProvider(String providerId) {
     final provider = providers.firstWhere((item) => item.id == providerId);
-    return provider.models
-        .where((model) => model.enabled && model.modelKind == ModelKind.text)
-        .toList(growable: false);
+    return _enabledTextModels(provider);
   }
 
   final globalConfig = state.globalReferenceConfig;
@@ -691,18 +838,14 @@ Future<_AgentDialogResult?> _showAgentDialog(
   );
   final isBuiltinCodex = existing != null && _isBuiltinCodexAgent(existing);
 
-  var providerId = existing?.providerId ?? providers.first.id;
-  if (providers.every((provider) => provider.id != providerId)) {
-    providerId = providers.first.id;
-  }
-  var modelOptions = textModelsForProvider(providerId);
-  if (modelOptions.isEmpty) {
+  final cliDefaultModel = _resolveCliDefaultModel(state, providers);
+  if (cliDefaultModel == null) {
     await showAiSettingsDialog<void>(
       context: context,
       title: 'No Enabled Text Model',
-      subtitle: 'The selected provider does not have an enabled text model.',
+      subtitle: 'Create at least one enabled text model before adding an agent.',
       width: 460,
-      child: const Text('Enable at least one text model for the provider first.'),
+      child: const Text('Enable at least one text model in Provider / Model settings first.'),
       actions: [
         FilledButton(
           onPressed: () => Navigator.of(context).pop(),
@@ -713,9 +856,20 @@ Future<_AgentDialogResult?> _showAgentDialog(
     return null;
   }
 
-  var modelId = existing?.modelId ?? modelOptions.first.id;
-  if (modelOptions.every((model) => model.id != modelId)) {
-    modelId = modelOptions.first.id;
+  final explicitModel = _resolveExplicitAgentModel(providers, existing);
+  var usesCliDefaultModel = explicitModel == null;
+  var providerId = explicitModel?.provider.id ?? cliDefaultModel.provider.id;
+  var modelOptions = textModelsForProvider(providerId);
+  var modelId = explicitModel?.model.id ?? cliDefaultModel.model.id;
+  var modelReasoningEffort = _normalizeReasoningEffort(existing?.modelReasoningEffort);
+  void coerceReasoningEffortForModel(AiModelConfig model) {
+    final options = _reasoningEffortsForModel(model);
+    if (options.isEmpty || options.contains(modelReasoningEffort)) {
+      return;
+    }
+    modelReasoningEffort = options.contains(_defaultAgentReasoningEffort)
+        ? _defaultAgentReasoningEffort
+        : options.first;
   }
 
   var fallbackProviderId = existing?.fallbackProviderId ?? '';
@@ -765,8 +919,11 @@ Future<_AgentDialogResult?> _showAgentDialog(
   );
   var enabled = existing?.enabled ?? true;
   var builtinToolIds = [...(existing?.builtinToolIds ?? kBuiltinToolCatalog)];
+  var skillsEnabled = existing?.skillsEnabled ?? true;
   var skillIds = [...(existing?.skillIds ?? const <String>[])];
+  var mcpServersEnabled = existing?.mcpServersEnabled ?? true;
   var mcpServerIds = [...(existing?.mcpServerIds ?? const <String>[])];
+  var subAgentsEnabled = existing?.subAgentsEnabled ?? true;
   var subAgentIds = [...(existing?.subAgentIds ?? const <String>[])];
   final allowRulesController = TextEditingController(text: shellRules.allow.join('\n'));
   final denyRulesController = TextEditingController(text: shellRules.deny.join('\n'));
@@ -786,6 +943,18 @@ Future<_AgentDialogResult?> _showAgentDialog(
         final fallbackModels = fallbackProviderId.trim().isEmpty
             ? const <AiModelConfig>[]
             : textModelsForProvider(fallbackProviderId);
+        final selectedPrimaryModel = usesCliDefaultModel
+            ? cliDefaultModel.model
+            : modelOptions.firstWhere(
+                (model) => model.id == modelId,
+                orElse: () => modelOptions.first,
+              );
+        final reasoningOptions = _reasoningEffortsForModel(selectedPrimaryModel);
+        final effectiveReasoningEffort = reasoningOptions.contains(modelReasoningEffort)
+            ? modelReasoningEffort
+            : (reasoningOptions.contains(_defaultAgentReasoningEffort)
+                ? _defaultAgentReasoningEffort
+                : reasoningOptions.firstOrNull);
         final availableSkills = state.visibleSkills;
         final availableMcpServers = state.visibleMcpServers;
         final availableSubAgents = state.visibleAgents
@@ -798,8 +967,9 @@ Future<_AgentDialogResult?> _showAgentDialog(
           id: idController.text.trim(),
           name: nameController.text.trim(),
           description: descriptionController.text.trim(),
-          providerId: providerId,
-          modelId: modelId,
+          providerId: usesCliDefaultModel ? '' : providerId,
+          modelId: usesCliDefaultModel ? '' : modelId,
+          modelReasoningEffort: effectiveReasoningEffort ?? _defaultAgentReasoningEffort,
           fallbackProviderId: fallbackProviderId,
           fallbackModelId: fallbackModelId,
           systemPrompt: systemPromptController.text,
@@ -818,8 +988,11 @@ Future<_AgentDialogResult?> _showAgentDialog(
             mcpApprovals,
           ),
           builtinToolIds: builtinToolIds,
+          skillsEnabled: skillsEnabled,
           skillIds: skillIds,
+          mcpServersEnabled: mcpServersEnabled,
           mcpServerIds: mcpServerIds,
+          subAgentsEnabled: subAgentsEnabled,
           subAgentIds: subAgentIds,
           enabled: enabled,
         );
@@ -866,19 +1039,35 @@ Future<_AgentDialogResult?> _showAgentDialog(
               ],
             ),
             DropdownButtonFormField<String>(
-              key: ValueKey('provider-$providerId'),
-              initialValue: providerId,
+              key: ValueKey(
+                'provider-${usesCliDefaultModel ? _cliDefaultModelSentinel : providerId}',
+              ),
+              initialValue: usesCliDefaultModel ? _cliDefaultModelSentinel : providerId,
               decoration: const InputDecoration(labelText: 'Primary Provider'),
-              items: providers
-                  .map(
-                    (provider) => DropdownMenuItem(
-                      value: provider.id,
-                      child: Text('${provider.name} (${provider.id})'),
-                    ),
-                  )
-                  .toList(growable: false),
+              items: [
+                DropdownMenuItem(
+                  value: _cliDefaultModelSentinel,
+                  child: Text(_cliDefaultModelLabel(cliDefaultModel)),
+                ),
+                ...providers.map(
+                  (provider) => DropdownMenuItem(
+                    value: provider.id,
+                    child: Text('${provider.name} (${provider.id})'),
+                  ),
+                ),
+              ],
               onChanged: (value) {
                 if (value == null) {
+                  return;
+                }
+                if (value == _cliDefaultModelSentinel) {
+                  setState(() {
+                    usesCliDefaultModel = true;
+                    providerId = cliDefaultModel.provider.id;
+                    modelOptions = textModelsForProvider(providerId);
+                    modelId = cliDefaultModel.model.id;
+                    coerceReasoningEffortForModel(cliDefaultModel.model);
+                  });
                   return;
                 }
                 final nextModelOptions = textModelsForProvider(value);
@@ -886,32 +1075,85 @@ Future<_AgentDialogResult?> _showAgentDialog(
                   return;
                 }
                 setState(() {
+                  usesCliDefaultModel = false;
                   providerId = value;
                   modelOptions = nextModelOptions;
                   if (nextModelOptions.every((model) => model.id != modelId)) {
                     modelId = nextModelOptions.first.id;
                   }
+                  coerceReasoningEffortForModel(
+                    nextModelOptions.firstWhere((model) => model.id == modelId),
+                  );
                 });
               },
             ),
             DropdownButtonFormField<String>(
-              key: ValueKey('model-$providerId-$modelId'),
-              initialValue: modelId,
+              key: ValueKey(
+                'model-$providerId-${usesCliDefaultModel ? _cliDefaultModelSentinel : modelId}',
+              ),
+              initialValue: usesCliDefaultModel ? _cliDefaultModelSentinel : modelId,
               decoration: const InputDecoration(labelText: 'Primary Model'),
-              items: modelOptions
-                  .map(
-                    (model) => DropdownMenuItem(
-                      value: model.id,
-                      child: Text('${model.displayName} (${model.id})'),
-                    ),
-                  )
-                  .toList(growable: false),
+              items: [
+                DropdownMenuItem(
+                  value: _cliDefaultModelSentinel,
+                  child: Text('CLI Default Model (${cliDefaultModel.model.displayName})'),
+                ),
+                ...modelOptions.map(
+                  (model) => DropdownMenuItem(
+                    value: model.id,
+                    child: Text('${model.displayName} (${model.id})'),
+                  ),
+                ),
+              ],
               onChanged: (value) {
-                if (value != null) {
-                  setState(() => modelId = value);
+                if (value == null) {
+                  return;
                 }
+                if (value == _cliDefaultModelSentinel) {
+                  setState(() {
+                    usesCliDefaultModel = true;
+                    providerId = cliDefaultModel.provider.id;
+                    modelOptions = textModelsForProvider(providerId);
+                    modelId = cliDefaultModel.model.id;
+                    coerceReasoningEffortForModel(cliDefaultModel.model);
+                  });
+                  return;
+                }
+                setState(() {
+                  usesCliDefaultModel = false;
+                  modelId = value;
+                  coerceReasoningEffortForModel(
+                    modelOptions.firstWhere((model) => model.id == value),
+                  );
+                });
               },
             ),
+            if (reasoningOptions.isNotEmpty)
+              DropdownButtonFormField<String>(
+                key: ValueKey(
+                  'reasoning-$providerId-${usesCliDefaultModel ? _cliDefaultModelSentinel : modelId}',
+                ),
+                initialValue: effectiveReasoningEffort,
+                decoration: InputDecoration(
+                  labelText: 'Reasoning Effort',
+                  helperText: selectedPrimaryModel.supportedReasoningEfforts == null
+                      ? 'Support is unknown for this model, so Sirix keeps the selector available.'
+                      : 'Only reasoning efforts advertised by the selected model are shown.',
+                ),
+                items: [
+                  for (final effort in reasoningOptions)
+                    DropdownMenuItem(
+                      value: effort,
+                      child: Text(_reasoningEffortLabel(effort)),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value == null) {
+                    return;
+                  }
+                  setState(() => modelReasoningEffort = value);
+                },
+              ),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1240,16 +1482,23 @@ Future<_AgentDialogResult?> _showAgentDialog(
             _SelectionField(
               title: 'Skills',
               subtitle: state.isWorkspaceScope
-                  ? 'Choose which workspace skills should be available to this agent.'
-                  : 'Choose which configured local skills should be available to this agent.',
-              selectionSummary: _summarizeSelection(
+                  ? 'Enable skills for this agent. Leave the list empty to inherit every available workspace skill.'
+                  : 'Enable skills for this agent. Leave the list empty to inherit every configured local skill.',
+              selectionSummary: _summarizeResourceSelection(
+                enabled: skillsEnabled,
                 selectedIds: skillIds,
                 allIds: availableSkills.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final skill in availableSkills.where((item) => skillIds.contains(item.id)))
-                  skill.name,
+                if (skillsEnabled && skillIds.isEmpty && availableSkills.isNotEmpty)
+                  'All available'
+                else
+                  for (final skill in availableSkills.where((item) => skillIds.contains(item.id)))
+                    skill.name,
               ],
+              resourceEnabled: skillsEnabled,
+              onResourceEnabledChanged: (value) => setState(() => skillsEnabled = value),
+              enabled: skillsEnabled,
               onPressed: () async {
                 final selected = await _showMultiSelectDialog(
                   context,
@@ -1273,16 +1522,23 @@ Future<_AgentDialogResult?> _showAgentDialog(
             _SelectionField(
               title: 'MCP Servers',
               subtitle: state.isWorkspaceScope
-                  ? 'Choose which workspace MCP server definitions this agent can use.'
-                  : 'Choose which MCP server definitions this agent can use.',
-              selectionSummary: _summarizeSelection(
+                  ? 'Enable MCP for this agent. Leave the list empty to inherit every available workspace MCP server.'
+                  : 'Enable MCP for this agent. Leave the list empty to inherit every configured MCP server.',
+              selectionSummary: _summarizeResourceSelection(
+                enabled: mcpServersEnabled,
                 selectedIds: mcpServerIds,
                 allIds: availableMcpServers.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final server in availableMcpServers.where((item) => mcpServerIds.contains(item.id)))
-                  server.name,
+                if (mcpServersEnabled && mcpServerIds.isEmpty && availableMcpServers.isNotEmpty)
+                  'All available'
+                else
+                  for (final server in availableMcpServers.where((item) => mcpServerIds.contains(item.id)))
+                    server.name,
               ],
+              resourceEnabled: mcpServersEnabled,
+              onResourceEnabledChanged: (value) => setState(() => mcpServersEnabled = value),
+              enabled: mcpServersEnabled,
               onPressed: () async {
                 final selected = await _showMultiSelectDialog(
                   context,
@@ -1306,16 +1562,23 @@ Future<_AgentDialogResult?> _showAgentDialog(
             _SelectionField(
               title: 'Sub Agents',
               subtitle: state.isWorkspaceScope
-                  ? 'Selected workspace agents are exposed to Codex as spawnable Sirix sub-agent roles.'
-                  : 'Selected agents are exposed to Codex as spawnable Sirix sub-agent roles with role descriptions and runtime role configs.',
-              selectionSummary: _summarizeSelection(
+                  ? 'Enable delegation for this agent. Leave the list empty to expose every available workspace sub-agent.'
+                  : 'Enable delegation for this agent. Leave the list empty to expose every available sub-agent role.',
+              selectionSummary: _summarizeResourceSelection(
+                enabled: subAgentsEnabled,
                 selectedIds: subAgentIds,
                 allIds: availableSubAgents.map((item) => item.id).toList(growable: false),
               ),
               chips: [
-                for (final subAgent in availableSubAgents.where((item) => subAgentIds.contains(item.id)))
-                  subAgent.name,
+                if (subAgentsEnabled && subAgentIds.isEmpty && availableSubAgents.isNotEmpty)
+                  'All available'
+                else
+                  for (final subAgent in availableSubAgents.where((item) => subAgentIds.contains(item.id)))
+                    subAgent.name,
               ],
+              resourceEnabled: subAgentsEnabled,
+              onResourceEnabledChanged: (value) => setState(() => subAgentsEnabled = value),
+              enabled: subAgentsEnabled,
               onPressed: () async {
                 final selected = await _showMultiSelectDialog(
                   context,
@@ -1361,8 +1624,9 @@ Future<_AgentDialogResult?> _showAgentDialog(
       id: isBuiltinCodex ? _builtinCodexAgentId : idController.text.trim(),
       name: nameController.text.trim(),
       description: descriptionController.text.trim(),
-      providerId: providerId,
-      modelId: modelId,
+      providerId: usesCliDefaultModel ? '' : providerId,
+      modelId: usesCliDefaultModel ? '' : modelId,
+      modelReasoningEffort: modelReasoningEffort,
       fallbackProviderId: fallbackProviderId,
       fallbackModelId: fallbackModelId,
       systemPrompt: isBuiltinCodex ? '' : systemPromptController.text,
@@ -1381,8 +1645,11 @@ Future<_AgentDialogResult?> _showAgentDialog(
         mcpApprovals,
       ),
       builtinToolIds: isBuiltinCodex ? kBuiltinToolCatalog : builtinToolIds,
+      skillsEnabled: skillsEnabled,
       skillIds: skillIds,
+      mcpServersEnabled: mcpServersEnabled,
       mcpServerIds: mcpServerIds,
+      subAgentsEnabled: subAgentsEnabled,
       subAgentIds: subAgentIds,
       enabled: isBuiltinCodex ? true : enabled,
     ),
@@ -1751,6 +2018,8 @@ class _SelectionField extends StatelessWidget {
     required this.chips,
     required this.onPressed,
     this.enabled = true,
+    this.resourceEnabled,
+    this.onResourceEnabledChanged,
   });
 
   final String title;
@@ -1759,6 +2028,8 @@ class _SelectionField extends StatelessWidget {
   final List<String> chips;
   final VoidCallback onPressed;
   final bool enabled;
+  final bool? resourceEnabled;
+  final ValueChanged<bool>? onResourceEnabledChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1793,6 +2064,14 @@ class _SelectionField extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 12),
+              if (resourceEnabled != null) ...[
+                Switch(
+                  value: resourceEnabled!,
+                  onChanged: onResourceEnabledChanged,
+                  activeThumbColor: palette.primaryBright,
+                ),
+                const SizedBox(width: 12),
+              ],
               OutlinedButton.icon(
                 onPressed: enabled ? onPressed : null,
                 icon: const Icon(Icons.tune_rounded),
@@ -1998,6 +2277,93 @@ String _summarizeSelection({
     return 'All ${allIds.length} selected.';
   }
   return '${selectedIds.length} of ${allIds.length} selected.';
+}
+
+String _effectiveDefaultAgentId(AiSettingsState state) {
+  final configured = state.effectiveEditableConfig.defaultAgentId.trim();
+  if (configured.isNotEmpty &&
+      state.visibleAgents.any((agent) => agent.id == configured && agent.enabled)) {
+    return configured;
+  }
+  if (state.visibleAgents.any((agent) => agent.id == _builtinCodexAgentId && agent.enabled)) {
+    return _builtinCodexAgentId;
+  }
+  final firstEnabled = state.visibleAgents.where((agent) => agent.enabled);
+  return firstEnabled.isEmpty ? '' : firstEnabled.first.id;
+}
+
+String _defaultAgentLabel(AiSettingsState state) {
+  final defaultAgentId = _effectiveDefaultAgentId(state);
+  AgentConfigModel? agent;
+  for (final candidate in state.visibleAgents) {
+    if (candidate.id == defaultAgentId) {
+      agent = candidate;
+      break;
+    }
+  }
+  final inherited = state.isWorkspaceScope && state.config.defaultAgentId.trim().isEmpty;
+  if (agent == null) {
+    return inherited ? 'Inherited from Global' : 'Not configured';
+  }
+  return inherited ? '${agent.name} (inherited)' : agent.name;
+}
+
+String _summarizeResourceSelection({
+  required bool enabled,
+  required List<String> selectedIds,
+  required List<String> allIds,
+}) {
+  if (!enabled) {
+    return 'Disabled for this agent.';
+  }
+  if (allIds.isEmpty) {
+    return 'Enabled, but no options are currently configured.';
+  }
+  if (selectedIds.isEmpty) {
+    return 'Enabled for all ${allIds.length} available options.';
+  }
+  if (selectedIds.length == allIds.length) {
+    return 'Restricted to all ${allIds.length} currently available options.';
+  }
+  return 'Restricted to ${selectedIds.length} of ${allIds.length} available options.';
+}
+
+String _resourceAccessSummary({
+  required bool enabled,
+  required List<String> selectedNames,
+}) {
+  if (!enabled) {
+    return 'Disabled';
+  }
+  if (selectedNames.isEmpty) {
+    return 'All available';
+  }
+  return selectedNames.join(', ');
+}
+
+String _agentReasoningEffortSummary(
+  AiSettingsState state,
+  AgentConfigModel agent,
+) {
+  final resolvedModel =
+      _resolveExplicitAgentModel(state.agentPickerProviders, agent) ??
+      _resolveCliDefaultModel(state, state.agentPickerProviders);
+  final effort = _normalizeReasoningEffort(agent.modelReasoningEffort);
+  if (resolvedModel == null) {
+    return _reasoningEffortLabel(effort);
+  }
+  final supported = resolvedModel.model.supportedReasoningEfforts;
+  if (supported == null) {
+    return '${_reasoningEffortLabel(effort)} (support unknown)';
+  }
+  final options = _reasoningEffortsForModel(resolvedModel.model);
+  if (options.isEmpty) {
+    return 'Hidden / unsupported by selected model';
+  }
+  if (!options.contains(effort)) {
+    return 'Model default (${_reasoningEffortLabel(effort)} is unsupported)';
+  }
+  return _reasoningEffortLabel(effort);
 }
 
 List<String> _parseShellRuleLines(String raw) {

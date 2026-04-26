@@ -17,6 +17,10 @@ use uuid::Uuid;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use super::preset_agents::{
+    default_codex_sub_agent_ids, preset_agents, preset_default_language, PresetAgentDefinition,
+};
+
 use crate::scene::{
     canonical_home_for_scene, resolve_scene, resolve_sirix_home, resolve_workspace_config_dir_name,
     SirixScene, DEBUG_GLOBAL_DIR_NAME, RELEASE_GLOBAL_DIR_NAME,
@@ -32,6 +36,9 @@ const DEFAULT_MODEL_ID: &str = "gpt-5";
 const SIRIX_DIR_NAME: &str = RELEASE_GLOBAL_DIR_NAME;
 const CODEX_DIR_NAME: &str = ".codex";
 const SIRIX_SESSION_PROXY_PROVIDER_ID: &str = "sirix-session-proxy";
+const SIRIX_AGENTS_DIR_NAME: &str = "agents";
+const SIRIX_PRESET_AGENT_SKILL_ID: &str = "sirix-preset-agents";
+const SIRIX_PRESET_AGENT_SKILL_NAME: &str = "Sirix Preset Agent Routing";
 const SIRIX_AGENT_ROLES_DIR: &str = "agent-roles";
 pub const SIRIX_AGENT_RUNTIME_FILE_NAME: &str = "sirix-agent-runtime.json";
 pub const SIRIX_CONFIG_OVERRIDES_FILE_NAME: &str = "sirix-config-overrides.json";
@@ -118,6 +125,11 @@ pub struct ModelConfig {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub supports_images: bool,
+    /// `None` means Sirix cannot determine reasoning-effort support for this
+    /// model and should keep the Agent-level selector visible. `Some([])`
+    /// means the provider/model is known not to support reasoning efforts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_reasoning_efforts: Option<Vec<String>>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -270,8 +282,12 @@ pub struct AgentConfig {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
     pub provider_id: String,
+    #[serde(default)]
     pub model_id: String,
+    #[serde(default = "default_agent_reasoning_effort")]
+    pub model_reasoning_effort: String,
     #[serde(default)]
     pub fallback_provider_id: String,
     #[serde(default)]
@@ -292,10 +308,16 @@ pub struct AgentConfig {
     pub mcp_approvals: CapabilityRulesConfig,
     #[serde(default)]
     pub builtin_tool_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub skills_enabled: bool,
     #[serde(default)]
     pub skill_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub mcp_servers_enabled: bool,
     #[serde(default)]
     pub mcp_server_ids: Vec<String>,
+    #[serde(default = "default_true")]
+    pub sub_agents_enabled: bool,
     #[serde(default)]
     pub sub_agent_ids: Vec<String>,
     #[serde(default = "default_true")]
@@ -319,6 +341,8 @@ pub struct SirixConfig {
     #[serde(default = "default_config_version")]
     pub version: u32,
     #[serde(default)]
+    pub default_agent_id: String,
+    #[serde(default)]
     pub cli: CliSettings,
     #[serde(default)]
     pub providers: Vec<ProviderConfig>,
@@ -334,7 +358,7 @@ pub struct SirixConfig {
     pub mcp_approvals: CapabilityRulesConfig,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentConfig>,
 }
 
@@ -342,6 +366,7 @@ impl Default for SirixConfig {
     fn default() -> Self {
         Self {
             version: default_config_version(),
+            default_agent_id: DEFAULT_AGENT_ID.to_string(),
             cli: CliSettings::default(),
             providers: vec![ProviderConfig {
                 id: DEFAULT_PROVIDER_ID.to_string(),
@@ -359,6 +384,7 @@ impl Default for SirixConfig {
                     model_kind: ModelKind::Text,
                     context_window: None,
                     supports_images: true,
+                    supported_reasoning_efforts: None,
                     enabled: true,
                 }],
             }],
@@ -368,38 +394,357 @@ impl Default for SirixConfig {
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             mcp_servers: Vec::new(),
-            agents: vec![AgentConfig {
-                id: DEFAULT_AGENT_ID.to_string(),
-                name: DEFAULT_AGENT_NAME.to_string(),
-                description: DEFAULT_AGENT_DESCRIPTION.to_string(),
-                provider_id: DEFAULT_PROVIDER_ID.to_string(),
-                model_id: DEFAULT_MODEL_ID.to_string(),
-                fallback_provider_id: String::new(),
-                fallback_model_id: String::new(),
-                system_prompt: String::new(),
-                approval_mode: ApprovalMode::Ask,
-                shell_rules: ShellRulesConfig::default(),
-                tool_rules: ToolRulesConfig::default(),
-                builtin_approvals: CapabilityRulesConfig::default(),
-                skill_approvals: CapabilityRulesConfig::default(),
-                mcp_approvals: CapabilityRulesConfig::default(),
-                builtin_tool_ids: default_builtin_tool_ids(),
-                skill_ids: Vec::new(),
-                mcp_server_ids: Vec::new(),
-                sub_agent_ids: Vec::new(),
-                enabled: true,
-                legacy_builtin_tools_enabled: None,
-                legacy_enabled_skill_ids: Vec::new(),
-                legacy_disabled_skill_ids: Vec::new(),
-                legacy_enabled_mcp_server_ids: Vec::new(),
-                legacy_disabled_mcp_server_ids: Vec::new(),
-                legacy_capability_rules: vec![AgentCapabilityRule {
-                    key: "builtin.shell".to_string(),
-                    approval_mode: ApprovalMode::Ask,
-                }],
-            }],
+            agents: default_agent_catalog(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID),
         }
     }
+}
+
+fn default_agent_catalog(provider_id: &str, model_id: &str) -> Vec<AgentConfig> {
+    let mut agents = vec![AgentConfig {
+        id: DEFAULT_AGENT_ID.to_string(),
+        name: DEFAULT_AGENT_NAME.to_string(),
+        description: DEFAULT_AGENT_DESCRIPTION.to_string(),
+        provider_id: provider_id.to_string(),
+        model_id: model_id.to_string(),
+        model_reasoning_effort: default_agent_reasoning_effort(),
+        fallback_provider_id: String::new(),
+        fallback_model_id: String::new(),
+        system_prompt: String::new(),
+        approval_mode: ApprovalMode::Ask,
+        shell_rules: ShellRulesConfig::default(),
+        tool_rules: ToolRulesConfig::default(),
+        builtin_approvals: CapabilityRulesConfig::default(),
+        skill_approvals: CapabilityRulesConfig::default(),
+        mcp_approvals: CapabilityRulesConfig::default(),
+        builtin_tool_ids: default_builtin_tool_ids(),
+        skills_enabled: true,
+        skill_ids: Vec::new(),
+        mcp_servers_enabled: true,
+        mcp_server_ids: Vec::new(),
+        // First-run Codex should be able to delegate to the curated Sirix
+        // specialist roles, while each role remains a normal editable/deletable
+        // Agent Settings entry after bootstrap.
+        sub_agents_enabled: true,
+        sub_agent_ids: default_codex_sub_agent_ids(),
+        enabled: true,
+        legacy_builtin_tools_enabled: None,
+        legacy_enabled_skill_ids: Vec::new(),
+        legacy_disabled_skill_ids: Vec::new(),
+        legacy_enabled_mcp_server_ids: Vec::new(),
+        legacy_disabled_mcp_server_ids: Vec::new(),
+        legacy_capability_rules: vec![AgentCapabilityRule {
+            key: "builtin.shell".to_string(),
+            approval_mode: ApprovalMode::Ask,
+        }],
+    }];
+    agents.extend(preset_agents().iter().map(agent_from_preset));
+    agents
+}
+
+fn agent_from_preset(preset: &PresetAgentDefinition) -> AgentConfig {
+    AgentConfig {
+        id: preset.id.clone(),
+        name: preset.name.clone(),
+        description: preset
+            .description_for(preset_default_language())
+            .trim()
+            .to_string(),
+        provider_id: preset.provider_id.trim().to_string(),
+        model_id: preset.model_id.trim().to_string(),
+        model_reasoning_effort: default_agent_reasoning_effort(),
+        fallback_provider_id: String::new(),
+        fallback_model_id: String::new(),
+        system_prompt: preset
+            .system_prompt_for(preset_default_language())
+            .trim()
+            .to_string(),
+        approval_mode: ApprovalMode::Ask,
+        shell_rules: ShellRulesConfig::default(),
+        tool_rules: ToolRulesConfig::default(),
+        builtin_approvals: CapabilityRulesConfig::default(),
+        skill_approvals: CapabilityRulesConfig::default(),
+        mcp_approvals: CapabilityRulesConfig::default(),
+        builtin_tool_ids: preset.builtin_tool_ids.clone(),
+        skills_enabled: preset.skills_enabled,
+        skill_ids: preset.skill_ids.clone(),
+        mcp_servers_enabled: preset.mcp_servers_enabled,
+        mcp_server_ids: preset.mcp_server_ids.clone(),
+        sub_agents_enabled: preset.sub_agents_enabled,
+        sub_agent_ids: preset.sub_agent_ids.clone(),
+        enabled: preset.enabled,
+        legacy_builtin_tools_enabled: None,
+        legacy_enabled_skill_ids: Vec::new(),
+        legacy_disabled_skill_ids: Vec::new(),
+        legacy_enabled_mcp_server_ids: Vec::new(),
+        legacy_disabled_mcp_server_ids: Vec::new(),
+        legacy_capability_rules: Vec::new(),
+    }
+}
+
+fn default_agent_catalog_from_agents(existing_agents: &[AgentConfig]) -> Vec<AgentConfig> {
+    let (provider_id, model_id) = existing_agents
+        .iter()
+        .find(|agent| is_builtin_codex_agent(agent.id.as_str()))
+        .or_else(|| existing_agents.first())
+        .map(|agent| (agent.provider_id.as_str(), agent.model_id.as_str()))
+        .filter(|(_, model_id)| !model_id.trim().is_empty())
+        .unwrap_or((DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID));
+    default_agent_catalog(provider_id, model_id)
+}
+
+fn load_agent_configs_from_dir(agents_dir: &Path) -> anyhow::Result<Vec<AgentConfig>> {
+    let mut agents = Vec::new();
+    let read_dir = match fs::read_dir(agents_dir) {
+        Ok(read_dir) => read_dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(agents),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", agents_dir.display()));
+        }
+    };
+
+    let mut paths = Vec::new();
+    for entry in read_dir {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+
+    for path in paths {
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let mut agent = toml::from_str::<AgentConfig>(&raw)
+            .with_context(|| format!("failed to parse agent config {}", path.display()))?;
+        normalize_workspace_agent(&mut agent, &[], &[], default_builtin_tool_ids().as_slice());
+        agents.push(agent);
+    }
+    dedup_by_key(&mut agents, |agent| agent.id.clone());
+    Ok(agents)
+}
+
+fn save_agent_configs_to_dir(agents_dir: &Path, agents: &[AgentConfig]) -> anyhow::Result<()> {
+    fs::create_dir_all(agents_dir)
+        .with_context(|| format!("failed to create {}", agents_dir.display()))?;
+
+    for entry in fs::read_dir(agents_dir)
+        .with_context(|| format!("failed to read {}", agents_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| extension == "toml")
+        {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove stale agent {}", path.display()))?;
+        }
+    }
+
+    let mut used_stems = HashSet::new();
+    for agent in agents {
+        let file_stem = role_file_stem_for_agent_id(agent.id.as_str(), &mut used_stems);
+        let path = agents_dir.join(format!("{file_stem}.toml"));
+        let serialized =
+            toml::to_string_pretty(agent).context("failed to serialize agent config")?;
+        fs::write(&path, serialized)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_preset_agent_skills(config: &mut SirixConfig, skills_home: &Path) {
+    ensure_skill_config(
+        config,
+        SIRIX_PRESET_AGENT_SKILL_ID,
+        SIRIX_PRESET_AGENT_SKILL_NAME,
+        skills_home.join(SIRIX_PRESET_AGENT_SKILL_ID).as_path(),
+    );
+    for agent in preset_agents() {
+        ensure_skill_config(
+            config,
+            agent.id.as_str(),
+            agent.name.as_str(),
+            skills_home
+                .join(sanitize_agent_id_for_role_file_stem(agent.id.as_str()))
+                .as_path(),
+        );
+    }
+}
+
+fn ensure_skill_config(config: &mut SirixConfig, id: &str, name: &str, skill_dir: &Path) {
+    let skill_path = display_path_string(skill_dir);
+    if let Some(skill) = config.skills.iter_mut().find(|skill| skill.id == id) {
+        skill.name = name.to_string();
+        skill.path = skill_path;
+        return;
+    }
+
+    config.skills.push(SkillConfig {
+        id: id.to_string(),
+        name: name.to_string(),
+        path: skill_path,
+        enabled: true,
+        allow_outside_sandbox: false,
+    });
+}
+
+fn write_preset_agent_skill_docs(skills_home: &Path) -> anyhow::Result<()> {
+    let routing_skill_dir = skills_home.join(SIRIX_PRESET_AGENT_SKILL_ID);
+    let agent_docs_dir = routing_skill_dir.join(SIRIX_AGENTS_DIR_NAME);
+    fs::create_dir_all(&agent_docs_dir)
+        .with_context(|| format!("failed to create {}", agent_docs_dir.display()))?;
+
+    let mut used_stems = HashSet::new();
+    let doc_entries = preset_agents()
+        .iter()
+        .map(|agent| {
+            let stem = role_file_stem_for_agent_id(agent.id.as_str(), &mut used_stems);
+            (agent, format!("{stem}.md"))
+        })
+        .collect::<Vec<_>>();
+
+    for (agent, file_name) in &doc_entries {
+        fs::write(
+            agent_docs_dir.join(file_name),
+            render_preset_agent_doc(agent).as_bytes(),
+        )
+        .with_context(|| format!("failed to write preset agent doc {}", agent.id))?;
+        write_single_preset_agent_skill(skills_home, agent)
+            .with_context(|| format!("failed to write preset agent skill {}", agent.id))?;
+    }
+
+    fs::write(
+        routing_skill_dir.join("SKILL.md"),
+        render_preset_agent_skill(&doc_entries),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            routing_skill_dir.join("SKILL.md").display()
+        )
+    })?;
+    Ok(())
+}
+
+fn write_single_preset_agent_skill(
+    skills_home: &Path,
+    agent: &PresetAgentDefinition,
+) -> anyhow::Result<()> {
+    let skill_dir = skills_home.join(sanitize_agent_id_for_role_file_stem(agent.id.as_str()));
+    fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("failed to create {}", skill_dir.display()))?;
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        render_single_preset_agent_skill(agent),
+    )
+    .with_context(|| format!("failed to write {}", skill_dir.join("SKILL.md").display()))?;
+    Ok(())
+}
+
+fn render_preset_agent_skill(entries: &[(&PresetAgentDefinition, String)]) -> String {
+    let mut markdown = format!(
+        "{}# Sirix Preset Agent Routing\n\n\
+Use this skill when a task should be dispatched to Sirix preset Agents or when you need to choose the right preset Agent.\n\n\
+## Routing Rules\n\n\
+- Prefer `orchestrator` for broad tasks that need staged planning, execution, and verification.\n\
+- Prefer planner Agents for product or implementation planning before code changes.\n\
+- Prefer coordinator Agents for bug-fix and code-review workflows that need multiple specialist passes.\n\
+- Prefer focused specialist Agents when the task maps directly to one role.\n\
+- Check the per-Agent docs in `agents/` before delegating when role boundaries are unclear.\n\n\
+## Preset Agents\n\n",
+        skill_frontmatter(
+            SIRIX_PRESET_AGENT_SKILL_ID,
+            "Choose or dispatch Sirix preset Agents for planning, implementation, review, and debugging workflows.",
+        )
+    );
+    for (agent, file_name) in entries {
+        markdown.push_str(&format!(
+            "- `{}` — {} See `agents/{}`.\n",
+            agent.id,
+            agent.description_for(preset_default_language()).trim(),
+            file_name
+        ));
+    }
+    markdown
+}
+
+fn render_preset_agent_doc(agent: &PresetAgentDefinition) -> String {
+    let sub_agents = if agent.sub_agent_ids.is_empty() {
+        "None".to_string()
+    } else {
+        agent
+            .sub_agent_ids
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let tools = if agent.builtin_tool_ids.is_empty() {
+        "None".to_string()
+    } else {
+        agent
+            .builtin_tool_ids
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "# {}\n\n\
+## When To Use\n\n{}\n\n\
+## Delegation\n\n- Can spawn sub-agents: `{}`\n- Preferred sub-agents: {}\n\n\
+## Builtin Tools\n\n{}\n\n\
+## Agent Instructions\n\n{}\n",
+        agent.name,
+        agent.description_for(preset_default_language()).trim(),
+        agent.sub_agents_enabled,
+        sub_agents,
+        tools,
+        agent.system_prompt_for(preset_default_language()).trim()
+    )
+}
+
+fn render_single_preset_agent_skill(agent: &PresetAgentDefinition) -> String {
+    format!(
+        "{}# {}\n\n\
+Use this skill when the user invokes `${}` or when the task should run through the Sirix preset Agent `{}`.\n\n\
+## Activation\n\n\
+- Treat this skill as an explicit request to use Agent `{}`.\n\
+- If Sirix Agent switching is available, switch/select `agent_id = \"{}\"` before continuing.\n\
+- If working inside a parent Agent, delegate with `spawn_agent` / Sirix sub-agent routing to `{}` when delegation is safer than continuing inline.\n\
+- If neither switching nor delegation is available, follow this Agent's instructions inline and state that Agent switching was unavailable.\n\n\
+{}\n",
+        skill_frontmatter(
+            agent.id.as_str(),
+            agent.description_for(preset_default_language()).trim(),
+        ),
+        agent.name,
+        agent.id,
+        agent.id,
+        agent.id,
+        agent.id,
+        agent.id,
+        render_preset_agent_doc(agent)
+    )
+}
+
+fn skill_frontmatter(name: &str, description: &str) -> String {
+    // The vendored Codex skill loader requires YAML frontmatter in every
+    // SKILL.md.  Use JSON string escaping (valid YAML double-quoted scalar
+    // syntax) so translated descriptions containing punctuation, quotes, or
+    // non-ASCII text remain parseable on every platform.
+    format!(
+        "---\nname: {}\ndescription: {}\n---\n\n",
+        serde_json::to_string(name).expect("frontmatter name should serialize"),
+        serde_json::to_string(description).expect("frontmatter description should serialize")
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,6 +759,8 @@ pub struct WorkspaceEditableConfig {
     #[serde(default = "default_config_version")]
     pub version: u32,
     #[serde(default)]
+    pub default_agent_id: String,
+    #[serde(default)]
     pub skills: Vec<SkillConfig>,
     #[serde(default)]
     pub mcp: McpGlobalConfig,
@@ -425,7 +772,7 @@ pub struct WorkspaceEditableConfig {
     pub mcp_approvals: CapabilityRulesConfig,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentConfig>,
 }
 
@@ -433,6 +780,7 @@ impl Default for WorkspaceEditableConfig {
     fn default() -> Self {
         Self {
             version: default_config_version(),
+            default_agent_id: String::new(),
             skills: Vec::new(),
             mcp: McpGlobalConfig::default(),
             builtin_approvals: CapabilityRulesConfig::default(),
@@ -452,6 +800,7 @@ impl WorkspaceEditableConfig {
     pub fn from_sirix_config(config: SirixConfig) -> Self {
         Self {
             version: config.version,
+            default_agent_id: config.default_agent_id,
             skills: config.skills,
             mcp: config.mcp,
             builtin_approvals: config.builtin_approvals,
@@ -469,6 +818,7 @@ impl WorkspaceEditableConfig {
         // to be `WorkspaceEditableConfig`, which omits `cli` and `providers`.
         SirixConfig {
             version: self.version,
+            default_agent_id: self.default_agent_id.clone(),
             cli: CliSettings::default(),
             providers: Vec::new(),
             skills: self.skills.clone(),
@@ -575,6 +925,16 @@ impl SirixConfigStore {
         self.config_path.as_path()
     }
 
+    pub fn global_agents_dir_path(&self) -> PathBuf {
+        self.sirix_home.join(SIRIX_AGENTS_DIR_NAME)
+    }
+
+    pub fn preset_agent_skill_dir_path(&self) -> PathBuf {
+        self.sirix_home
+            .join("skills")
+            .join(SIRIX_PRESET_AGENT_SKILL_ID)
+    }
+
     pub fn provider_openai_auth_home(&self, provider_id: &str) -> PathBuf {
         self.sirix_home
             .join("runtime")
@@ -584,23 +944,44 @@ impl SirixConfigStore {
 
     pub fn load_global(&self) -> anyhow::Result<SirixConfig> {
         if !self.config_path.exists() {
-            let default_config = SirixConfig::default();
+            let mut default_config = SirixConfig::default();
+            ensure_preset_agent_skills(
+                &mut default_config,
+                self.sirix_home.join("skills").as_path(),
+            );
             self.save_global(&default_config)?;
             return Ok(default_config);
         }
 
         let raw = fs::read_to_string(&self.config_path)
             .with_context(|| format!("failed to read {}", self.config_path.display()))?;
-        parse_config_with_compat(&raw, &self.config_path)
+        let mut parsed = parse_config_with_compat(&raw, &self.config_path)?;
+        let inline_agents = parsed.agents.clone();
+        parsed.agents = self
+            .load_agent_catalog_from_dir(self.global_agents_dir_path().as_path(), inline_agents)?;
+        ensure_preset_agent_skills(&mut parsed, self.sirix_home.join("skills").as_path());
+        normalize_sirix_config(&mut parsed);
+        Ok(parsed)
     }
 
     pub fn save_global(&self, config: &SirixConfig) -> anyhow::Result<()> {
         let mut normalized = config.clone();
-        normalize_sirix_config(&mut normalized);
         fs::create_dir_all(&self.sirix_home)
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
-        let serialized =
-            toml::to_string_pretty(&normalized).context("failed to serialize sirix config")?;
+        write_preset_agent_skill_docs(self.sirix_home.join("skills").as_path())?;
+        ensure_preset_agent_skills(&mut normalized, self.sirix_home.join("skills").as_path());
+        normalize_sirix_config(&mut normalized);
+        self.save_agent_catalog_to_dir(
+            self.global_agents_dir_path().as_path(),
+            normalized.agents.as_slice(),
+        )?;
+        let mut config_without_agents = normalized;
+        // Agent profiles now follow Codex's filesystem layout and live under
+        // `SIRIX_HOME/agents/*.toml`; keeping them out of `config.toml` avoids
+        // two competing sources of truth while preserving the API's merged view.
+        config_without_agents.agents.clear();
+        let serialized = toml::to_string_pretty(&config_without_agents)
+            .context("failed to serialize sirix config")?;
         fs::write(&self.config_path, serialized)
             .with_context(|| format!("failed to write {}", self.config_path.display()))?;
         Ok(())
@@ -635,6 +1016,11 @@ impl SirixConfigStore {
 
     pub fn workspace_config_path(&self, cwd: &Path) -> PathBuf {
         cwd.join(workspace_config_dir_name()).join("config.toml")
+    }
+
+    pub fn workspace_agents_dir_path(&self, cwd: &Path) -> PathBuf {
+        cwd.join(workspace_config_dir_name())
+            .join(SIRIX_AGENTS_DIR_NAME)
     }
 
     /// Normalize a user-facing workspace selection into the canonical
@@ -745,11 +1131,31 @@ impl SirixConfigStore {
     pub fn load_workspace_config(&self, cwd: &Path) -> anyhow::Result<Option<SirixConfig>> {
         let path = self.workspace_config_path(cwd);
         if !path.is_file() {
-            return Ok(None);
+            let file_agents =
+                load_agent_configs_from_dir(self.workspace_agents_dir_path(cwd).as_path())?;
+            if file_agents.is_empty() {
+                return Ok(None);
+            }
+            let mut editable = WorkspaceEditableConfig {
+                agents: file_agents,
+                ..WorkspaceEditableConfig::default()
+            };
+            normalize_workspace_editable_config(&mut editable);
+            return Ok(Some(editable.as_workspace_config()));
         }
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        parse_config_with_compat(&raw, &path).map(Some)
+        let mut parsed = parse_workspace_config_with_compat(&raw, &path)?;
+        let inline_agents = parsed.agents.clone();
+        let file_agents =
+            load_agent_configs_from_dir(self.workspace_agents_dir_path(cwd).as_path())?;
+        if !file_agents.is_empty() {
+            parsed.agents = file_agents;
+        } else {
+            parsed.agents = inline_agents;
+        }
+        normalize_workspace_overlay_config(&mut parsed);
+        Ok(Some(parsed))
     }
 
     pub fn load_workspace_editable_config(
@@ -770,7 +1176,13 @@ impl SirixConfigStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let serialized = toml::to_string_pretty(&normalized)
+        self.save_agent_catalog_to_dir(
+            self.workspace_agents_dir_path(cwd).as_path(),
+            normalized.agents.as_slice(),
+        )?;
+        let mut config_without_agents = normalized;
+        config_without_agents.agents.clear();
+        let serialized = toml::to_string_pretty(&config_without_agents)
             .context("failed to serialize sirix workspace config")?;
         fs::write(&path, serialized)
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -789,7 +1201,13 @@ impl SirixConfigStore {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-        let serialized = toml::to_string_pretty(&normalized)
+        self.save_agent_catalog_to_dir(
+            self.workspace_agents_dir_path(cwd).as_path(),
+            normalized.agents.as_slice(),
+        )?;
+        let mut config_without_agents = normalized;
+        config_without_agents.agents.clear();
+        let serialized = toml::to_string_pretty(&config_without_agents)
             .context("failed to serialize workspace-only sirix config")?;
         fs::write(&path, serialized)
             .with_context(|| format!("failed to write {}", path.display()))?;
@@ -1106,7 +1524,11 @@ impl SirixConfigStore {
                 .context("workspace metadata missing .sirix config path")?;
             let raw = fs::read_to_string(sirix_workspace)
                 .with_context(|| format!("failed to read {}", sirix_workspace.display()))?;
-            let workspace = parse_config_with_compat(&raw, sirix_workspace)?;
+            let workspace = self
+                .load_workspace_config(metadata.workspace_root.as_path())?
+                .context(
+                    "workspace metadata indicated .sirix config but no workspace config loaded",
+                )?;
             let workspace_cli_close_override =
                 extract_cli_close_confirmation_override(&raw, sirix_workspace)?;
             let mut merged = merge_sirix_config(global, workspace);
@@ -1306,25 +1728,8 @@ impl SirixConfigStore {
             .filter(|item| item.enabled)
             .cloned()
             .collect::<Vec<_>>();
-        let provider = config
-            .providers
-            .iter()
-            .find(|item| item.id == agent.provider_id && item.enabled)
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "provider {} not found for agent {}",
-                    agent.provider_id, agent.id
-                )
-            })?;
-        let model = provider
-            .models
-            .iter()
-            .find(|item| item.id == agent.model_id && item.enabled)
-            .cloned()
-            .with_context(|| {
-                format!("model {} not found for agent {}", agent.model_id, agent.id)
-            })?;
+        let (provider, model) = resolve_agent_model(&config, &agent)
+            .with_context(|| format!("no enabled text model available for agent {}", agent.id))?;
         let session_storage_dir = self
             .sirix_home
             .join("runtime")
@@ -1452,8 +1857,11 @@ impl SirixConfigStore {
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
         fs::create_dir_all(self.sirix_home.join("skills"))
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
+        fs::create_dir_all(self.global_agents_dir_path())
+            .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
         fs::create_dir_all(self.sirix_home.join("secrets"))
             .with_context(|| format!("failed to create {}", self.sirix_home.display()))?;
+        write_preset_agent_skill_docs(self.sirix_home.join("skills").as_path())?;
         self.ensure_shared_codex_home_layout()?;
         self.migrate_legacy_session_storage()?;
         Ok(())
@@ -1593,6 +2001,34 @@ impl SirixConfigStore {
     ) -> anyhow::Result<()> {
         self.save_rules_to_path(path, rules)
     }
+
+    fn load_agent_catalog_from_dir(
+        &self,
+        agents_dir: &Path,
+        inline_agents: Vec<AgentConfig>,
+    ) -> anyhow::Result<Vec<AgentConfig>> {
+        let file_agents = load_agent_configs_from_dir(agents_dir)?;
+        if !file_agents.is_empty() {
+            return Ok(file_agents);
+        }
+
+        // First-run and legacy inline configs are migrated into the Codex-like
+        // `agents/*.toml` layout. Existing inline custom agents win over seeded
+        // presets with the same id, while missing Sirix presets are appended so
+        // Desktop and CLI delegation work immediately after upgrade.
+        let mut seeded = default_agent_catalog_from_agents(&inline_agents);
+        seeded = merge_items_by_id(seeded, inline_agents, |agent| agent.id.clone());
+        self.save_agent_catalog_to_dir(agents_dir, seeded.as_slice())?;
+        Ok(seeded)
+    }
+
+    fn save_agent_catalog_to_dir(
+        &self,
+        agents_dir: &Path,
+        agents: &[AgentConfig],
+    ) -> anyhow::Result<()> {
+        save_agent_configs_to_dir(agents_dir, agents)
+    }
 }
 
 fn install_bin_shim(
@@ -1646,6 +2082,20 @@ fn resolve_agent(config: &SirixConfig, preferred: Option<&str>) -> anyhow::Resul
         }
     }
 
+    let default_agent_id = config.default_agent_id.trim();
+    if !default_agent_id.is_empty() {
+        if let Some(default_agent) = config
+            .agents
+            .iter()
+            .find(|item| {
+                item.id == default_agent_id && item.enabled && is_agent_launchable(config, item)
+            })
+            .cloned()
+        {
+            return Ok(default_agent);
+        }
+    }
+
     // Sirix CLI 默认启动不显式传 agent_id，所以这里优先解析内置 `codex` Agent。
     // 这样 Provider/Model 页面上设置的默认模型会直接反映到 CLI 的默认启动结果。
     if let Some(default_agent) = config
@@ -1668,18 +2118,75 @@ fn resolve_agent(config: &SirixConfig, preferred: Option<&str>) -> anyhow::Resul
 }
 
 fn is_agent_launchable(config: &SirixConfig, agent: &AgentConfig) -> bool {
-    let Some(provider) = config
-        .providers
-        .iter()
-        .find(|item| item.id == agent.provider_id && item.enabled)
-    else {
-        return false;
-    };
+    resolve_agent_model(config, agent).is_some()
+}
 
-    provider
-        .models
+fn resolve_cli_default_model(config: &SirixConfig) -> Option<(ProviderConfig, ModelConfig)> {
+    let codex_default = config
+        .agents
         .iter()
-        .any(|item| item.id == agent.model_id && item.enabled)
+        .find(|agent| agent.id == DEFAULT_AGENT_ID);
+    if let Some(agent) = codex_default {
+        if let Some(resolved) = resolve_explicit_agent_model(config.providers.as_slice(), agent) {
+            return Some(resolved);
+        }
+    }
+
+    // Last-resort recovery for incomplete or hand-edited configs: if the single
+    // CLI default model record is missing/stale, keep Sirix launchable by using
+    // the first enabled text model instead of treating that provider order as a
+    // second "default model" concept.
+    first_enabled_text_model_owned(config.providers.as_slice())
+}
+
+fn first_enabled_text_model_owned(
+    providers: &[ProviderConfig],
+) -> Option<(ProviderConfig, ModelConfig)> {
+    providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .find_map(|provider| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.enabled && matches!(model.model_kind, ModelKind::Text))
+                .map(|model| (provider.clone(), model.clone()))
+        })
+}
+
+fn resolve_explicit_agent_model(
+    providers: &[ProviderConfig],
+    agent: &AgentConfig,
+) -> Option<(ProviderConfig, ModelConfig)> {
+    let requested_provider = agent.provider_id.trim();
+    let requested_model = agent.model_id.trim();
+    if requested_model.is_empty() {
+        return None;
+    }
+
+    for provider in providers.iter().filter(|provider| provider.enabled) {
+        if !requested_provider.is_empty() && provider.id != requested_provider {
+            continue;
+        }
+        for model in provider.models.iter() {
+            if !model.enabled || !matches!(model.model_kind, ModelKind::Text) {
+                continue;
+            }
+            if !requested_model.is_empty() && model.id != requested_model {
+                continue;
+            }
+            return Some((provider.clone(), model.clone()));
+        }
+    }
+    None
+}
+
+pub(crate) fn resolve_agent_model(
+    config: &SirixConfig,
+    agent: &AgentConfig,
+) -> Option<(ProviderConfig, ModelConfig)> {
+    resolve_explicit_agent_model(config.providers.as_slice(), agent)
+        .or_else(|| resolve_cli_default_model(config))
 }
 
 fn build_codex_bridge_toml(
@@ -1694,6 +2201,14 @@ fn build_codex_bridge_toml(
         "model".to_string(),
         TomlValue::String(launch.model.id.clone()),
     );
+    if let Some(reasoning_effort) =
+        agent_model_reasoning_effort_for_model(&launch.agent, &launch.model)
+    {
+        root.insert(
+            "model_reasoning_effort".to_string(),
+            TomlValue::String(reasoning_effort),
+        );
+    }
     // Sirix routes every embedded Codex model request through a single local
     // proxy provider. That keeps the upstream Codex runtime unchanged while
     // still letting `/model` switch across Sirix providers by model slug.
@@ -1905,11 +2420,18 @@ fn build_bridge_models_for_session(
             );
             entry.insert(
                 "default_reasoning_effort".to_string(),
-                TomlValue::String("none".to_string()),
+                TomlValue::String(
+                    model
+                        .supported_reasoning_efforts
+                        .as_ref()
+                        .and_then(|efforts| efforts.first())
+                        .cloned()
+                        .unwrap_or_else(|| "none".to_string()),
+                ),
             );
             entry.insert(
                 "supported_reasoning_efforts".to_string(),
-                TomlValue::Array(Vec::new()),
+                TomlValue::Array(reasoning_effort_presets_for_model(model)),
             );
             entry.insert(
                 "supports_personality".to_string(),
@@ -1944,6 +2466,25 @@ fn build_bridge_models_for_session(
         }
     }
     models
+}
+
+fn reasoning_effort_presets_for_model(model: &ModelConfig) -> Vec<TomlValue> {
+    model
+        .supported_reasoning_efforts
+        .as_ref()
+        .map(|efforts| {
+            efforts
+                .iter()
+                .filter_map(|effort| normalize_reasoning_effort(effort))
+                .map(|effort| {
+                    let mut preset = toml::map::Map::<String, TomlValue>::new();
+                    preset.insert("effort".to_string(), TomlValue::String(effort.clone()));
+                    preset.insert("description".to_string(), TomlValue::String(effort));
+                    TomlValue::Table(preset)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn duplicate_session_text_model_ids(providers: &[ProviderConfig]) -> HashSet<String> {
@@ -2080,6 +2621,7 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
     // can rely on the newer Agent schema without duplicating fallback logic.
     let default_builtin_tools = default_builtin_tool_ids();
     migrate_default_agent_to_codex(config);
+    config.default_agent_id = config.default_agent_id.trim().to_string();
     let all_skill_ids = config
         .skills
         .iter()
@@ -2157,6 +2699,10 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
         .any(|agent| is_builtin_codex_agent(agent.id.as_str()))
     {
         if let Some((provider, model)) = first_enabled_text_model(config) {
+            let codex_sub_agent_ids = default_codex_sub_agent_ids()
+                .into_iter()
+                .filter(|id| config.agents.iter().any(|agent| agent.id == *id))
+                .collect();
             config.agents.insert(
                 0,
                 AgentConfig {
@@ -2165,6 +2711,7 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                     description: DEFAULT_AGENT_DESCRIPTION.to_string(),
                     provider_id: provider.id.clone(),
                     model_id: model.id.clone(),
+                    model_reasoning_effort: default_agent_reasoning_effort(),
                     fallback_provider_id: String::new(),
                     fallback_model_id: String::new(),
                     system_prompt: String::new(),
@@ -2175,9 +2722,16 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
                     skill_approvals: CapabilityRulesConfig::default(),
                     mcp_approvals: CapabilityRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tools,
+                    skills_enabled: true,
                     skill_ids: Vec::new(),
+                    mcp_servers_enabled: true,
                     mcp_server_ids: Vec::new(),
-                    sub_agent_ids: Vec::new(),
+                    // Only wire Codex to preset specialists that already exist in
+                    // this config. First-run seeding creates the complete catalog in
+                    // `default_agent_catalog`; this normalization branch must not
+                    // synthesize dangling sub-agent references for older custom files.
+                    sub_agents_enabled: true,
+                    sub_agent_ids: codex_sub_agent_ids,
                     enabled: true,
                     legacy_builtin_tools_enabled: None,
                     legacy_enabled_skill_ids: Vec::new(),
@@ -2189,6 +2743,21 @@ fn normalize_sirix_config(config: &mut SirixConfig) {
             );
         }
     }
+
+    if config.default_agent_id.trim().is_empty() {
+        config.default_agent_id = DEFAULT_AGENT_ID.to_string();
+    }
+}
+
+fn normalize_workspace_overlay_config(config: &mut SirixConfig) {
+    // Workspace config is an overlay, not a standalone global profile.  In
+    // particular, an empty `default_agent_id` is meaningful: it means "inherit
+    // the global default Agent".  Reusing `normalize_sirix_config` here would
+    // materialize that empty value as `codex`, and a subsequent Settings save
+    // would accidentally pin the workspace away from the user's global default.
+    let mut editable = WorkspaceEditableConfig::from_sirix_config(config.clone());
+    normalize_workspace_editable_config(&mut editable);
+    *config = editable.as_workspace_config();
 }
 
 fn normalize_workspace_editable_config(config: &mut WorkspaceEditableConfig) {
@@ -2203,6 +2772,7 @@ fn normalize_workspace_editable_config(config: &mut WorkspaceEditableConfig) {
         .iter()
         .map(|server| server.id.clone())
         .collect::<Vec<_>>();
+    config.default_agent_id = config.default_agent_id.trim().to_string();
 
     for skill in &mut config.skills {
         skill.id = skill.id.trim().to_string();
@@ -2302,6 +2872,9 @@ fn normalize_workspace_agent(
     agent.description = agent.description.trim().to_string();
     agent.provider_id = agent.provider_id.trim().to_string();
     agent.model_id = agent.model_id.trim().to_string();
+    agent.model_reasoning_effort =
+        normalize_reasoning_effort(agent.model_reasoning_effort.as_str())
+            .unwrap_or_else(default_agent_reasoning_effort);
     agent.fallback_provider_id = agent.fallback_provider_id.trim().to_string();
     agent.fallback_model_id = agent.fallback_model_id.trim().to_string();
     agent.system_prompt = agent.system_prompt.trim().to_string();
@@ -2322,6 +2895,18 @@ fn normalize_string_list(items: Vec<String>) -> Vec<String> {
         normalized.push(trimmed);
     }
     normalized
+}
+
+fn normalize_reasoning_effort(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    is_known_reasoning_effort(normalized.as_str()).then_some(normalized)
+}
+
+fn is_known_reasoning_effort(value: &str) -> bool {
+    matches!(
+        value,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    )
 }
 
 fn dedup_by_key<T>(items: &mut Vec<T>, key_fn: impl Fn(&T) -> String) {
@@ -2347,11 +2932,6 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
     )?;
     ensure_unique_ids(config.agents.iter().map(|item| item.id.as_str()), "agent")?;
 
-    let provider_ids = config
-        .providers
-        .iter()
-        .map(|item| item.id.as_str())
-        .collect::<HashSet<_>>();
     let skill_ids = config
         .skills
         .iter()
@@ -2396,6 +2976,17 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
                     model.id
                 );
             }
+            if let Some(efforts) = &model.supported_reasoning_efforts {
+                for effort in efforts {
+                    if !is_known_reasoning_effort(effort.trim()) {
+                        anyhow::bail!(
+                            "model {} supported_reasoning_efforts contains unsupported value {}",
+                            model.id,
+                            effort
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2425,6 +3016,13 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
         if agent.name.trim().is_empty() {
             anyhow::bail!("agent {} name cannot be empty", agent.id);
         }
+        if !is_known_reasoning_effort(agent.model_reasoning_effort.trim()) {
+            anyhow::bail!(
+                "agent {} model_reasoning_effort contains unsupported value {}",
+                agent.id,
+                agent.model_reasoning_effort
+            );
+        }
         if !agent.fallback_provider_id.trim().is_empty()
             ^ !agent.fallback_model_id.trim().is_empty()
         {
@@ -2433,32 +3031,11 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
                 agent.id
             );
         }
-        if !provider_ids.contains(agent.provider_id.as_str()) {
-            anyhow::bail!(
-                "agent {} references unknown provider {}",
-                agent.id,
-                agent.provider_id
-            );
-        }
-        let Some(provider) = config
-            .providers
-            .iter()
-            .find(|item| item.id == agent.provider_id)
-        else {
-            anyhow::bail!(
-                "agent {} references missing provider {}",
-                agent.id,
-                agent.provider_id
-            );
-        };
-        if !provider.models.iter().any(|item| item.id == agent.model_id) {
-            anyhow::bail!(
-                "agent {} references unknown model {} for provider {}",
-                agent.id,
-                agent.model_id,
-                agent.provider_id
-            );
-        }
+        // Agent primary provider/model references are intentionally soft: an
+        // empty or stale model falls back to the single CLI default model from
+        // the model settings page at launch time. Validation should therefore
+        // keep older/workspace configs editable instead of rejecting the whole
+        // settings save because a provider/model was renamed or removed.
         if !agent.fallback_provider_id.trim().is_empty() {
             let Some(fallback_provider) = config
                 .providers
@@ -2504,6 +3081,15 @@ pub fn validate_sirix_config(config: &SirixConfig) -> anyhow::Result<()> {
             &builtin_tool_ids,
             &format!("agent {} builtin_tool_ids", agent.id),
         )?;
+    }
+
+    if !config.default_agent_id.trim().is_empty()
+        && !agent_ids.contains(config.default_agent_id.as_str())
+    {
+        anyhow::bail!(
+            "default_agent_id references unknown agent {}",
+            config.default_agent_id
+        );
     }
 
     Ok(())
@@ -2561,6 +3147,20 @@ fn parse_config_with_compat(raw: &str, source: &Path) -> anyhow::Result<SirixCon
     Ok(parsed)
 }
 
+fn parse_workspace_config_with_compat(raw: &str, source: &Path) -> anyhow::Result<SirixConfig> {
+    let mut parsed = match toml::from_str::<SirixConfig>(raw) {
+        Ok(parsed) => parsed,
+        Err(primary_error) => parse_legacy_codex_config(raw).with_context(|| {
+            format!(
+                "failed to parse {} as Sirix workspace config ({primary_error})",
+                source.display()
+            )
+        })?,
+    };
+    normalize_workspace_overlay_config(&mut parsed);
+    Ok(parsed)
+}
+
 fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
     let value = parse_toml_document_value(raw).context("legacy config is not valid TOML")?;
     let table = value
@@ -2614,6 +3214,7 @@ fn parse_legacy_codex_config(raw: &str) -> anyhow::Result<SirixConfig> {
             model_kind: ModelKind::Text,
             context_window: None,
             supports_images: true,
+            supported_reasoning_efforts: None,
             enabled: true,
         }];
         default_provider.default_context_window = Some(context_window);
@@ -2768,6 +3369,7 @@ fn legacy_provider_to_sirix(
             model_kind: ModelKind::Text,
             context_window: None,
             supports_images: true,
+            supported_reasoning_efforts: None,
             enabled: true,
         }],
     })
@@ -3289,6 +3891,11 @@ fn validate_mcp_server_config(server: &McpServerConfig) -> anyhow::Result<()> {
 fn merge_sirix_config(base: SirixConfig, overlay: SirixConfig) -> SirixConfig {
     SirixConfig {
         version: overlay.version.max(base.version),
+        default_agent_id: if overlay.default_agent_id.trim().is_empty() {
+            base.default_agent_id
+        } else {
+            overlay.default_agent_id
+        },
         cli: merge_cli_settings(base.cli, overlay.cli),
         providers: if overlay.providers.is_empty() {
             base.providers
@@ -3561,12 +4168,30 @@ fn selected_agent_sub_agents<'a>(
     config: &'a SirixConfig,
     agent: &'a AgentConfig,
 ) -> Vec<&'a AgentConfig> {
-    agent
-        .sub_agent_ids
+    if !agent.sub_agents_enabled {
+        return Vec::new();
+    }
+
+    config
+        .agents
         .iter()
-        .filter_map(|id| config.agents.iter().find(|candidate| candidate.id == *id))
+        .filter(|candidate| candidate.id != agent.id)
+        .filter(|candidate| {
+            agent.sub_agent_ids.is_empty() || agent.sub_agent_ids.contains(&candidate.id)
+        })
         .filter(|candidate| candidate.enabled && is_agent_launchable(config, candidate))
         .collect()
+}
+
+fn agent_allows_skill(agent: &AgentConfig, skill_id: &str) -> bool {
+    agent.skills_enabled
+        && (agent.skill_ids.is_empty() || agent.skill_ids.iter().any(|id| id == skill_id))
+}
+
+fn agent_allows_mcp_server(agent: &AgentConfig, server_id: &str) -> bool {
+    agent.mcp_servers_enabled
+        && (agent.mcp_server_ids.is_empty()
+            || agent.mcp_server_ids.iter().any(|id| id == server_id))
 }
 
 fn render_agent_role_description(
@@ -3587,15 +4212,19 @@ fn render_agent_role_description(
             agent.description.trim()
         ));
     }
-    lines.push(format!(
-        "This Sirix agent uses model `{}` / `{}`.",
-        agent.provider_id, agent.model_id
-    ));
+    if agent.provider_id.trim().is_empty() && agent.model_id.trim().is_empty() {
+        lines.push("This Sirix agent uses the current default model.".to_string());
+    } else {
+        lines.push(format!(
+            "This Sirix agent uses model `{}` / `{}`.",
+            agent.provider_id, agent.model_id
+        ));
+    }
 
     let skill_names = config
         .skills
         .iter()
-        .filter(|skill| skill.enabled && agent.skill_ids.contains(&skill.id))
+        .filter(|skill| skill.enabled && agent_allows_skill(agent, skill.id.as_str()))
         .map(|skill| skill.name.as_str())
         .collect::<Vec<_>>();
     if !skill_names.is_empty() {
@@ -3608,7 +4237,7 @@ fn render_agent_role_description(
     let mcp_names = config
         .mcp_servers
         .iter()
-        .filter(|server| server.enabled && agent.mcp_server_ids.contains(&server.id))
+        .filter(|server| server.enabled && agent_allows_mcp_server(agent, server.id.as_str()))
         .map(|server| server.name.as_str())
         .collect::<Vec<_>>();
     if !mcp_names.is_empty() {
@@ -3652,7 +4281,7 @@ fn build_sirix_skill_config(config: &SirixConfig, agent: &AgentConfig) -> TomlVa
             );
             entry.insert(
                 "enabled".to_string(),
-                TomlValue::Boolean(agent.skill_ids.contains(&skill.id)),
+                TomlValue::Boolean(agent_allows_skill(agent, skill.id.as_str())),
             );
             TomlValue::Table(entry)
         })
@@ -3723,7 +4352,7 @@ fn build_sirix_mcp_servers_table(
                 TomlValue::Boolean(
                     config.mcp.enabled
                         && transport_allowed
-                        && agent.mcp_server_ids.contains(&server.id),
+                        && agent_allows_mcp_server(agent, server.id.as_str()),
                 ),
             );
             if !server.enabled_tools.is_empty() {
@@ -3758,35 +4387,50 @@ fn build_sirix_mcp_servers_table(
     Ok(TomlValue::Table(servers))
 }
 
-fn role_model_picker_id(
-    providers: &[ProviderConfig],
-    agent: &AgentConfig,
-) -> anyhow::Result<String> {
+fn role_model_picker_id(config: &SirixConfig, agent: &AgentConfig) -> anyhow::Result<String> {
+    let providers = config.providers.as_slice();
     let duplicate_model_ids = duplicate_session_text_model_ids(providers);
-    let provider = providers
-        .iter()
-        .find(|item| item.id == agent.provider_id)
-        .with_context(|| {
-            format!(
-                "provider {} not found for role {}",
-                agent.provider_id, agent.id
-            )
-        })?;
-    let model = provider
-        .models
-        .iter()
-        .find(|item| item.id == agent.model_id)
-        .with_context(|| format!("model {} not found for role {}", agent.model_id, agent.id))?;
+    let (provider, model) = resolve_agent_model(config, agent)
+        .with_context(|| format!("no enabled text model available for role {}", agent.id))?;
     Ok(session_picker_model_id(
-        provider,
-        model,
+        &provider,
+        &model,
         &duplicate_model_ids,
     ))
 }
 
+fn agent_model_reasoning_effort_for_model(
+    agent: &AgentConfig,
+    model: &ModelConfig,
+) -> Option<String> {
+    let effort = normalize_reasoning_effort(agent.model_reasoning_effort.as_str())
+        .unwrap_or_else(default_agent_reasoning_effort);
+    match &model.supported_reasoning_efforts {
+        // Unknown support: keep the Agent-level selection in the generated role. The embedded
+        // runtime still has a final compatibility guard before spawning sub-agents, so unknown
+        // provider metadata remains configurable without making scheduling fragile.
+        None => Some(effort),
+        // Known unsupported: omit the field entirely so non-reasoning models never receive a
+        // forced reasoning level.
+        Some(efforts) if efforts.is_empty() => None,
+        Some(efforts) => efforts
+            .iter()
+            .any(|item| item.trim().eq_ignore_ascii_case(effort.as_str()))
+            .then_some(effort),
+    }
+}
+
+fn agent_model_reasoning_effort(
+    config: &SirixConfig,
+    agent: &AgentConfig,
+) -> anyhow::Result<Option<String>> {
+    let (_provider, model) = resolve_agent_model(config, agent)
+        .with_context(|| format!("no enabled text model available for role {}", agent.id))?;
+    Ok(agent_model_reasoning_effort_for_model(agent, &model))
+}
+
 fn build_sirix_role_config_value(
     config: &SirixConfig,
-    providers: &[ProviderConfig],
     agent: &AgentConfig,
     workspace_root: &Path,
     role_files: &HashMap<String, PathBuf>,
@@ -3798,8 +4442,14 @@ fn build_sirix_role_config_value(
     );
     root.insert(
         "model".to_string(),
-        TomlValue::String(role_model_picker_id(providers, agent)?),
+        TomlValue::String(role_model_picker_id(config, agent)?),
     );
+    if let Some(reasoning_effort) = agent_model_reasoning_effort(config, agent)? {
+        root.insert(
+            "model_reasoning_effort".to_string(),
+            TomlValue::String(reasoning_effort),
+        );
+    }
     root.insert(
         "sirix_agent_id".to_string(),
         TomlValue::String(agent.id.clone()),
@@ -3888,7 +4538,7 @@ fn role_file_stem_for_agent_id(agent_id: &str, used_stems: &mut HashSet<String>)
 
 fn write_sirix_agent_role_files(
     config: &SirixConfig,
-    providers: &[ProviderConfig],
+    _providers: &[ProviderConfig],
     workspace_root: &Path,
     role_dir: &Path,
 ) -> anyhow::Result<HashMap<String, PathBuf>> {
@@ -3911,8 +4561,7 @@ fn write_sirix_agent_role_files(
         .iter()
         .filter(|item| item.enabled && is_agent_launchable(config, item))
     {
-        let role_value =
-            build_sirix_role_config_value(config, providers, agent, workspace_root, &role_files)?;
+        let role_value = build_sirix_role_config_value(config, agent, workspace_root, &role_files)?;
         let role_path = role_files
             .get(agent.id.as_str())
             .with_context(|| format!("missing role path for {}", agent.id))?;
@@ -3934,23 +4583,8 @@ pub async fn build_agent_system_prompt_preview(
     let workspace_root = workspace_root
         .map(Path::to_path_buf)
         .unwrap_or(std::env::current_dir().context("failed to resolve current_dir for preview")?);
-    let provider = config
-        .providers
-        .iter()
-        .find(|item| item.id == agent.provider_id && item.enabled)
-        .cloned()
-        .with_context(|| {
-            format!(
-                "provider {} not found for agent {}",
-                agent.provider_id, agent.id
-            )
-        })?;
-    let model = provider
-        .models
-        .iter()
-        .find(|item| item.id == agent.model_id && item.enabled)
-        .cloned()
-        .with_context(|| format!("model {} not found for agent {}", agent.model_id, agent.id))?;
+    let (provider, model) = resolve_agent_model(config, agent)
+        .with_context(|| format!("no enabled text model available for agent {}", agent.id))?;
     let preview_storage_dir = agent_preview_session_storage_dir(sirix_home, agent);
     fs::create_dir_all(&preview_storage_dir)
         .with_context(|| format!("failed to create {}", preview_storage_dir.display()))?;
@@ -4066,6 +4700,10 @@ pub fn builtin_tool_catalog() -> Vec<&'static str> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_agent_reasoning_effort() -> String {
+    "high".to_string()
 }
 
 fn display_path_string(path: &Path) -> String {
@@ -4339,6 +4977,118 @@ mod tests {
         std::env::temp_dir().join(format!("sirix-{label}-{}", Uuid::new_v4()))
     }
 
+    #[test]
+    fn default_config_seeds_editable_specialist_agents() {
+        let config = SirixConfig::default();
+        let ids = config
+            .agents
+            .iter()
+            .map(|agent| agent.id.as_str())
+            .collect::<HashSet<_>>();
+
+        assert!(ids.contains(DEFAULT_AGENT_ID));
+        for preset in preset_agents() {
+            assert!(
+                ids.contains(preset.id.as_str()),
+                "missing preset {}",
+                preset.id
+            );
+        }
+
+        let codex = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == DEFAULT_AGENT_ID)
+            .expect("default codex agent should exist");
+        assert!(codex.sub_agent_ids.contains(&"orchestrator".to_string()));
+        assert!(codex.sub_agent_ids.contains(&"product-planner".to_string()));
+        assert_eq!(codex.system_prompt, "");
+
+        let ask = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == "ask")
+            .expect("ask preset should exist");
+        assert!(!ask.builtin_tool_ids.contains(&"apply_patch".to_string()));
+        assert!(ask.system_prompt.contains("read-only analyst"));
+
+        validate_sirix_config(&config).expect("seeded preset catalog should validate");
+    }
+
+    #[test]
+    fn global_agents_are_persisted_under_sirix_home_agents() {
+        let root = env::temp_dir().join(format!("sirix-agent-files-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let mut config = SirixConfig::default();
+        let mut custom = test_agent("", "", "Review carefully.");
+        custom.id = "custom-reviewer".to_string();
+        custom.name = "Custom Reviewer".to_string();
+        custom.sub_agents_enabled = false;
+        config.agents.push(custom);
+
+        store.save_global(&config).expect("global save should work");
+
+        let raw_config =
+            fs::read_to_string(store.config_path()).expect("config.toml should be readable");
+        assert!(
+            !raw_config.contains("[[agents]]"),
+            "agents should no longer be in config.toml"
+        );
+        assert!(
+            store
+                .global_agents_dir_path()
+                .join("custom-reviewer.toml")
+                .is_file(),
+            "custom agent should be written as an agent file"
+        );
+
+        let loaded = store.load_global().expect("global load should work");
+        assert!(loaded
+            .agents
+            .iter()
+            .any(|agent| agent.id == "custom-reviewer"));
+        assert!(loaded
+            .skills
+            .iter()
+            .any(|skill| skill.id == SIRIX_PRESET_AGENT_SKILL_ID));
+        assert!(loaded.skills.iter().any(|skill| skill.id == "debugger"));
+    }
+
+    #[test]
+    fn ensure_layout_writes_preset_agent_skill_docs() {
+        let root = env::temp_dir().join(format!("sirix-preset-skill-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        store.ensure_layout().expect("layout should be created");
+
+        let skill_dir = store.preset_agent_skill_dir_path();
+        let skill = fs::read_to_string(skill_dir.join("SKILL.md"))
+            .expect("preset routing skill should be written");
+        assert!(
+            skill.starts_with("---\nname: \"sirix-preset-agents\"\n"),
+            "preset routing skill should include Codex skill frontmatter"
+        );
+        assert!(skill.contains("Sirix Preset Agent Routing"));
+        assert!(skill_dir.join("agents").join("debugger.md").is_file());
+        let debugger_skill =
+            fs::read_to_string(sirix_home.join("skills").join("debugger").join("SKILL.md"))
+                .expect("debugger preset skill should be written");
+        assert!(
+            debugger_skill.starts_with("---\nname: \"debugger\"\n"),
+            "per-agent preset skill should be invokable by its agent id"
+        );
+        assert!(debugger_skill.contains("Agent `debugger`"));
+    }
+
     fn test_agent(provider_id: &str, model_id: &str, prompt: &str) -> AgentConfig {
         AgentConfig {
             id: "agent".to_string(),
@@ -4346,6 +5096,7 @@ mod tests {
             description: "Test agent".to_string(),
             provider_id: provider_id.to_string(),
             model_id: model_id.to_string(),
+            model_reasoning_effort: default_agent_reasoning_effort(),
             fallback_provider_id: String::new(),
             fallback_model_id: String::new(),
             system_prompt: prompt.to_string(),
@@ -4356,8 +5107,11 @@ mod tests {
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
+            skills_enabled: true,
             skill_ids: Vec::new(),
+            mcp_servers_enabled: true,
             mcp_server_ids: Vec::new(),
+            sub_agents_enabled: true,
             sub_agent_ids: Vec::new(),
             enabled: true,
             legacy_builtin_tools_enabled: None,
@@ -4367,6 +5121,43 @@ mod tests {
             legacy_disabled_mcp_server_ids: Vec::new(),
             legacy_capability_rules: Vec::new(),
         }
+    }
+
+    #[test]
+    fn agent_reasoning_effort_defaults_to_high_and_hides_known_unsupported_models() {
+        let mut agent = test_agent("provider", "model", "");
+        let unknown_support_model = ModelConfig {
+            id: "unknown".to_string(),
+            display_name: "Unknown".to_string(),
+            model_kind: ModelKind::Text,
+            context_window: None,
+            supports_images: false,
+            supported_reasoning_efforts: None,
+            enabled: true,
+        };
+        assert_eq!(
+            agent_model_reasoning_effort_for_model(&agent, &unknown_support_model),
+            Some("high".to_string())
+        );
+
+        let unsupported_model = ModelConfig {
+            supported_reasoning_efforts: Some(Vec::new()),
+            ..unknown_support_model
+        };
+        assert_eq!(
+            agent_model_reasoning_effort_for_model(&agent, &unsupported_model),
+            None
+        );
+
+        agent.model_reasoning_effort = "medium".to_string();
+        let supported_model = ModelConfig {
+            supported_reasoning_efforts: Some(vec!["low".to_string(), "medium".to_string()]),
+            ..unsupported_model
+        };
+        assert_eq!(
+            agent_model_reasoning_effort_for_model(&agent, &supported_model),
+            Some("medium".to_string())
+        );
     }
 
     #[test]
@@ -4420,6 +5211,7 @@ mod tests {
             description: "Default Sirix coding agent.".to_string(),
             provider_id: DEFAULT_PROVIDER_ID.to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
+            model_reasoning_effort: default_agent_reasoning_effort(),
             fallback_provider_id: String::new(),
             fallback_model_id: String::new(),
             system_prompt: "legacy override".to_string(),
@@ -4430,8 +5222,11 @@ mod tests {
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: vec!["shell".to_string()],
+            skills_enabled: true,
             skill_ids: vec!["skill-a".to_string()],
+            mcp_servers_enabled: true,
             mcp_server_ids: vec!["mcp-a".to_string()],
+            sub_agents_enabled: true,
             sub_agent_ids: vec!["reviewer".to_string()],
             enabled: false,
             legacy_builtin_tools_enabled: None,
@@ -4524,6 +5319,7 @@ args = ["serve"]
             description: "Review-focused Sirix agent.".to_string(),
             provider_id: DEFAULT_PROVIDER_ID.to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
+            model_reasoning_effort: default_agent_reasoning_effort(),
             fallback_provider_id: String::new(),
             fallback_model_id: String::new(),
             system_prompt: "Review carefully".to_string(),
@@ -4534,8 +5330,11 @@ args = ["serve"]
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
+            skills_enabled: true,
             skill_ids: vec![skill.id.clone()],
+            mcp_servers_enabled: true,
             mcp_server_ids: vec![mcp_server.id.clone()],
+            sub_agents_enabled: true,
             sub_agent_ids: Vec::new(),
             enabled: true,
             legacy_builtin_tools_enabled: None,
@@ -4551,6 +5350,7 @@ args = ["serve"]
             description: DEFAULT_AGENT_DESCRIPTION.to_string(),
             provider_id: DEFAULT_PROVIDER_ID.to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
+            model_reasoning_effort: default_agent_reasoning_effort(),
             fallback_provider_id: String::new(),
             fallback_model_id: String::new(),
             system_prompt: String::new(),
@@ -4561,8 +5361,11 @@ args = ["serve"]
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
+            skills_enabled: true,
             skill_ids: Vec::new(),
+            mcp_servers_enabled: true,
             mcp_server_ids: Vec::new(),
+            sub_agents_enabled: true,
             sub_agent_ids: vec![reviewer.id.clone()],
             enabled: true,
             legacy_builtin_tools_enabled: None,
@@ -4633,6 +5436,203 @@ args = ["serve"]
     }
 
     #[test]
+    fn agent_resource_switches_support_all_allowlist_and_disabled_modes() {
+        let mut agent = test_agent("", "", "inherits defaults");
+        let mut helper = test_agent("", "", "helper");
+        helper.id = "helper".to_string();
+        helper.name = "Helper".to_string();
+        let config = SirixConfig {
+            agents: vec![agent.clone(), helper.clone()],
+            ..SirixConfig::default()
+        };
+
+        assert!(
+            resolve_agent_model(&config, &agent).is_some(),
+            "empty provider/model should inherit the CLI default model"
+        );
+        assert!(
+            agent_allows_skill(&agent, "any-skill"),
+            "enabled empty skill allowlist means all available skills"
+        );
+        assert!(
+            agent_allows_mcp_server(&agent, "any-mcp"),
+            "enabled empty MCP allowlist means all available servers"
+        );
+        assert_eq!(selected_agent_sub_agents(&config, &agent).len(), 1);
+
+        agent.skills_enabled = false;
+        agent.mcp_servers_enabled = false;
+        agent.sub_agents_enabled = false;
+        assert!(!agent_allows_skill(&agent, "any-skill"));
+        assert!(!agent_allows_mcp_server(&agent, "any-mcp"));
+        assert!(selected_agent_sub_agents(&config, &agent).is_empty());
+
+        agent.skills_enabled = true;
+        agent.skill_ids = vec!["allowed-skill".to_string()];
+        agent.mcp_servers_enabled = true;
+        agent.mcp_server_ids = vec!["allowed-mcp".to_string()];
+        assert!(agent_allows_skill(&agent, "allowed-skill"));
+        assert!(!agent_allows_skill(&agent, "other-skill"));
+        assert!(agent_allows_mcp_server(&agent, "allowed-mcp"));
+        assert!(!agent_allows_mcp_server(&agent, "other-mcp"));
+    }
+
+    #[test]
+    fn agent_model_resolution_falls_back_to_cli_default_for_empty_or_stale_model() {
+        let glm_provider = ProviderConfig {
+            id: "glm".to_string(),
+            name: "GLM".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            default_context_window: Some(128_000),
+            base_url: "https://glm.example/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "glm-4.5".to_string(),
+                display_name: "GLM 4.5".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: None,
+                supports_images: true,
+                supported_reasoning_efforts: None,
+                enabled: true,
+            }],
+        };
+        let openai_provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(200_000),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "gpt-5.4".to_string(),
+                display_name: "GPT-5.4".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: None,
+                supports_images: true,
+                supported_reasoning_efforts: None,
+                enabled: true,
+            }],
+        };
+        let codex = test_agent("openai", "gpt-5.4", "");
+        let mut stale_config_agent = test_agent("removed-provider", "removed-model", "stale");
+        stale_config_agent.id = "stale-agent".to_string();
+        let config = SirixConfig {
+            providers: vec![glm_provider, openai_provider],
+            agents: vec![
+                AgentConfig {
+                    id: DEFAULT_AGENT_ID.to_string(),
+                    name: DEFAULT_AGENT_NAME.to_string(),
+                    ..codex
+                },
+                stale_config_agent,
+            ],
+            ..SirixConfig::default()
+        };
+        let empty_agent = test_agent("", "", "empty");
+        let stale_agent = test_agent("removed-provider", "removed-model", "stale");
+
+        let empty_resolved = resolve_agent_model(&config, &empty_agent)
+            .expect("empty agent model should resolve through CLI default");
+        assert_eq!(empty_resolved.0.id, "openai");
+        assert_eq!(empty_resolved.1.id, "gpt-5.4");
+
+        let stale_resolved = resolve_agent_model(&config, &stale_agent)
+            .expect("stale agent model should resolve through CLI default");
+        assert_eq!(stale_resolved.0.id, "openai");
+        assert_eq!(stale_resolved.1.id, "gpt-5.4");
+        validate_sirix_config(&config)
+            .expect("stale primary agent models should not invalidate config");
+    }
+
+    #[test]
+    fn workspace_default_agent_overrides_global_cli_default() {
+        let mut global = SirixConfig::default();
+        let mut specialist = test_agent("", "", "workspace default");
+        specialist.id = "workspace-default".to_string();
+        specialist.name = "Workspace Default".to_string();
+        global.agents.push(specialist.clone());
+        global.default_agent_id = DEFAULT_AGENT_ID.to_string();
+
+        let overlay = SirixConfig {
+            default_agent_id: specialist.id.clone(),
+            ..SirixConfig::default()
+        };
+        let merged = merge_sirix_config(global, overlay);
+        assert_eq!(merged.default_agent_id, specialist.id);
+
+        let resolved = resolve_agent(&merged, None).expect("default agent should resolve");
+        assert_eq!(resolved.id, "workspace-default");
+
+        let explicit = resolve_agent(&merged, Some(DEFAULT_AGENT_ID))
+            .expect("explicit agent should still override configured default");
+        assert_eq!(explicit.id, DEFAULT_AGENT_ID);
+    }
+
+    #[test]
+    fn workspace_empty_default_agent_id_keeps_inheriting_global_default() {
+        let root = env::temp_dir().join(format!("sirix-workspace-default-{}", Uuid::new_v4()));
+        let sirix_home = root.join("home");
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).expect("workspace dir should exist");
+
+        let store = SirixConfigStore {
+            sirix_home: sirix_home.clone(),
+            config_path: sirix_home.join("config.toml"),
+        };
+
+        let mut global = SirixConfig::default();
+        let mut specialist = test_agent("", "", "global default");
+        specialist.id = "global-default".to_string();
+        specialist.name = "Global Default".to_string();
+        global.agents.push(specialist.clone());
+        global.default_agent_id = specialist.id.clone();
+        store
+            .save_global(&global)
+            .expect("global config should be persisted");
+
+        store
+            .save_workspace_editable_config(
+                workspace_dir.as_path(),
+                &WorkspaceEditableConfig {
+                    version: global.version,
+                    // Empty is an explicit overlay sentinel meaning "inherit
+                    // Global"; loading the workspace must not normalize it to
+                    // `codex`, or a no-op Workspace save would pin the wrong
+                    // default Agent.
+                    default_agent_id: String::new(),
+                    ..WorkspaceEditableConfig::default()
+                },
+            )
+            .expect("workspace overlay should save");
+
+        let loaded = store
+            .load_workspace_config(workspace_dir.as_path())
+            .expect("workspace config should load")
+            .expect("workspace config should exist");
+        assert_eq!(loaded.default_agent_id, "");
+
+        let snapshot = store
+            .workspace_settings_snapshot(workspace_dir.as_path())
+            .expect("workspace snapshot should load");
+        assert_eq!(snapshot.editable_config.default_agent_id, "");
+        assert_eq!(snapshot.effective_config.default_agent_id, specialist.id);
+        assert_eq!(
+            resolve_agent(&snapshot.effective_config, None)
+                .expect("effective default should resolve")
+                .id,
+            specialist.id
+        );
+
+        fs::remove_dir_all(&root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
     fn bridge_targets_sirix_session_proxy_provider() {
         let ai_session_id =
             Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid should parse");
@@ -4652,6 +5652,7 @@ args = ["serve"]
                 model_kind: ModelKind::Text,
                 context_window: None,
                 supports_images: false,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };
@@ -4698,6 +5699,93 @@ args = ["serve"]
     }
 
     #[test]
+    fn bridge_writes_agent_reasoning_effort_only_when_model_allows_or_unknown() {
+        let ai_session_id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid should parse");
+        let provider = ProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            kind: ProviderKind::OpenAiResponses,
+            default_context_window: Some(200_000),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![
+                ModelConfig {
+                    id: "unknown-reasoning".to_string(),
+                    display_name: "Unknown reasoning".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: None,
+                    supports_images: false,
+                    supported_reasoning_efforts: None,
+                    enabled: true,
+                },
+                ModelConfig {
+                    id: "no-reasoning".to_string(),
+                    display_name: "No reasoning".to_string(),
+                    model_kind: ModelKind::Text,
+                    context_window: None,
+                    supports_images: false,
+                    supported_reasoning_efforts: Some(Vec::new()),
+                    enabled: true,
+                },
+            ],
+        };
+        let mut agent = test_agent("openai", "unknown-reasoning", "");
+        agent.model_reasoning_effort = "high".to_string();
+        let launch = AiLaunchConfig {
+            effective_config: SirixConfig::default(),
+            agent: agent.clone(),
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider.clone()],
+            codex_home: PathBuf::from("/tmp/.sirix"),
+            session_storage_dir: unique_session_storage_dir("reasoning-unknown"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        };
+
+        let unknown_config = build_codex_bridge_toml(
+            SirixConfig::default(),
+            &launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            ai_session_id,
+        )
+        .expect("bridge config should build");
+        assert_eq!(
+            unknown_config
+                .get("model_reasoning_effort")
+                .and_then(TomlValue::as_str),
+            Some("high")
+        );
+
+        let unsupported_launch = AiLaunchConfig {
+            agent: AgentConfig {
+                model_id: "no-reasoning".to_string(),
+                ..agent
+            },
+            model: provider.models[1].clone(),
+            session_storage_dir: unique_session_storage_dir("reasoning-unsupported"),
+            ..launch
+        };
+        let unsupported_config = build_codex_bridge_toml(
+            SirixConfig::default(),
+            &unsupported_launch,
+            Path::new("/tmp/workspace"),
+            9701,
+            ai_session_id,
+        )
+        .expect("bridge config should build");
+        assert!(
+            unsupported_config.get("model_reasoning_effort").is_none(),
+            "known unsupported models should not receive a forced reasoning effort"
+        );
+    }
+
+    #[test]
     fn bridge_models_use_provider_scoped_alias_for_duplicate_slugs() {
         let active = ProviderConfig {
             id: "openai-codex-oauth".to_string(),
@@ -4715,6 +5803,7 @@ args = ["serve"]
                 model_kind: ModelKind::Text,
                 context_window: Some(272_000),
                 supports_images: false,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };
@@ -4734,6 +5823,7 @@ args = ["serve"]
                 model_kind: ModelKind::Text,
                 context_window: Some(272_000),
                 supports_images: false,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };
@@ -4789,6 +5879,7 @@ args = ["serve"]
                     model_kind: ModelKind::Text,
                     context_window: None,
                     supports_images: true,
+                    supported_reasoning_efforts: None,
                     enabled: true,
                 },
                 ModelConfig {
@@ -4797,6 +5888,7 @@ args = ["serve"]
                     model_kind: ModelKind::Tts,
                     context_window: None,
                     supports_images: false,
+                    supported_reasoning_efforts: None,
                     enabled: true,
                 },
                 ModelConfig {
@@ -4805,6 +5897,7 @@ args = ["serve"]
                     model_kind: ModelKind::Text,
                     context_window: Some(128_000),
                     supports_images: false,
+                    supported_reasoning_efforts: None,
                     enabled: false,
                 },
             ],
@@ -4886,6 +5979,7 @@ args = ["serve"]
                 model_kind: ModelKind::Text,
                 context_window: None,
                 supports_images: false,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };
@@ -4906,6 +6000,7 @@ args = ["serve"]
                     model_kind: ModelKind::Text,
                     context_window: Some(400_000),
                     supports_images: true,
+                    supported_reasoning_efforts: None,
                     enabled: true,
                 },
                 ModelConfig {
@@ -4914,6 +6009,7 @@ args = ["serve"]
                     model_kind: ModelKind::Text,
                     context_window: Some(128_000),
                     supports_images: true,
+                    supported_reasoning_efforts: None,
                     enabled: true,
                 },
             ],
@@ -5288,6 +6384,7 @@ model = "gpt-5.4"
             description: "Global review agent".to_string(),
             provider_id: DEFAULT_PROVIDER_ID.to_string(),
             model_id: DEFAULT_MODEL_ID.to_string(),
+            model_reasoning_effort: default_agent_reasoning_effort(),
             fallback_provider_id: String::new(),
             fallback_model_id: String::new(),
             system_prompt: "Review globally".to_string(),
@@ -5298,8 +6395,11 @@ model = "gpt-5.4"
             skill_approvals: CapabilityRulesConfig::default(),
             mcp_approvals: CapabilityRulesConfig::default(),
             builtin_tool_ids: default_builtin_tool_ids(),
+            skills_enabled: true,
             skill_ids: vec!["review".to_string()],
+            mcp_servers_enabled: true,
             mcp_server_ids: vec!["docs".to_string()],
+            sub_agents_enabled: true,
             sub_agent_ids: Vec::new(),
             enabled: true,
             legacy_builtin_tools_enabled: None,
@@ -5358,6 +6458,7 @@ model = "gpt-5.4"
                     description: "Workspace override agent".to_string(),
                     provider_id: DEFAULT_PROVIDER_ID.to_string(),
                     model_id: DEFAULT_MODEL_ID.to_string(),
+                    model_reasoning_effort: default_agent_reasoning_effort(),
                     fallback_provider_id: String::new(),
                     fallback_model_id: String::new(),
                     system_prompt: "Review locally".to_string(),
@@ -5368,8 +6469,11 @@ model = "gpt-5.4"
                     skill_approvals: CapabilityRulesConfig::default(),
                     mcp_approvals: CapabilityRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tool_ids(),
+                    skills_enabled: true,
                     skill_ids: vec!["review".to_string(), "workspace-helper".to_string()],
+                    mcp_servers_enabled: true,
                     mcp_server_ids: vec!["docs".to_string(), "workspace-docs".to_string()],
+                    sub_agents_enabled: true,
                     sub_agent_ids: Vec::new(),
                     enabled: true,
                     legacy_builtin_tools_enabled: None,
@@ -5385,6 +6489,7 @@ model = "gpt-5.4"
                     description: "Workspace-only helper".to_string(),
                     provider_id: DEFAULT_PROVIDER_ID.to_string(),
                     model_id: DEFAULT_MODEL_ID.to_string(),
+                    model_reasoning_effort: default_agent_reasoning_effort(),
                     fallback_provider_id: String::new(),
                     fallback_model_id: String::new(),
                     system_prompt: "Help locally".to_string(),
@@ -5395,8 +6500,11 @@ model = "gpt-5.4"
                     skill_approvals: CapabilityRulesConfig::default(),
                     mcp_approvals: CapabilityRulesConfig::default(),
                     builtin_tool_ids: default_builtin_tool_ids(),
+                    skills_enabled: true,
                     skill_ids: vec!["workspace-helper".to_string()],
+                    mcp_servers_enabled: true,
                     mcp_server_ids: vec!["workspace-docs".to_string()],
+                    sub_agents_enabled: true,
                     sub_agent_ids: Vec::new(),
                     enabled: true,
                     legacy_builtin_tools_enabled: None,
@@ -5418,7 +6526,10 @@ model = "gpt-5.4"
             )
             .expect("workspace settings should save");
 
-        assert_eq!(snapshot.effective_config.skills.len(), 2);
+        assert!(
+            snapshot.effective_config.skills.len() >= 2,
+            "effective config may include Sirix preset skills in addition to test skills"
+        );
         assert_eq!(
             snapshot
                 .effective_config
@@ -5553,6 +6664,7 @@ model = "gpt-5.4"
                 model_kind: ModelKind::Text,
                 context_window: None,
                 supports_images: true,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };
@@ -5581,6 +6693,7 @@ model = "gpt-5.4"
                 model_kind: ModelKind::Text,
                 context_window: Some(320_000),
                 supports_images: true,
+                supported_reasoning_efforts: None,
                 enabled: true,
             }],
         };

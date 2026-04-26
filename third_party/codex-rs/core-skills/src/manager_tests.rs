@@ -21,6 +21,14 @@ fn write_user_skill(codex_home: &TempDir, dir: &str, name: &str, description: &s
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 }
 
+fn write_skill_dir(root: &TempDir, dir: &str, name: &str, description: &str) -> PathBuf {
+    let skill_dir = root.path().join(dir);
+    fs::create_dir_all(&skill_dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
+    fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    skill_dir
+}
+
 fn write_plugin_skill(
     codex_home: &TempDir,
     marketplace: &str,
@@ -217,6 +225,76 @@ async fn skills_for_config_disables_plugin_skills_by_name() {
     let skill_path = dunce::canonicalize(skill_path).expect("skill path should canonicalize");
 
     assert_eq!(skill.path_to_skills_md, skill_path);
+    assert!(outcome.disabled_paths.contains(&skill.path_to_skills_md));
+    assert!(
+        !outcome
+            .allowed_skills_for_implicit_invocation()
+            .iter()
+            .any(|allowed_skill| allowed_skill.path_to_skills_md == skill.path_to_skills_md)
+    );
+}
+
+#[tokio::test]
+async fn skills_for_config_loads_explicit_skill_directory_from_config() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let external_skills = tempfile::tempdir().expect("tempdir");
+    let skill_dir = write_skill_dir(
+        &external_skills,
+        "sirix-debugger",
+        "debugger",
+        "Sirix debugger preset",
+    );
+    let config_layer_stack = config_stack(
+        &codex_home,
+        &path_toggle_config(&skill_dir, /*enabled*/ true),
+    );
+    let skills_manager = SkillsManager::new(
+        codex_home.path().to_path_buf(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let outcome = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
+    let skill = outcome
+        .skills
+        .iter()
+        .find(|skill| skill.name == "debugger")
+        .expect("configured external skill directory should load");
+
+    assert_eq!(
+        skill.path_to_skills_md,
+        dunce::canonicalize(skill_dir.join("SKILL.md")).expect("skill path should canonicalize")
+    );
+    assert!(!outcome.disabled_paths.contains(&skill.path_to_skills_md));
+}
+
+#[tokio::test]
+async fn skills_for_config_disables_explicit_skill_directory_from_config() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    let external_skills = tempfile::tempdir().expect("tempdir");
+    let skill_dir = write_skill_dir(
+        &external_skills,
+        "sirix-reviewer",
+        "code-review-lite",
+        "Sirix review preset",
+    );
+    let config_layer_stack = config_stack(
+        &codex_home,
+        &path_toggle_config(&skill_dir, /*enabled*/ false),
+    );
+    let skills_manager = SkillsManager::new(
+        codex_home.path().to_path_buf(),
+        /*bundled_skills_enabled*/ true,
+    );
+
+    let outcome = skills_for_config_with_stack(&skills_manager, &cwd, &config_layer_stack, &[]);
+    let skill = outcome
+        .skills
+        .iter()
+        .find(|skill| skill.name == "code-review-lite")
+        .expect("configured external skill directory should still load when disabled");
+
     assert!(outcome.disabled_paths.contains(&skill.path_to_skills_md));
     assert!(
         !outcome

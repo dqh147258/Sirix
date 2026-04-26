@@ -42,6 +42,7 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
+use crate::multi_agents::subagent_role_prompt_prefix;
 use crate::pager_overlay::Overlay;
 use crate::read_session_model;
 use crate::render::highlight::highlight_bash_to_lines;
@@ -50,6 +51,7 @@ use crate::resume_picker::SessionSelection;
 use crate::sirix_local_api;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
+use crate::text_formatting::truncate_text;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
@@ -1011,6 +1013,10 @@ async fn handle_model_migration_prompt_if_needed(
     }
 
     None
+}
+
+fn first_non_empty_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
 pub(crate) struct App {
@@ -3144,6 +3150,84 @@ impl App {
             footer_hint: Some(standard_popup_hint_line()),
             ..Default::default()
         });
+    }
+
+    fn open_subagent_role_picker(&mut self) {
+        if self.config.agent_roles.is_empty() {
+            self.chat_widget.add_info_message(
+                "No Sirix sub-agents are available for the current Agent.".to_string(),
+                Some("Enable sub-agents on this Agent, or add allowed sub-agent ids in Agent settings.".to_string()),
+            );
+            return;
+        }
+
+        let items = self
+            .config
+            .agent_roles
+            .iter()
+            .map(|(role_name, role)| {
+                let role_name_for_action = role_name.clone();
+                let description = role
+                    .description
+                    .as_deref()
+                    .and_then(first_non_empty_line)
+                    .map(|line| truncate_text(line, 96));
+                let selected_description = role.description.clone();
+                let search_value = role
+                    .description
+                    .as_ref()
+                    .map(|description| format!("{role_name} {description}"))
+                    .unwrap_or_else(|| role_name.clone());
+                SelectionItem {
+                    name: role_name.clone(),
+                    description,
+                    selected_description,
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SelectSubAgentRole(role_name_for_action.clone()));
+                    })],
+                    dismiss_on_select: true,
+                    search_value: Some(search_value),
+                    ..Default::default()
+                }
+            })
+            .collect::<Vec<_>>();
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Dispatch Sirix Sub-agent".to_string()),
+            subtitle: Some(
+                "Choose a role; Sirix will prefill /subagent <role> for the next task.".to_string(),
+            ),
+            footer_hint: Some(standard_popup_hint_line()),
+            is_searchable: true,
+            search_placeholder: Some("Search sub-agents".to_string()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    fn prefill_subagent_role_prompt(&mut self, role_name: String) {
+        if !self.config.agent_roles.contains_key(role_name.as_str()) {
+            self.chat_widget.add_error_message(format!(
+                "Unknown or unavailable Sirix sub-agent role `{role_name}`. Use /subagent to refresh the current list."
+            ));
+            return;
+        }
+
+        let prefix = subagent_role_prompt_prefix(role_name.as_str());
+        let existing = self.chat_widget.composer_text_with_pending();
+        let existing_trimmed = existing.trim_start();
+        let next_text = if existing_trimmed.is_empty() || existing_trimmed.starts_with("/subagent")
+        {
+            prefix
+        } else {
+            // Preserve a plain-text draft when the user typed the task before opening the picker.
+            // Rich mention/image bindings are intentionally not preserved here because `/subagent`
+            // is a command prefill, and stale element ranges would point at the wrong bytes after
+            // inserting the command prefix.
+            format!("{prefix}{existing_trimmed}")
+        };
+        self.chat_widget
+            .set_composer_text(next_text, Vec::new(), Vec::new());
     }
 
     /// Opens the `/agent` picker after refreshing cached labels for known threads.
@@ -5698,6 +5782,16 @@ impl App {
                                 "Failed to reload Sirix config after switching agent: {err}"
                             ));
                         }
+                        // Switching Sirix Agents rewrites the bridge config, including the
+                        // `[agents.<role>]` table used by /subagent. Refresh the TUI copy as well
+                        // so the picker always reflects the newly-current Agent rather than the
+                        // launch-time role list.
+                        if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                            tracing::warn!(
+                                error = %err,
+                                "failed to refresh config after switching Sirix agent"
+                            );
+                        }
                         self.chat_widget
                             .submit_op(AppCommand::override_turn_context(
                                 /*cwd*/ None,
@@ -5731,6 +5825,12 @@ impl App {
                             .add_error_message(format!("Failed to switch Sirix agent: {err}"));
                     }
                 }
+            }
+            AppEvent::OpenSubAgentRolePicker => {
+                self.open_subagent_role_picker();
+            }
+            AppEvent::SelectSubAgentRole(role_name) => {
+                self.prefill_subagent_role_prompt(role_name);
             }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;

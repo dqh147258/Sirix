@@ -768,3 +768,66 @@ async fn compact_queues_user_messages_snapshot() {
         normalize_snapshot_paths(term.backend().vt100().screen().contents())
     );
 }
+#[tokio::test]
+async fn slash_subagent_opens_role_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::SubAgent);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenSubAgentRolePicker));
+}
+
+#[tokio::test]
+async fn slash_subagent_inline_submits_spawn_instruction() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.config.agent_roles.insert(
+        "reviewer".to_string(),
+        codex_core::config::AgentRoleConfig {
+            description: Some("Review code changes".to_string()),
+            config_file: None,
+            nickname_candidates: None,
+        },
+    );
+    let conversation_id = ThreadId::new();
+    let rollout_file = NamedTempFile::new().unwrap();
+    chat.handle_codex_event(Event {
+        id: "initial".into(),
+        msg: EventMsg::SessionConfigured(codex_protocol::protocol::SessionConfiguredEvent {
+            session_id: conversation_id,
+            forked_from_id: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: ApprovalsReviewer::User,
+            sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            cwd: PathBuf::from("/home/user/project"),
+            reasoning_effort: Some(ReasoningEffortConfig::default()),
+            history_log_id: 0,
+            history_entry_count: 0,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: Some(rollout_file.path().to_path_buf()),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    chat.bottom_pane.set_composer_text(
+        "/subagent reviewer inspect the staged diff".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn { items, .. } => {
+            let [UserInput::Text { text, .. }] = items.as_slice() else {
+                panic!("expected a single text input, got {items:?}");
+            };
+            assert!(text.contains("`reviewer` sub-agent"));
+            assert!(text.contains("inspect the staged diff"));
+        }
+        other => panic!("expected user turn, got {other:?}"),
+    }
+}

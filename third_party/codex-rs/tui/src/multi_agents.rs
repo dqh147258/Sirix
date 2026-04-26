@@ -88,6 +88,49 @@ pub(crate) fn format_agent_picker_item_name(
     }
 }
 
+/// Prefix inserted into the composer after a `/subagent` picker selection.
+///
+/// Keeping the visible draft as a slash command makes the routing decision explicit to users: the
+/// next Enter submit will be parsed by the TUI and converted into an instruction to spawn the
+/// selected Sirix sub-agent role.
+pub(crate) fn subagent_role_prompt_prefix(role_name: &str) -> String {
+    format!("/subagent {} ", role_name.trim())
+}
+
+/// Parse `/subagent <role> <task>` arguments into a role id and task text.
+///
+/// Sirix/Codex agent role identifiers are single tokens (for example `debugger` or
+/// `code-reviewer`), so the first whitespace-separated token is the role and the rest is the task
+/// passed to the parent agent as a spawn instruction.
+pub(crate) fn parse_subagent_role_command_args(args: &str) -> Result<(&str, &str), &'static str> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Err("Usage: /subagent <role> <task>");
+    }
+
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let role_name = parts.next().unwrap_or_default().trim();
+    let task = parts.next().unwrap_or_default().trim();
+    if role_name.is_empty() || task.is_empty() {
+        return Err("Add a task after the sub-agent role: /subagent <role> <task>");
+    }
+
+    Ok((role_name, task))
+}
+
+/// Convert a parsed `/subagent` command into the user turn sent to the parent model.
+///
+/// The actual spawn still flows through Codex's native `spawn_agent` tool. This text intentionally
+/// tells the parent not to answer directly, because the picker represents a concrete routing choice
+/// made by the user rather than a loose suggestion.
+pub(crate) fn subagent_role_dispatch_prompt(role_name: &str, task: &str) -> String {
+    format!(
+        "Spawn the `{}` sub-agent for this task. Do not answer directly unless that sub-agent cannot be spawned. Task:\n{}",
+        role_name.trim(),
+        task.trim()
+    )
+}
+
 pub(crate) fn previous_agent_shortcut() -> crate::key_hint::KeyBinding {
     crate::key_hint::alt(KeyCode::Left)
 }
@@ -786,6 +829,27 @@ mod tests {
         });
 
         assert_snapshot!("collab_resume_interrupted", cell_to_text(&cell));
+    }
+
+    #[test]
+    fn parses_subagent_role_command_args() {
+        assert_eq!(
+            parse_subagent_role_command_args(" reviewer inspect the auth flow "),
+            Ok(("reviewer", "inspect the auth flow"))
+        );
+        assert!(parse_subagent_role_command_args("reviewer").is_err());
+        assert!(parse_subagent_role_command_args("   ").is_err());
+    }
+
+    #[test]
+    fn builds_visible_and_dispatch_subagent_prompts() {
+        assert_eq!(
+            subagent_role_prompt_prefix("debugger"),
+            "/subagent debugger "
+        );
+        let prompt = subagent_role_dispatch_prompt("debugger", "find the panic");
+        assert!(prompt.contains("`debugger` sub-agent"));
+        assert!(prompt.contains("find the panic"));
     }
 
     fn cell_to_text(cell: &PlainHistoryCell) -> String {

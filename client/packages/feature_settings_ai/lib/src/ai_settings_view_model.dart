@@ -11,6 +11,18 @@ import 'ai_settings_state.dart';
 const String _defaultAgentId = 'codex';
 const int _maxRecentWorkspaces = 50;
 
+const List<String> _defaultCodexSubAgentIds = [
+  'orchestrator',
+  'product-planner',
+  'implementation-planner',
+  'ask',
+  'code-searcher',
+  'bug-fix-coordinator',
+  'code-review-coordinator',
+  'senior-engineer',
+  'debugger',
+];
+
 class _WorkspaceSettingsPayload {
   const _WorkspaceSettingsPayload({
     required this.workspaceRoot,
@@ -353,16 +365,12 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
     final providers = state.config.providers
         .where((item) => item.id != providerId)
         .toList(growable: false);
-    final agents = state.config.agents
-        .where((item) => item.providerId != providerId)
-        .toList(growable: false);
     final nextStatuses = Map<String, OpenAiAuthStatus>.from(state.openAiAuthStatuses)
       ..remove(providerId);
     state = state.copyWith(
       config: _reconcileDefaultAgent(
         state.config.copyWith(
           providers: providers,
-          agents: agents,
         ),
         providerCatalog: providers,
       ),
@@ -569,14 +577,10 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
         else
           provider,
     ];
-    final agents = state.config.agents
-        .where((item) => !(item.providerId == providerId && item.modelId == modelId))
-        .toList(growable: false);
     state = state.copyWith(
       config: _reconcileDefaultAgent(
         state.config.copyWith(
           providers: providers,
-          agents: agents,
         ),
         providerCatalog: providers,
       ),
@@ -661,11 +665,18 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
 
   void upsertAgent(AgentConfigModel agent) {
     final next = _upsertById(state.config.agents, agent, (item) => item.id);
+    final updatedConfig = state.config.copyWith(agents: next);
     state = state.copyWith(
-      config: _reconcileDefaultAgent(
-        state.config.copyWith(agents: next),
-        providerCatalog: state.agentPickerProviders,
-      ),
+      // Workspace config is an overlay. Reconcile/synthesize the built-in
+      // `codex` Agent only for global Provider/Model settings; doing it while
+      // editing a workspace Agent would create a stale workspace `codex`
+      // override even when the user only intended to add one local profile.
+      config: state.isWorkspaceScope
+          ? updatedConfig
+          : _reconcileDefaultAgent(
+              updatedConfig,
+              providerCatalog: state.agentPickerProviders,
+            ),
       clearError: true,
       clearNotice: true,
     );
@@ -683,11 +694,28 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
           subAgentIds: agent.subAgentIds.where((item) => item != agentId).toList(growable: false),
         ),
     ];
+    final updatedConfig = state.config.copyWith(
+      defaultAgentId: state.config.defaultAgentId == agentId ? '' : state.config.defaultAgentId,
+      agents: cleanedAgents,
+    );
     state = state.copyWith(
-      config: _reconcileDefaultAgent(
-        state.config.copyWith(agents: cleanedAgents),
-        providerCatalog: state.agentPickerProviders,
-      ),
+      config: state.isWorkspaceScope
+          ? updatedConfig
+          : _reconcileDefaultAgent(
+              updatedConfig,
+              providerCatalog: state.agentPickerProviders,
+            ),
+      clearError: true,
+      clearNotice: true,
+    );
+  }
+
+  void setDefaultAgent(String agentId) {
+    if (!state.visibleAgents.any((agent) => agent.id == agentId && agent.enabled)) {
+      return;
+    }
+    state = state.copyWith(
+      config: state.config.copyWith(defaultAgentId: agentId),
       clearError: true,
       clearNotice: true,
     );
@@ -787,9 +815,16 @@ class AiSettingsViewModel extends BaseViewModel<AiSettingsState> {
       enabled: true,
       systemPrompt: '',
       builtinToolIds: kBuiltinToolCatalog,
+      // Preserve user-edited Codex delegation on existing configs, but only
+      // synthesize references to specialist roles that are present in this
+      // catalog so older/custom configs never get dangling sub-agent IDs.
+      subAgentIds: existingDefaultAgent?.subAgentIds ??
+          _availableDefaultCodexSubAgentIds(otherAgents),
     );
 
-    return config.copyWith(agents: [defaultAgent, ...otherAgents]);
+    return config.copyWith(
+      agents: [defaultAgent, ...otherAgents],
+    );
   }
 
   AgentConfigModel _buildDefaultAgent() {
@@ -928,6 +963,13 @@ List<T> _upsertById<T>(
   return next;
 }
 
+List<String> _availableDefaultCodexSubAgentIds(List<AgentConfigModel> agents) {
+  final availableIds = agents.map((agent) => agent.id).toSet();
+  return _defaultCodexSubAgentIds
+      .where(availableIds.contains)
+      .toList(growable: false);
+}
+
 T? _firstWhereOrNull<T>(Iterable<T> items, bool Function(T) test) {
   for (final item in items) {
     if (test(item)) {
@@ -947,6 +989,7 @@ AiSettingsSection _defaultSectionForScope(AiSettingsScope scope) {
 WorkspaceEditableAiConfig _projectWorkspaceEditableConfig(SirixAiConfig config) {
   return WorkspaceEditableAiConfig(
     version: config.version,
+    defaultAgentId: config.defaultAgentId,
     skills: config.skills,
     mcp: config.mcp,
     builtinApprovals: config.builtinApprovals,

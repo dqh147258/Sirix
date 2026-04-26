@@ -31,7 +31,7 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
-fn spawn_agent_tool_v2_requires_task_name_and_omits_model_override() {
+fn spawn_agent_tool_v2_requires_task_name_and_omits_model_and_reasoning_overrides() {
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: &[
             model_preset("visible", /*show_in_picker*/ true),
@@ -66,7 +66,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_omits_model_override() {
     assert!(properties.contains_key("message"));
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("model"));
-    assert!(properties.contains_key("reasoning_effort"));
+    assert!(!properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
     assert_eq!(

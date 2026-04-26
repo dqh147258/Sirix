@@ -5155,6 +5155,9 @@ impl ChatWidget {
             SlashCommand::Agent => {
                 self.app_event_tx.send(AppEvent::OpenSirixAgentPicker);
             }
+            SlashCommand::SubAgent => {
+                self.app_event_tx.send(AppEvent::OpenSubAgentRolePicker);
+            }
             SlashCommand::MultiAgents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
@@ -5501,6 +5504,53 @@ impl ChatWidget {
                     user_facing_hint: None,
                 }));
                 self.bottom_pane.drain_pending_submission_state();
+            }
+            SlashCommand::SubAgent if !trimmed.is_empty() => {
+                let Some((prepared_args, _prepared_elements)) = self
+                    .bottom_pane
+                    .prepare_inline_args_submission(/*record_history*/ true)
+                else {
+                    return;
+                };
+                let (role_name, task) =
+                    match multi_agents::parse_subagent_role_command_args(prepared_args.as_str()) {
+                        Ok(parsed) => parsed,
+                        Err(message) => {
+                            self.add_error_message(message.to_string());
+                            return;
+                        }
+                    };
+                if !self.config.agent_roles.contains_key(role_name) {
+                    self.add_error_message(format!(
+                        "Unknown or unavailable Sirix sub-agent role `{role_name}`. Use /subagent to choose one of the current Agent's allowed sub-agents."
+                    ));
+                    return;
+                }
+
+                // `/subagent` is a user-facing routing shortcut, not a separate core op. Keep the
+                // actual delegation on Codex's native multi-agent path by submitting an explicit
+                // spawn instruction to the parent thread; the configured `agent_roles` table then
+                // constrains which role the model/tool can use.
+                let dispatch_text = multi_agents::subagent_role_dispatch_prompt(role_name, task);
+                let local_images = self
+                    .bottom_pane
+                    .take_recent_submission_images_with_placeholders();
+                let remote_image_urls = self.take_remote_image_urls();
+                let user_message = UserMessage {
+                    text: dispatch_text,
+                    local_images,
+                    remote_image_urls,
+                    text_elements: Vec::new(),
+                    mention_bindings: self.bottom_pane.take_recent_submission_mention_bindings(),
+                };
+                if self.is_session_configured() {
+                    self.reasoning_buffer.clear();
+                    self.full_reasoning_buffer.clear();
+                    self.set_status_header(String::from("Working"));
+                    self.submit_user_message(user_message);
+                } else {
+                    self.queue_user_message(user_message);
+                }
             }
             SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
                 let Some((prepared_args, _prepared_elements)) = self
@@ -10793,6 +10843,10 @@ impl ChatWidget {
         self.config.features = config.features.clone();
         self.config.config_layer_stack = config.config_layer_stack.clone();
         self.config.realtime = config.realtime.clone();
+        // `/subagent <role> ...` validation happens inside ChatWidget, while the picker is built
+        // at the App layer. Keep both copies aligned after Sirix rewrites the bridge config during
+        // an Agent switch so a freshly-selected role is not rejected by stale launch-time config.
+        self.config.agent_roles = config.agent_roles.clone();
     }
 
     pub(crate) fn open_review_popup(&mut self) {

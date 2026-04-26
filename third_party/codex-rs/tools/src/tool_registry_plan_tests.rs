@@ -180,6 +180,7 @@ fn test_build_specs_collab_tools_enabled() {
     let (properties, _) = expect_object_schema(parameters);
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    assert!(!properties.contains_key("reasoning_effort"));
 }
 
 #[test]
@@ -233,6 +234,7 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
+    assert!(!properties.contains_key("reasoning_effort"));
     assert_eq!(
         required,
         Some(&vec!["task_name".to_string(), "message".to_string()])

@@ -315,6 +315,7 @@ class AiModelConfig {
     required this.modelKind,
     this.contextWindow,
     this.supportsImages = false,
+    this.supportedReasoningEfforts,
     this.enabled = true,
   });
 
@@ -323,6 +324,9 @@ class AiModelConfig {
   final ModelKind modelKind;
   final int? contextWindow;
   final bool supportsImages;
+  /// Null means the backend cannot determine support; an empty list means the
+  /// model is known not to support reasoning-effort selection.
+  final List<String>? supportedReasoningEfforts;
   final bool enabled;
 
   factory AiModelConfig.fromJson(Map<String, dynamic> json) {
@@ -332,6 +336,9 @@ class AiModelConfig {
       modelKind: modelKindFromJson(json['model_kind'] as String?),
       contextWindow: (json['context_window'] as num?)?.toInt(),
       supportsImages: json['supports_images'] as bool? ?? false,
+      supportedReasoningEfforts: (json['supported_reasoning_efforts'] as List<dynamic>?)
+          ?.whereType<String>()
+          .toList(growable: false),
       enabled: json['enabled'] as bool? ?? true,
     );
   }
@@ -343,6 +350,8 @@ class AiModelConfig {
       'model_kind': _modelKindJson(modelKind),
       'context_window': contextWindow,
       'supports_images': supportsImages,
+      if (supportedReasoningEfforts != null)
+        'supported_reasoning_efforts': supportedReasoningEfforts,
       'enabled': enabled,
     };
   }
@@ -353,6 +362,7 @@ class AiModelConfig {
     ModelKind? modelKind,
     Object? contextWindow = _unset,
     bool? supportsImages,
+    Object? supportedReasoningEfforts = _unset,
     bool? enabled,
   }) {
     return AiModelConfig(
@@ -361,6 +371,9 @@ class AiModelConfig {
       modelKind: modelKind ?? this.modelKind,
       contextWindow: identical(contextWindow, _unset) ? this.contextWindow : contextWindow as int?,
       supportsImages: supportsImages ?? this.supportsImages,
+      supportedReasoningEfforts: identical(supportedReasoningEfforts, _unset)
+          ? this.supportedReasoningEfforts
+          : supportedReasoningEfforts as List<String>?,
       enabled: enabled ?? this.enabled,
     );
   }
@@ -710,6 +723,7 @@ class AgentConfigModel {
     this.description = '',
     required this.providerId,
     required this.modelId,
+    this.modelReasoningEffort = 'high',
     this.fallbackProviderId = '',
     this.fallbackModelId = '',
     this.systemPrompt = '',
@@ -720,8 +734,11 @@ class AgentConfigModel {
     this.skillApprovals = const CapabilityRulesConfigModel(),
     this.mcpApprovals = const CapabilityRulesConfigModel(),
     this.builtinToolIds = kBuiltinToolCatalog,
+    this.skillsEnabled = true,
     this.skillIds = const [],
+    this.mcpServersEnabled = true,
     this.mcpServerIds = const [],
+    this.subAgentsEnabled = true,
     this.subAgentIds = const [],
     this.enabled = true,
   });
@@ -731,6 +748,7 @@ class AgentConfigModel {
   final String description;
   final String providerId;
   final String modelId;
+  final String modelReasoningEffort;
   final String fallbackProviderId;
   final String fallbackModelId;
   final String systemPrompt;
@@ -741,8 +759,11 @@ class AgentConfigModel {
   final CapabilityRulesConfigModel skillApprovals;
   final CapabilityRulesConfigModel mcpApprovals;
   final List<String> builtinToolIds;
+  final bool skillsEnabled;
   final List<String> skillIds;
+  final bool mcpServersEnabled;
   final List<String> mcpServerIds;
+  final bool subAgentsEnabled;
   final List<String> subAgentIds;
   final bool enabled;
 
@@ -766,6 +787,7 @@ class AgentConfigModel {
       description: json['description'] as String? ?? '',
       providerId: json['provider_id'] as String? ?? '',
       modelId: json['model_id'] as String? ?? '',
+      modelReasoningEffort: json['model_reasoning_effort'] as String? ?? 'high',
       fallbackProviderId: json['fallback_provider_id'] as String? ?? '',
       fallbackModelId: json['fallback_model_id'] as String? ?? '',
       systemPrompt: json['system_prompt'] as String? ?? '',
@@ -790,8 +812,11 @@ class AgentConfigModel {
               ? kBuiltinToolCatalog
               : const <String>[]
           : builtinToolIds,
+      skillsEnabled: json['skills_enabled'] as bool? ?? true,
       skillIds: skillIds,
+      mcpServersEnabled: json['mcp_servers_enabled'] as bool? ?? true,
       mcpServerIds: mcpServerIds,
+      subAgentsEnabled: json['sub_agents_enabled'] as bool? ?? true,
       subAgentIds: (json['sub_agent_ids'] as List<dynamic>? ?? const [])
           .whereType<String>()
           .toList(growable: false),
@@ -806,6 +831,7 @@ class AgentConfigModel {
       'description': description,
       'provider_id': providerId,
       'model_id': modelId,
+      'model_reasoning_effort': modelReasoningEffort,
       'fallback_provider_id': fallbackProviderId,
       'fallback_model_id': fallbackModelId,
       'system_prompt': systemPrompt,
@@ -816,8 +842,11 @@ class AgentConfigModel {
       'skill_approvals': skillApprovals.toJson(),
       'mcp_approvals': mcpApprovals.toJson(),
       'builtin_tool_ids': builtinToolIds,
+      'skills_enabled': skillsEnabled,
       'skill_ids': skillIds,
+      'mcp_servers_enabled': mcpServersEnabled,
       'mcp_server_ids': mcpServerIds,
+      'sub_agents_enabled': subAgentsEnabled,
       'sub_agent_ids': subAgentIds,
       'enabled': enabled,
     };
@@ -829,6 +858,7 @@ class AgentConfigModel {
     String? description,
     String? providerId,
     String? modelId,
+    String? modelReasoningEffort,
     String? fallbackProviderId,
     String? fallbackModelId,
     String? systemPrompt,
@@ -839,8 +869,11 @@ class AgentConfigModel {
     CapabilityRulesConfigModel? skillApprovals,
     CapabilityRulesConfigModel? mcpApprovals,
     List<String>? builtinToolIds,
+    bool? skillsEnabled,
     List<String>? skillIds,
+    bool? mcpServersEnabled,
     List<String>? mcpServerIds,
+    bool? subAgentsEnabled,
     List<String>? subAgentIds,
     bool? enabled,
   }) {
@@ -850,6 +883,7 @@ class AgentConfigModel {
       description: description ?? this.description,
       providerId: providerId ?? this.providerId,
       modelId: modelId ?? this.modelId,
+      modelReasoningEffort: modelReasoningEffort ?? this.modelReasoningEffort,
       fallbackProviderId: fallbackProviderId ?? this.fallbackProviderId,
       fallbackModelId: fallbackModelId ?? this.fallbackModelId,
       systemPrompt: systemPrompt ?? this.systemPrompt,
@@ -860,8 +894,11 @@ class AgentConfigModel {
       skillApprovals: skillApprovals ?? this.skillApprovals,
       mcpApprovals: mcpApprovals ?? this.mcpApprovals,
       builtinToolIds: builtinToolIds ?? this.builtinToolIds,
+      skillsEnabled: skillsEnabled ?? this.skillsEnabled,
       skillIds: skillIds ?? this.skillIds,
+      mcpServersEnabled: mcpServersEnabled ?? this.mcpServersEnabled,
       mcpServerIds: mcpServerIds ?? this.mcpServerIds,
+      subAgentsEnabled: subAgentsEnabled ?? this.subAgentsEnabled,
       subAgentIds: subAgentIds ?? this.subAgentIds,
       enabled: enabled ?? this.enabled,
     );
@@ -872,6 +909,7 @@ class AgentConfigModel {
 class SirixAiConfig {
   const SirixAiConfig({
     this.version = 1,
+    this.defaultAgentId = '',
     this.cli = const CliSettingsConfig(),
     this.providers = const [],
     this.skills = const [],
@@ -884,6 +922,7 @@ class SirixAiConfig {
   });
 
   final int version;
+  final String defaultAgentId;
   final CliSettingsConfig cli;
   final List<AiProviderConfig> providers;
   final List<SkillConfigModel> skills;
@@ -897,6 +936,7 @@ class SirixAiConfig {
   factory SirixAiConfig.fromJson(Map<String, dynamic> json) {
     return SirixAiConfig(
       version: (json['version'] as num?)?.toInt() ?? 1,
+      defaultAgentId: json['default_agent_id'] as String? ?? '',
       cli: CliSettingsConfig.fromJson(
         (json['cli'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
       ),
@@ -934,6 +974,7 @@ class SirixAiConfig {
   Map<String, dynamic> toJson() {
     return {
       'version': version,
+      'default_agent_id': defaultAgentId,
       'cli': cli.toJson(),
       'providers': providers.map((item) => item.toJson()).toList(growable: false),
       'skills': skills.map((item) => item.toJson()).toList(growable: false),
@@ -953,6 +994,7 @@ class SirixAiConfig {
   Map<String, dynamic> toWorkspaceOwnedJson() {
     return {
       'version': version,
+      'default_agent_id': defaultAgentId,
       'skills': skills.map((item) => item.toJson()).toList(growable: false),
       'mcp': mcp.toJson(),
       'builtin_approvals': builtinApprovals.toJson(),
@@ -965,6 +1007,7 @@ class SirixAiConfig {
 
   SirixAiConfig copyWith({
     int? version,
+    String? defaultAgentId,
     CliSettingsConfig? cli,
     List<AiProviderConfig>? providers,
     List<SkillConfigModel>? skills,
@@ -977,6 +1020,7 @@ class SirixAiConfig {
   }) {
     return SirixAiConfig(
       version: version ?? this.version,
+      defaultAgentId: defaultAgentId ?? this.defaultAgentId,
       cli: cli ?? this.cli,
       providers: providers ?? this.providers,
       skills: skills ?? this.skills,
@@ -1017,6 +1061,7 @@ class EffectiveSirixAiConfig {
 class WorkspaceEditableAiConfig {
   const WorkspaceEditableAiConfig({
     this.version = 1,
+    this.defaultAgentId = '',
     this.skills = const [],
     this.mcp = const McpGlobalConfigModel(),
     this.builtinApprovals = const CapabilityRulesConfigModel(),
@@ -1027,6 +1072,7 @@ class WorkspaceEditableAiConfig {
   });
 
   final int version;
+  final String defaultAgentId;
   final List<SkillConfigModel> skills;
   final McpGlobalConfigModel mcp;
   final CapabilityRulesConfigModel builtinApprovals;
@@ -1038,6 +1084,7 @@ class WorkspaceEditableAiConfig {
   factory WorkspaceEditableAiConfig.fromJson(Map<String, dynamic> json) {
     return WorkspaceEditableAiConfig(
       version: (json['version'] as num?)?.toInt() ?? 1,
+      defaultAgentId: json['default_agent_id'] as String? ?? '',
       skills: (json['skills'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(SkillConfigModel.fromJson)
@@ -1072,6 +1119,7 @@ class WorkspaceEditableAiConfig {
   Map<String, dynamic> toJson() {
     return {
       'version': version,
+      'default_agent_id': defaultAgentId,
       'skills': skills.map((item) => item.toJson()).toList(growable: false),
       'mcp': mcp.toJson(),
       'builtin_approvals': builtinApprovals.toJson(),
@@ -1084,6 +1132,7 @@ class WorkspaceEditableAiConfig {
 
   WorkspaceEditableAiConfig copyWith({
     int? version,
+    String? defaultAgentId,
     List<SkillConfigModel>? skills,
     McpGlobalConfigModel? mcp,
     CapabilityRulesConfigModel? builtinApprovals,
@@ -1094,6 +1143,7 @@ class WorkspaceEditableAiConfig {
   }) {
     return WorkspaceEditableAiConfig(
       version: version ?? this.version,
+      defaultAgentId: defaultAgentId ?? this.defaultAgentId,
       skills: skills ?? this.skills,
       mcp: mcp ?? this.mcp,
       builtinApprovals: builtinApprovals ?? this.builtinApprovals,

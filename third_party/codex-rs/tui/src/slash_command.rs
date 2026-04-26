@@ -32,6 +32,8 @@ pub enum SlashCommand {
     Plan,
     Collab,
     Agent,
+    #[strum(serialize = "subagent")]
+    SubAgent,
     // Undo,
     Diff,
     Copy,
@@ -102,6 +104,7 @@ impl SlashCommand {
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Collab => "change collaboration mode (experimental)",
             SlashCommand::Agent => "switch the current Sirix agent profile",
+            SlashCommand::SubAgent => "choose a dispatchable Sirix sub-agent for the next task",
             SlashCommand::MultiAgents => "switch the active agent thread",
             SlashCommand::Approvals => "choose what Codex is allowed to do",
             SlashCommand::Permissions => "choose what Codex is allowed to do",
@@ -135,6 +138,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::SubAgent
         )
     }
 
@@ -181,7 +185,7 @@ impl SlashCommand {
             SlashCommand::Realtime => true,
             SlashCommand::Settings => true,
             SlashCommand::Collab => true,
-            SlashCommand::Agent | SlashCommand::MultiAgents => true,
+            SlashCommand::Agent | SlashCommand::SubAgent | SlashCommand::MultiAgents => true,
             SlashCommand::Statusline => false,
             SlashCommand::Theme => false,
             SlashCommand::Title => false,
@@ -226,5 +230,15 @@ mod tests {
     #[test]
     fn model_command_supports_inline_args() {
         assert!(SlashCommand::Model.supports_inline_args());
+    }
+
+    #[test]
+    fn subagent_command_is_singular_and_supports_inline_args() {
+        assert_eq!(SlashCommand::SubAgent.command(), "subagent");
+        assert!(SlashCommand::SubAgent.supports_inline_args());
+        assert_eq!(
+            SlashCommand::from_str("subagent"),
+            Ok(SlashCommand::SubAgent)
+        );
     }
 }

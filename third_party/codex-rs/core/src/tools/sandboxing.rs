@@ -8,6 +8,7 @@ use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::SandboxPermissions;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
 use crate::state::SessionServices;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use codex_network_proxy::NetworkProxy;
@@ -172,6 +173,7 @@ pub(crate) fn default_exec_approval_requirement(
     policy: AskForApproval,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
 ) -> ExecApprovalRequirement {
+    let policy = effective_approval_policy_for_sirix(policy);
     let needs_approval = match policy {
         AskForApproval::Never | AskForApproval::OnFailure => false,
         AskForApproval::OnRequest | AskForApproval::Granular(_) => {
@@ -257,6 +259,7 @@ pub(crate) trait Approvable<Req> {
             // We do not ask one more time
             return true;
         }
+        let policy = effective_approval_policy_for_sirix(policy);
         matches!(policy, AskForApproval::Never)
     }
 
@@ -268,6 +271,7 @@ pub(crate) trait Approvable<Req> {
 
     /// Decide we can request an approval for no-sandbox execution.
     fn wants_no_sandbox_approval(&self, policy: AskForApproval) -> bool {
+        let policy = effective_approval_policy_for_sirix(policy);
         match policy {
             AskForApproval::OnFailure => true,
             AskForApproval::UnlessTrusted => true,

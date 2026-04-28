@@ -16,6 +16,7 @@ use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::sirix_runtime_logger;
 use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::RequestId;
@@ -80,6 +81,11 @@ pub(crate) enum ApprovalRequest {
     },
 }
 
+fn approval_command_preview(command: &[String]) -> String {
+    let rendered = strip_bash_lc_and_escape(command).replace('\n', "\\n");
+    crate::text_formatting::truncate_text(&rendered, /*max_graphemes*/ 240)
+}
+
 impl ApprovalRequest {
     fn thread_id(&self) -> ThreadId {
         match self {
@@ -88,6 +94,17 @@ impl ApprovalRequest {
             | ApprovalRequest::ApplyPatch { thread_id, .. }
             | ApprovalRequest::McpElicitation { thread_id, .. } => *thread_id,
         }
+    }
+
+    fn is_exec_approval(&self, thread_id: ThreadId, approval_id: &str) -> bool {
+        matches!(
+            self,
+            ApprovalRequest::Exec {
+                thread_id: request_thread_id,
+                id,
+                ..
+            } if *request_thread_id == thread_id && id == approval_id
+        )
     }
 
     fn thread_label(&self) -> Option<&str> {
@@ -406,6 +423,15 @@ impl ApprovalOverlay {
         let Some(request) = self.current_request.as_ref() else {
             return;
         };
+        sirix_runtime_logger::info(
+            "[APPROVAL_TRACE] user selected exec approval decision",
+            Some(serde_json::json!({
+                "thread_id": request.thread_id().to_string(),
+                "approval_id": id,
+                "decision": format!("{decision:?}"),
+                "command_preview": approval_command_preview(command),
+            })),
+        );
         if request.thread_label().is_none() {
             let cell = history_cell::new_approval_decision_cell(
                 command.to_vec(),
@@ -428,6 +454,14 @@ impl ApprovalOverlay {
         let Some(request) = self.current_request.as_ref() else {
             return;
         };
+        sirix_runtime_logger::info(
+            "[APPROVAL_TRACE] user selected permissions approval decision",
+            Some(serde_json::json!({
+                "thread_id": request.thread_id().to_string(),
+                "call_id": call_id,
+                "decision": format!("{decision:?}"),
+            })),
+        );
         let granted_permissions = match decision {
             ReviewDecision::Approved | ReviewDecision::ApprovedForSession => permissions.clone(),
             ReviewDecision::Denied | ReviewDecision::Abort => Default::default(),
@@ -470,6 +504,14 @@ impl ApprovalOverlay {
         else {
             return;
         };
+        sirix_runtime_logger::info(
+            "[APPROVAL_TRACE] user selected apply_patch approval decision",
+            Some(serde_json::json!({
+                "thread_id": thread_id.to_string(),
+                "approval_id": id,
+                "decision": format!("{decision:?}"),
+            })),
+        );
         self.app_event_tx
             .patch_approval(thread_id, id.to_string(), decision);
     }
@@ -487,6 +529,15 @@ impl ApprovalOverlay {
         else {
             return;
         };
+        sirix_runtime_logger::info(
+            "[APPROVAL_TRACE] user selected mcp elicitation decision",
+            Some(serde_json::json!({
+                "thread_id": thread_id.to_string(),
+                "server_name": server_name,
+                "request_id": request_id.to_string(),
+                "decision": format!("{decision:?}"),
+            })),
+        );
         self.app_event_tx.resolve_elicitation(
             thread_id,
             server_name.to_string(),
@@ -614,6 +665,31 @@ impl BottomPaneView for ApprovalOverlay {
     ) -> Option<ApprovalRequest> {
         self.enqueue_request(request);
         None
+    }
+
+    fn dismiss_exec_approval(&mut self, thread_id: ThreadId, approval_id: &str) -> bool {
+        let removed_queued = {
+            let before = self.queue.len();
+            self.queue
+                .retain(|request| !request.is_exec_approval(thread_id, approval_id));
+            self.queue.len() != before
+        };
+
+        if self
+            .current_request
+            .as_ref()
+            .is_some_and(|request| request.is_exec_approval(thread_id, approval_id))
+        {
+            // Another approval surface already resolved this command. Advance as
+            // if the current prompt completed, but do not emit a second
+            // AppEvent; the winning surface is responsible for submitting the
+            // single Codex ExecApproval.
+            self.current_complete = true;
+            self.advance_queue();
+            return true;
+        }
+
+        removed_queued
     }
 }
 
@@ -1146,6 +1222,21 @@ mod tests {
             sirix_supported_scopes: None,
             sirix_prefix_candidates: None,
         }
+    }
+
+    #[test]
+    fn dismiss_exec_approval_advances_without_emitting_second_decision() {
+        let (tx, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx);
+        let mut view = ApprovalOverlay::new(make_exec_request(), tx, Features::with_defaults());
+        let thread_id = view.current_request.as_ref().expect("request").thread_id();
+
+        assert!(view.dismiss_exec_approval(thread_id, "test"));
+        assert!(view.is_complete());
+        assert!(
+            rx.try_recv().is_err(),
+            "dismissing an externally resolved prompt must not submit another approval event"
+        );
     }
 
     fn make_permissions_request() -> ApprovalRequest {

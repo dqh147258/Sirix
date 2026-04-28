@@ -1,4 +1,5 @@
 use anyhow::Context;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
@@ -75,6 +76,12 @@ pub(crate) struct SessionShellApprovalResolution {
     pub(crate) decision: Option<String>,
     pub(crate) scope: Option<String>,
     pub(crate) prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolveSessionShellApprovalOutcome {
+    Resolved,
+    AlreadyResolved,
 }
 
 fn session_url(path: &str) -> anyhow::Result<String> {
@@ -211,8 +218,8 @@ pub(crate) async fn resolve_session_shell_approval(
     decision: &str,
     scope: &str,
     prefix: Option<&str>,
-) -> anyhow::Result<()> {
-    reqwest::Client::new()
+) -> anyhow::Result<ResolveSessionShellApprovalOutcome> {
+    let response = reqwest::Client::new()
         .post(session_url("shell-approvals/resolve")?)
         .json(&ResolveSessionShellApprovalRequest {
             request_id,
@@ -222,8 +229,22 @@ pub(crate) async fn resolve_session_shell_approval(
         })
         .send()
         .await
-        .context("failed to resolve Sirix shell approval")?
-        .error_for_status()
-        .context("Sirix shell approval resolve failed")?;
-    Ok(())
+        .context("failed to resolve Sirix shell approval")?;
+
+    match response.status() {
+        status if status.is_success() => Ok(ResolveSessionShellApprovalOutcome::Resolved),
+        // A duplicated approval surface can race after another endpoint already
+        // resolved the same shell request. Treat the desktop API's stale-claim
+        // responses as terminal, non-fatal outcomes; callers must not submit a
+        // second Codex ExecApproval for this id.
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT => {
+            Ok(ResolveSessionShellApprovalOutcome::AlreadyResolved)
+        }
+        _ => {
+            response
+                .error_for_status()
+                .context("Sirix shell approval resolve failed")?;
+            Ok(ResolveSessionShellApprovalOutcome::Resolved)
+        }
+    }
 }

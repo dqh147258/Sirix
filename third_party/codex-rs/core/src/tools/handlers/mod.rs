@@ -30,6 +30,7 @@ use std::path::Path;
 use crate::codex::Session;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
 pub(crate) use crate::tools::code_mode::CodeModeExecuteHandler;
 pub(crate) use crate::tools::code_mode::CodeModeWaitHandler;
 pub use apply_patch::ApplyPatchHandler;
@@ -94,6 +95,7 @@ pub(crate) fn normalize_and_validate_additional_permissions(
     permissions_preapproved: bool,
     _cwd: &Path,
 ) -> Result<Option<PermissionProfile>, String> {
+    let approval_policy = effective_approval_policy_for_sirix(approval_policy);
     let uses_additional_permissions = matches!(
         sandbox_permissions,
         SandboxPermissions::WithAdditionalPermissions

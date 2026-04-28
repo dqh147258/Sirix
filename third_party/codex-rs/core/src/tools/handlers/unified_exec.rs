@@ -3,6 +3,7 @@ use crate::maybe_emit_implicit_skill_invocation;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::get_shell_by_model_provided_path;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
 use crate::tools::context::ExecCommandToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -240,7 +241,7 @@ impl ToolHandler for UnifiedExecHandler {
                     .requests_sandbox_override()
                     && !effective_additional_permissions.permissions_preapproved
                     && !matches!(
-                        context.turn.approval_policy.value(),
+                        effective_approval_policy_for_sirix(context.turn.approval_policy.value()),
                         codex_protocol::protocol::AskForApproval::OnRequest
                     )
                 {

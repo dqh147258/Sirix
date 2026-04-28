@@ -9,6 +9,7 @@ caching).
 use crate::guardian::guardian_rejection_message;
 use crate::guardian::routes_approval_to_guardian;
 use crate::network_policy_decision::network_approval_context_from_payload;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
 use crate::tools::network_approval::DeferredNetworkApproval;
 use crate::tools::network_approval::NetworkApprovalMode;
 use crate::tools::network_approval::begin_network_approval;
@@ -115,6 +116,7 @@ impl ToolOrchestrator {
         let otel_user = ToolDecisionSource::User;
         let otel_automated_reviewer = ToolDecisionSource::AutomatedReviewer;
         let otel_cfg = ToolDecisionSource::Config;
+        let approval_policy = effective_approval_policy_for_sirix(approval_policy);
 
         // 1) Approval
         let mut already_approved = false;

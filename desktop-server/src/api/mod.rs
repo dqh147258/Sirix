@@ -5,6 +5,7 @@ use crate::app::state::AppState;
 pub mod ai;
 pub mod auth;
 pub mod health;
+pub mod runtime;
 pub mod settings;
 pub mod status;
 pub mod terminals;
@@ -13,6 +14,10 @@ pub mod ws;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health::health))
+        .route(
+            "/runtime/logs",
+            axum::routing::post(runtime::ingest_runtime_logs),
+        )
         .route("/status/overview", get(status::get_status_overview))
         .route(
             "/auth/session",

@@ -114,21 +114,84 @@ struct LocalWsOutboundEnvelope {
 #[derive(Debug, Deserialize)]
 struct LocalWsOutboundPayload {
     terminal_id: Option<String>,
+    ai_session_id: Option<String>,
 }
 
-fn should_forward_to_raw_terminal_socket(raw: &str, attached_terminal_id: Uuid) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawTerminalForwardTarget {
+    Terminal(Uuid),
+    AiSession(Uuid),
+    Global,
+}
+
+fn raw_terminal_forward_target(raw: &str) -> Option<RawTerminalForwardTarget> {
     let Ok(envelope) = serde_json::from_str::<LocalWsOutboundEnvelope>(raw) else {
-        return false;
+        return None;
     };
 
-    match envelope.payload.and_then(|payload| payload.terminal_id) {
-        Some(terminal_id) => Uuid::parse_str(&terminal_id)
-            .map(|event_terminal_id| event_terminal_id == attached_terminal_id)
-            .unwrap_or(false),
-        None => matches!(
+    if let Some(payload) = envelope.payload {
+        if let Some(terminal_id) = payload
+            .terminal_id
+            .as_deref()
+            .and_then(|value| Uuid::parse_str(value).ok())
+        {
+            return Some(RawTerminalForwardTarget::Terminal(terminal_id));
+        }
+
+        if matches!(
             envelope.event_type.as_str(),
-            "terminal.error" | "terminal.closed"
-        ),
+            "ai.approval.request" | "ai.approval.resolved"
+        ) {
+            // Some approval events are emitted by spawned-agent / backend-sync
+            // paths that know the AI session but do not carry the terminal id.
+            // Raw system-terminal sockets are attached by terminal id, so keep
+            // these events targetable through the session registry instead of
+            // dropping them before the CLI approval overlay can render.
+            return payload
+                .ai_session_id
+                .as_deref()
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .map(RawTerminalForwardTarget::AiSession);
+        }
+
+        return None;
+    }
+
+    matches!(
+        envelope.event_type.as_str(),
+        "terminal.error" | "terminal.closed"
+    )
+    .then_some(RawTerminalForwardTarget::Global)
+}
+
+async fn should_forward_to_raw_terminal_socket(
+    state: &AppState,
+    raw: &str,
+    attached_terminal_id: Uuid,
+) -> bool {
+    should_forward_to_raw_terminal_socket_with_registry(
+        state.ai_session_registry.as_ref(),
+        raw,
+        attached_terminal_id,
+    )
+    .await
+}
+
+async fn should_forward_to_raw_terminal_socket_with_registry(
+    ai_session_registry: &crate::app::ai::session::AiSessionRegistry,
+    raw: &str,
+    attached_terminal_id: Uuid,
+) -> bool {
+    match raw_terminal_forward_target(raw) {
+        Some(RawTerminalForwardTarget::Terminal(event_terminal_id)) => {
+            event_terminal_id == attached_terminal_id
+        }
+        Some(RawTerminalForwardTarget::AiSession(ai_session_id)) => ai_session_registry
+            .resolve(ai_session_id)
+            .await
+            .is_some_and(|record| record.terminal_id == attached_terminal_id),
+        Some(RawTerminalForwardTarget::Global) => true,
+        None => false,
     }
 }
 
@@ -652,7 +715,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match outbound {
                     Ok(payload) => {
                         if let Some(attached_terminal_id) = raw_attached_terminal_id {
-                            if !should_forward_to_raw_terminal_socket(&payload, attached_terminal_id) {
+                            if !should_forward_to_raw_terminal_socket(
+                                &state,
+                                &payload,
+                                attached_terminal_id,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                         }
@@ -793,4 +862,151 @@ async fn relay_webrtc_signal_to_backend(
 
 fn build_http_url(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::ai::{
+        config::{
+            AiLaunchConfig, ApprovalMode, ModelConfig, ModelKind, ProviderConfig, ProviderKind,
+            SessionAgentRuntimeConfig, SirixConfig,
+        },
+        session::{AiSessionRecord, AiSessionRegistry},
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn raw_terminal_filter_targets_approval_by_ai_session_when_terminal_id_is_absent() {
+        let ai_session_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "type": "ai.approval.request",
+            "payload": {
+                "ai_session_id": ai_session_id,
+                "request_id": "request-1",
+                "agent_id": "code-searcher",
+                "capability_key": "builtin.shell"
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            raw_terminal_forward_target(&raw),
+            Some(RawTerminalForwardTarget::AiSession(ai_session_id))
+        );
+    }
+
+    #[test]
+    fn raw_terminal_filter_keeps_terminal_scoped_events_terminal_targeted() {
+        let terminal_id = Uuid::new_v4();
+        let raw = serde_json::json!({
+            "type": "terminal.output",
+            "payload": {
+                "terminal_id": terminal_id,
+                "data_base64": ""
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            raw_terminal_forward_target(&raw),
+            Some(RawTerminalForwardTarget::Terminal(terminal_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_terminal_filter_resolves_ai_session_to_attached_terminal() {
+        let registry = AiSessionRegistry::new();
+        let ai_session_id = Uuid::new_v4();
+        let terminal_id = Uuid::new_v4();
+        let other_terminal_id = Uuid::new_v4();
+        let launch = test_launch_config();
+        registry
+            .insert(
+                AiSessionRecord {
+                    ai_session_id,
+                    terminal_id,
+                    cwd: "/tmp/workspace".to_string(),
+                    agent_id: launch.agent.id.clone(),
+                    model_id: launch.model.id.clone(),
+                    mirrored_to_backend: false,
+                },
+                &launch,
+                SessionAgentRuntimeConfig {
+                    agent_id: launch.agent.id.clone(),
+                    shell_mode: ApprovalMode::Ask,
+                    builtin_tool_ids: Vec::new(),
+                    effective_context_window: Some(32_000),
+                },
+            )
+            .await;
+
+        let raw = serde_json::json!({
+            "type": "ai.approval.request",
+            "payload": {
+                "ai_session_id": ai_session_id,
+                "request_id": "request-1",
+                "capability_key": "builtin.shell"
+            }
+        })
+        .to_string();
+
+        assert!(
+            should_forward_to_raw_terminal_socket_with_registry(&registry, &raw, terminal_id).await
+        );
+        assert!(
+            !should_forward_to_raw_terminal_socket_with_registry(
+                &registry,
+                &raw,
+                other_terminal_id
+            )
+            .await
+        );
+    }
+
+    fn test_launch_config() -> AiLaunchConfig {
+        let provider = ProviderConfig {
+            id: "provider".to_string(),
+            name: "Provider".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            default_context_window: Some(32_000),
+            base_url: "https://example.com/v1".to_string(),
+            api_key_env: String::new(),
+            api_key: String::new(),
+            headers_json: "{}".to_string(),
+            enabled: true,
+            models: vec![ModelConfig {
+                id: "model".to_string(),
+                display_name: "Model".to_string(),
+                model_kind: ModelKind::Text,
+                context_window: Some(32_000),
+                supports_images: false,
+                supported_reasoning_efforts: None,
+                enabled: true,
+            }],
+        };
+        let mut agent = SirixConfig::default()
+            .agents
+            .into_iter()
+            .next()
+            .expect("default config should seed an agent");
+        agent.id = "code-searcher".to_string();
+        agent.provider_id = provider.id.clone();
+        agent.model_id = provider.models[0].id.clone();
+        AiLaunchConfig {
+            effective_config: SirixConfig {
+                providers: vec![provider.clone()],
+                agents: vec![agent.clone()],
+                ..SirixConfig::default()
+            },
+            agent,
+            provider: provider.clone(),
+            model: provider.models[0].clone(),
+            session_providers: vec![provider],
+            codex_home: PathBuf::from("/tmp/codex-home"),
+            session_storage_dir: PathBuf::from("/tmp/session"),
+            workspace_root: PathBuf::from("/tmp/workspace"),
+            workspace_source: None,
+        }
+    }
 }

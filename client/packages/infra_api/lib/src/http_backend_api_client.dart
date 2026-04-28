@@ -286,6 +286,7 @@ class HttpBackendApiClient implements BackendApiClient {
     required String agentId,
     required String decision,
     required String scope,
+    String? approvalKind,
     String? prefix,
   }) async {
     await _post(
@@ -297,6 +298,8 @@ class HttpBackendApiClient implements BackendApiClient {
         'agent_id': agentId,
         'decision': decision,
         'scope': scope,
+        if (approvalKind != null && approvalKind.trim().isNotEmpty)
+          'approval_kind': approvalKind,
         if (prefix != null && prefix.trim().isNotEmpty) 'prefix': prefix,
       },
     );

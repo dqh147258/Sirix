@@ -49,6 +49,7 @@ use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::Renderable;
 use crate::resume_picker::SessionSelection;
 use crate::sirix_local_api;
+use crate::sirix_runtime_logger;
 #[cfg(test)]
 use crate::test_support::PathBufExt;
 use crate::text_formatting::truncate_text;
@@ -277,6 +278,16 @@ fn render_sirix_shell_command(command: &[String]) -> String {
         .filter(|item| !item.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn sirix_runtime_command_preview(command: &[String]) -> String {
+    truncate_text(
+        render_sirix_shell_command(command)
+            .replace('\n', "\\n")
+            .as_str(),
+        /*max_graphemes*/ 240,
+    )
+    .to_string()
 }
 
 fn sirix_shell_supported_scopes(
@@ -1883,18 +1894,33 @@ impl App {
                     .as_deref()
                     .map(split_command_string)
                     .unwrap_or_default();
+                let approval_id = params
+                    .approval_id
+                    .clone()
+                    .unwrap_or_else(|| params.item_id.clone());
                 let sirix_supported_scopes = sirix_shell_supported_scopes(
                     proposed_execpolicy_amendment.as_ref(),
                     network_approval_context.as_ref(),
                     additional_permissions.as_ref(),
                 );
+                sirix_runtime_logger::info(
+                    "[APPROVAL_TRACE] exec approval request received",
+                    Some(serde_json::json!({
+                        "thread_id": thread_id.to_string(),
+                        "approval_id": approval_id.clone(),
+                        "item_id": params.item_id.clone(),
+                        "command_preview": sirix_runtime_command_preview(&command),
+                        "reason": params.reason.clone(),
+                        "has_network_context": network_approval_context.is_some(),
+                        "has_additional_permissions": additional_permissions.is_some(),
+                        "has_execpolicy_amendment": proposed_execpolicy_amendment.is_some(),
+                        "sirix_persistent_scopes": sirix_supported_scopes.clone(),
+                    })),
+                );
                 Some(ThreadInteractiveRequest::Approval(ApprovalRequest::Exec {
                     thread_id,
                     thread_label,
-                    id: params
-                        .approval_id
-                        .clone()
-                        .unwrap_or_else(|| params.item_id.clone()),
+                    id: approval_id,
                     command: command.clone(),
                     reason: params.reason.clone(),
                     available_decisions: params
@@ -1922,20 +1948,38 @@ impl App {
                     sirix_supported_scopes,
                 }))
             }
-            ServerRequest::FileChangeRequestApproval { params, .. } => Some(
-                ThreadInteractiveRequest::Approval(ApprovalRequest::ApplyPatch {
-                    thread_id,
-                    thread_label,
-                    id: params.item_id.clone(),
-                    reason: params.reason.clone(),
-                    cwd: self
-                        .thread_cwd(thread_id)
-                        .await
-                        .unwrap_or_else(|| self.config.cwd.to_path_buf()),
-                    changes: HashMap::new(),
-                }),
-            ),
+            ServerRequest::FileChangeRequestApproval { params, .. } => {
+                sirix_runtime_logger::info(
+                    "[APPROVAL_TRACE] apply_patch approval request received",
+                    Some(serde_json::json!({
+                        "thread_id": thread_id.to_string(),
+                        "item_id": params.item_id.clone(),
+                        "reason": params.reason.clone(),
+                    })),
+                );
+                Some(ThreadInteractiveRequest::Approval(
+                    ApprovalRequest::ApplyPatch {
+                        thread_id,
+                        thread_label,
+                        id: params.item_id.clone(),
+                        reason: params.reason.clone(),
+                        cwd: self
+                            .thread_cwd(thread_id)
+                            .await
+                            .unwrap_or_else(|| self.config.cwd.to_path_buf()),
+                        changes: HashMap::new(),
+                    },
+                ))
+            }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                sirix_runtime_logger::info(
+                    "[APPROVAL_TRACE] mcp elicitation request received",
+                    Some(serde_json::json!({
+                        "thread_id": thread_id.to_string(),
+                        "request_id": app_server_request_id_to_mcp_request_id(request_id).to_string(),
+                        "server_name": params.server_name.clone(),
+                    })),
+                );
                 if let Some(request) = McpServerElicitationFormRequest::from_app_server_request(
                     thread_id,
                     app_server_request_id_to_mcp_request_id(request_id),
@@ -1963,15 +2007,25 @@ impl App {
                     ))
                 }
             }
-            ServerRequest::PermissionsRequestApproval { params, .. } => Some(
-                ThreadInteractiveRequest::Approval(ApprovalRequest::Permissions {
-                    thread_id,
-                    thread_label,
-                    call_id: params.item_id.clone(),
-                    reason: params.reason.clone(),
-                    permissions: params.permissions.clone().into(),
-                }),
-            ),
+            ServerRequest::PermissionsRequestApproval { params, .. } => {
+                sirix_runtime_logger::info(
+                    "[APPROVAL_TRACE] permissions approval request received",
+                    Some(serde_json::json!({
+                        "thread_id": thread_id.to_string(),
+                        "item_id": params.item_id.clone(),
+                        "reason": params.reason.clone(),
+                    })),
+                );
+                Some(ThreadInteractiveRequest::Approval(
+                    ApprovalRequest::Permissions {
+                        thread_id,
+                        thread_label,
+                        call_id: params.item_id.clone(),
+                        reason: params.reason.clone(),
+                        permissions: params.permissions.clone().into(),
+                    },
+                ))
+            }
             _ => None,
         }
     }
@@ -2011,6 +2065,16 @@ impl App {
             .map(split_command_string)
             .unwrap_or_default();
         let prefix_candidates = sirix_shell_prefix_candidates(&command, &supported_scopes);
+        sirix_runtime_logger::info(
+            "[APPROVAL_TRACE] mirror shell approval request to Desktop",
+            Some(serde_json::json!({
+                "thread_id": thread_id.to_string(),
+                "approval_id": id.clone(),
+                "command_preview": sirix_runtime_command_preview(&command),
+                "supported_scopes": supported_scopes.clone(),
+                "prefix_candidate_count": prefix_candidates.len(),
+            })),
+        );
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             if let Err(error) = sirix_local_api::create_session_shell_approval_request(
@@ -2021,6 +2085,13 @@ impl App {
             )
             .await
             {
+                sirix_runtime_logger::warn(
+                    "[APPROVAL_TRACE] mirror shell approval request failed",
+                    Some(serde_json::json!({
+                        "approval_id": id.clone(),
+                        "error": error.to_string(),
+                    })),
+                );
                 tracing::warn!(request_id = %id, error = %error, "failed to mirror Sirix shell approval request");
                 return;
             }
@@ -2039,6 +2110,15 @@ impl App {
                         "deny" => ReviewDecision::Denied,
                         _ => return,
                     };
+                    sirix_runtime_logger::info(
+                        "[APPROVAL_TRACE] mirrored shell approval resolved",
+                        Some(serde_json::json!({
+                            "approval_id": id.clone(),
+                            "decision": resolution.decision.clone(),
+                            "scope": resolution.scope.clone(),
+                            "prefix": resolution.prefix.clone(),
+                        })),
+                    );
                     app_event_tx.send(AppEvent::SubmitSirixExecApproval {
                         thread_id,
                         id,
@@ -2051,6 +2131,13 @@ impl App {
                     });
                 }
                 Err(error) => {
+                    sirix_runtime_logger::warn(
+                        "[APPROVAL_TRACE] mirrored shell approval wait failed",
+                        Some(serde_json::json!({
+                            "approval_id": id.clone(),
+                            "error": error.to_string(),
+                        })),
+                    );
                     tracing::warn!(request_id = %id, error = %error, "failed to await mirrored Sirix shell approval");
                 }
             }
@@ -4709,13 +4796,25 @@ impl App {
             AppEvent::SubmitSirixExecApproval {
                 thread_id,
                 id,
-                command: _command,
+                command,
                 decision,
                 sync_resolution,
                 persistence_scope,
                 persistence_decision: _persistence_decision,
                 prefix,
             } => {
+                sirix_runtime_logger::info(
+                    "[APPROVAL_TRACE] submit Sirix exec approval decision",
+                    Some(serde_json::json!({
+                        "thread_id": thread_id.to_string(),
+                        "approval_id": id.clone(),
+                        "decision": format!("{decision:?}"),
+                        "sync_resolution": sync_resolution,
+                        "persistence_scope": persistence_scope.clone(),
+                        "prefix": prefix.clone(),
+                        "command_preview": sirix_runtime_command_preview(&command),
+                    })),
+                );
                 if !sync_resolution
                     && self
                         .locally_resolved_sirix_shell_approvals
@@ -4732,15 +4831,47 @@ impl App {
                         _ => "",
                     };
                     if !decision_text.is_empty() {
-                        sirix_local_api::resolve_session_shell_approval(
+                        match sirix_local_api::resolve_session_shell_approval(
                             id.as_str(),
                             decision_text,
                             persistence_scope.as_deref().unwrap_or("once"),
                             prefix.as_deref(),
                         )
                         .await
-                        .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+                        {
+                            Ok(sirix_local_api::ResolveSessionShellApprovalOutcome::Resolved) => {}
+                            Ok(sirix_local_api::ResolveSessionShellApprovalOutcome::AlreadyResolved) => {
+                                sirix_runtime_logger::warn(
+                                    "[APPROVAL_TRACE] ignored stale Sirix exec approval decision",
+                                    Some(serde_json::json!({
+                                        "thread_id": thread_id.to_string(),
+                                        "approval_id": id.clone(),
+                                        "decision": format!("{decision:?}"),
+                                    })),
+                                );
+                                self.chat_widget.dismiss_exec_approval(thread_id, id.as_str());
+                                return Ok(AppRunControl::Continue);
+                            }
+                            Err(err) => {
+                                sirix_runtime_logger::warn(
+                                    "[APPROVAL_TRACE] failed to sync Sirix exec approval decision",
+                                    Some(serde_json::json!({
+                                        "thread_id": thread_id.to_string(),
+                                        "approval_id": id.clone(),
+                                        "decision": format!("{decision:?}"),
+                                        "error": err.to_string(),
+                                    })),
+                                );
+                                self.chat_widget.add_error_message(format!(
+                                    "Failed to resolve shell approval `{id}`: {err}"
+                                ));
+                                return Ok(AppRunControl::Continue);
+                            }
+                        }
                     }
+                } else {
+                    self.chat_widget
+                        .dismiss_exec_approval(thread_id, id.as_str());
                 }
                 if let Some(scope) = persistence_scope.as_deref()
                     && matches!(scope, "session" | "workspace" | "global")

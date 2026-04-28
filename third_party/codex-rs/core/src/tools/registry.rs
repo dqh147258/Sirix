@@ -671,8 +671,9 @@ fn sirix_builtin_tool_name_for_approval(invocation: &ToolInvocation) -> Option<&
     let tool_name = invocation.tool_name.as_str();
     if matches!(
         tool_name,
-        // Shell-capable tools already flow through the dedicated exec approval
-        // pipeline, so this bridge only handles non-shell builtin tools.
+        // Shell-capable tools run their Sirix capability gate inside the shell
+        // handler before the separate command/prefix approval pipeline. The
+        // generic registry bridge only handles non-shell builtin tools.
         "shell" | "shell_command" | "exec_command" | "write_stdin"
     ) {
         return None;

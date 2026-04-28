@@ -4431,6 +4431,15 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn dismiss_exec_approval(&mut self, thread_id: ThreadId, approval_id: &str) {
+        if self
+            .bottom_pane
+            .dismiss_exec_approval(thread_id, approval_id)
+        {
+            self.request_redraw();
+        }
+    }
+
     pub(crate) fn push_mcp_server_elicitation_request(
         &mut self,
         request: McpServerElicitationFormRequest,

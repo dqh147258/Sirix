@@ -12,6 +12,9 @@ use crate::exec_policy::ExecApprovalRequest;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
 use crate::shell::Shell;
+use crate::sirix_tool_approval::SirixToolApprovalDecision;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
+use crate::sirix_tool_approval::wait_for_sirix_tool_approval;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -41,6 +44,20 @@ use codex_shell_command::is_safe_command::is_known_safe_command;
 use codex_tools::ShellCommandBackendConfig;
 
 pub struct ShellHandler;
+
+async fn ensure_sirix_shell_capability_approval(
+    agent_id: Option<&str>,
+) -> Result<(), FunctionCallError> {
+    match wait_for_sirix_tool_approval("builtin.shell", agent_id)
+        .await
+        .map_err(FunctionCallError::Fatal)?
+    {
+        Some(SirixToolApprovalDecision::Allow) | None => Ok(()),
+        Some(SirixToolApprovalDecision::Deny) => Err(FunctionCallError::RespondToModel(
+            "shell was denied by the current Sirix approval policy".to_string(),
+        )),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellCommandBackend {
@@ -398,6 +415,7 @@ impl ShellHandler {
                 "shell is unavailable in this session".to_string(),
             ));
         };
+        ensure_sirix_shell_capability_approval(turn.config.sirix_agent_id.as_deref()).await?;
         let fs = environment.get_filesystem();
 
         let dependency_env = session.dependency_env().await;
@@ -452,7 +470,7 @@ impl ShellHandler {
             .requests_sandbox_override()
             && !effective_additional_permissions.permissions_preapproved
             && !matches!(
-                turn.approval_policy.value(),
+                effective_approval_policy_for_sirix(turn.approval_policy.value()),
                 codex_protocol::protocol::AskForApproval::OnRequest
             )
         {

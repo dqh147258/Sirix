@@ -2,6 +2,7 @@ use std::env;
 use std::time::Duration;
 
 use codex_login::default_client::build_reqwest_client;
+use codex_protocol::protocol::AskForApproval;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::time::sleep;
@@ -31,6 +32,30 @@ struct SirixCheckApprovalResponse {
 
 pub(crate) fn mcp_capability_key(server: &str, tool_name: &str) -> String {
     format!("mcp.{server}.{tool_name}")
+}
+
+fn env_value_is_present(key: &str) -> bool {
+    env::var(key)
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+pub(crate) fn sirix_approval_authority_enabled() -> bool {
+    env_value_is_present(SIRIX_LOCAL_API_BASE_ENV) && env_value_is_present(SIRIX_AI_SESSION_ID_ENV)
+}
+
+pub(crate) fn effective_approval_policy_for_sirix(policy: AskForApproval) -> AskForApproval {
+    if sirix_approval_authority_enabled() && matches!(policy, AskForApproval::Never) {
+        // Sirix intentionally keeps legacy Codex approvals disabled at the
+        // config layer, then routes every approval through the shared
+        // desktop/mobile/CLI approval registry. Treat `Never` as "Sirix owns
+        // approval" inside the embedded runtime so old Codex guards cannot
+        // reject a request before Sirix has a chance to publish and resolve it.
+        AskForApproval::OnRequest
+    } else {
+        policy
+    }
 }
 
 pub(crate) async fn wait_for_sirix_tool_approval(

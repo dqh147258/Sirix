@@ -34,6 +34,7 @@ use tracing::instrument;
 
 use crate::config::Config;
 use crate::sandboxing::SandboxPermissions;
+use crate::sirix_tool_approval::sirix_approval_authority_enabled;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use codex_shell_command::bash::parse_shell_lc_plain_commands;
 use codex_shell_command::bash::parse_shell_lc_single_command_prefix;
@@ -294,7 +295,17 @@ impl ExecPolicyManager {
                 let prompt_is_rule = evaluation.matched_rules.iter().any(|rule_match| {
                     is_policy_match(rule_match) && rule_match.decision() == Decision::Prompt
                 });
-                match prompt_is_rejected_by_policy(approval_policy, prompt_is_rule) {
+                // In embedded Sirix sessions the desktop server is the
+                // approval authority. Codex's legacy `approval_policy` remains
+                // `never` only to prevent native-only approval surfaces; it
+                // must not reject prompts before the Sirix TUI bridge can
+                // publish them to the shared desktop/mobile/CLI registry.
+                let policy_rejection = if sirix_approval_authority_enabled() {
+                    None
+                } else {
+                    prompt_is_rejected_by_policy(approval_policy, prompt_is_rule)
+                };
+                match policy_rejection {
                     Some(reason) => ExecApprovalRequirement::Forbidden {
                         reason: reason.to_string(),
                     },

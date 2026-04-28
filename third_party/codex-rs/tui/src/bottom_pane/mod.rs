@@ -31,6 +31,7 @@ use codex_core::plugins::PluginCapabilitySummary;
 use codex_core::skills::model::SkillMetadata;
 use codex_features::Features;
 use codex_file_search::FileMatch;
+use codex_protocol::ThreadId;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
 use crossterm::event::KeyCode;
@@ -901,6 +902,28 @@ impl BottomPane {
         let modal = ApprovalOverlay::new(request, self.app_event_tx.clone(), features.clone());
         self.pause_status_timer_for_modal();
         self.push_view(Box::new(modal));
+    }
+
+    pub(crate) fn dismiss_exec_approval(&mut self, thread_id: ThreadId, approval_id: &str) -> bool {
+        let mut handled = false;
+        for view in self.view_stack.iter_mut().rev() {
+            if view.dismiss_exec_approval(thread_id, approval_id) {
+                handled = true;
+                break;
+            }
+        }
+        if handled {
+            if self
+                .view_stack
+                .last()
+                .is_some_and(|view| view.is_complete())
+            {
+                self.view_stack.clear();
+                self.on_active_view_complete();
+            }
+            self.request_redraw();
+        }
+        handled
     }
 
     /// Called when the agent requests user input.

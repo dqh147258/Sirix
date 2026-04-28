@@ -939,6 +939,14 @@ impl SirixConfigStore {
         self.config_path.as_path()
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test_home(sirix_home: PathBuf) -> Self {
+        Self {
+            config_path: sirix_home.join("config.toml"),
+            sirix_home,
+        }
+    }
+
     pub fn global_agents_dir_path(&self) -> PathBuf {
         self.sirix_home.join(SIRIX_AGENTS_DIR_NAME)
     }
@@ -1250,21 +1258,33 @@ impl SirixConfigStore {
         agent: &AgentConfig,
         provider: &ProviderConfig,
         model: &ModelConfig,
-        session_shell_rules: &ShellRulesConfig,
+        _session_shell_rules: &ShellRulesConfig,
     ) -> anyhow::Result<SessionAgentRuntimeConfig> {
-        let effective_shell_rules =
-            self.effective_shell_rules_for_agent(cwd, agent, session_shell_rules)?;
-        let shell_mode = match agent.approval_mode {
-            ApprovalMode::Allow => ApprovalMode::Allow,
-            ApprovalMode::Deny => ApprovalMode::Deny,
-            ApprovalMode::Ask => effective_shell_rules.mode,
-        };
+        let shell_mode = self.shell_fallback_mode_for_agent(cwd, agent)?;
         Ok(SessionAgentRuntimeConfig {
             agent_id: agent.id.clone(),
             shell_mode,
             builtin_tool_ids: agent.builtin_tool_ids.clone(),
             effective_context_window: Some(effective_model_runtime_context_window(provider, model)),
         })
+    }
+
+    pub fn shell_fallback_mode_for_agent(
+        &self,
+        cwd: &Path,
+        agent: &AgentConfig,
+    ) -> anyhow::Result<ApprovalMode> {
+        // Shell fallback mode follows the documented permission precedence:
+        // Global < Agent < Workspace. Prefix allow/deny entries are still
+        // merged separately into the exec-policy file; this value only decides
+        // what happens when no prefix rule matched. Keeping Workspace last lets
+        // a project override reusable Agent profiles, while Agent Ask still
+        // correctly beats a broader Global Allow when no workspace override is
+        // present.
+        if let Some(workspace_rules) = self.load_workspace_shell_rules(cwd)? {
+            return Ok(workspace_rules.mode);
+        }
+        Ok(agent.approval_mode.clone())
     }
 
     pub fn write_session_agent_runtime_file(
@@ -2356,32 +2376,34 @@ fn shell_mode_override_for_agent(
     agent: &AgentConfig,
     _config: &SirixConfig,
 ) -> anyhow::Result<String> {
-    // The bridge/role config only needs the final fallback mode for commands
-    // that are not matched by any generated exec-policy prefix rule. Prefix
-    // allow/deny entries are already materialized into the shared exec policy
-    // file, so this helper only resolves the merged `allow / ask / deny` mode.
-    //
-    // We intentionally re-load the persisted shell-rules layers here so
-    // sub-agent role files inherit the same Global -> Agent -> Workspace merge
-    // semantics as the root session runtime.
-    let effective_shell_mode = match agent.approval_mode {
-        ApprovalMode::Allow => ApprovalMode::Allow,
-        ApprovalMode::Deny => ApprovalMode::Deny,
-        ApprovalMode::Ask => {
-            let store = SirixConfigStore::new()?;
-            store
-                .effective_shell_rules_for_agent(cwd, agent, &ShellRulesConfig::default())?
-                .mode
-        }
-    };
-
-    let shell_mode = match effective_shell_mode {
-        ApprovalMode::Allow => "allow",
-        ApprovalMode::Ask => "ask",
-        ApprovalMode::Deny => "deny",
-    };
+    // Sub-agent role files consume `sirix_shell_mode` as the fallback mode for
+    // unmatched shell commands. Use the same Global < Agent < Workspace
+    // precedence as the root runtime so workspace permission overrides apply to
+    // spawned sub-agents too, while Agent Ask still blocks a broader Global
+    // Allow when no workspace shell override exists.
+    let shell_mode =
+        match workspace_shell_mode_from_file(cwd)?.unwrap_or(agent.approval_mode.clone()) {
+            ApprovalMode::Allow => "allow",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::Deny => "deny",
+        };
 
     Ok(shell_mode.to_string())
+}
+
+fn workspace_shell_mode_from_file(cwd: &Path) -> anyhow::Result<Option<ApprovalMode>> {
+    let path = cwd
+        .join(workspace_config_dir_name())
+        .join("shell-rules.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut rules = serde_json::from_str::<ShellRulesConfig>(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    normalize_shell_rules(&mut rules);
+    Ok(Some(rules.mode))
 }
 
 fn build_bridge_models_for_session(
@@ -5320,6 +5342,81 @@ mod tests {
     }
 
     #[test]
+    fn agent_shell_authorization_ask_overrides_allow_shell_rules_for_runtime() {
+        let sirix_home = unique_session_storage_dir("agent-shell-runtime-home");
+        let store = SirixConfigStore::for_test_home(sirix_home);
+        let mut agent = test_agent(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID, "search only");
+        agent.id = "code-searcher".to_string();
+        agent.approval_mode = ApprovalMode::Ask;
+        let config = SirixConfig::default();
+        let provider = config.providers[0].clone();
+        let model = provider.models[0].clone();
+        let inherited_allow_shell_rules = ShellRulesConfig {
+            version: 1,
+            mode: ApprovalMode::Allow,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        };
+
+        let runtime = store
+            .build_session_agent_runtime(
+                Path::new("/tmp/workspace"),
+                &agent,
+                &provider,
+                &model,
+                &inherited_allow_shell_rules,
+            )
+            .expect("runtime should build");
+
+        assert_eq!(
+            runtime.shell_mode,
+            ApprovalMode::Ask,
+            "an Agent row set to Ask must not inherit a broader Allow shell fallback"
+        );
+    }
+
+    #[test]
+    fn workspace_shell_authorization_overrides_agent_runtime_fallback() {
+        let root = unique_session_storage_dir("workspace-shell-runtime");
+        let sirix_home = root.join("home");
+        let workspace = root.join("workspace");
+        let store = SirixConfigStore::for_test_home(sirix_home);
+        store
+            .save_workspace_shell_rules(
+                workspace.as_path(),
+                &ShellRulesConfig {
+                    version: 1,
+                    mode: ApprovalMode::Allow,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+            )
+            .expect("workspace shell rules should save");
+        let mut agent = test_agent(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID, "search only");
+        agent.approval_mode = ApprovalMode::Ask;
+        let config = SirixConfig::default();
+        let provider = config.providers[0].clone();
+        let model = provider.models[0].clone();
+
+        let runtime = store
+            .build_session_agent_runtime(
+                workspace.as_path(),
+                &agent,
+                &provider,
+                &model,
+                &ShellRulesConfig::default(),
+            )
+            .expect("runtime should build");
+
+        assert_eq!(
+            runtime.shell_mode,
+            ApprovalMode::Allow,
+            "workspace shell mode should override the Agent fallback mode"
+        );
+        fs::remove_dir_all(root).expect("temp config tree should be cleaned up");
+    }
+
+    #[test]
     fn bridge_injects_sirix_sub_agents_as_codex_roles() {
         let session_dir = unique_session_storage_dir("roles");
         let codex_home = unique_session_storage_dir("roles-codex-home");
@@ -5455,6 +5552,10 @@ args = ["serve"]
             .expect("role config file should exist");
         let body = fs::read_to_string(&role_path).expect("role config should be readable");
         assert!(body.contains("developer_instructions = \"Review carefully\""));
+        assert!(
+            body.contains("sirix_shell_mode = \"ask\""),
+            "spawned sub-agent role config should preserve the Agent's Ask shell authorization when no workspace override exists"
+        );
         assert!(body.contains("[mcp_servers.docs]"));
         assert!(body.contains("[[skills.config]]"));
 

@@ -1736,6 +1736,43 @@ async fn dangerous_command_forbidden_in_external_sandbox_when_policy_matches() {
     .await;
 }
 
+#[tokio::test]
+async fn sirix_shell_ask_can_prompt_even_when_codex_policy_is_never() {
+    let _guard = SIRIX_SHELL_MODE_TEST_ENV_LOCK
+        .lock()
+        .expect("lock shell mode env");
+    let _api_guard = EnvVarGuard::set("SIRIX_LOCAL_API_BASE", "http://127.0.0.1:1");
+    let _session_guard = EnvVarGuard::set("SIRIX_AI_SESSION_ID", "test-session");
+    let command = vec_str(&["rg", "approval_policy", "."]);
+    let requirement = ExecPolicyManager::new(Arc::new(Policy::empty()))
+        .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+            command: &command,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: &SandboxPolicy::new_workspace_write_policy(),
+            file_system_sandbox_policy: &read_only_file_system_sandbox_policy(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+            // Sirix deliberately leaves Codex's global approval policy at
+            // `never`; this per-agent shell mode is the authoritative signal
+            // that the shared Sirix approval UI should be shown instead of
+            // rejecting the shell request before it reaches desktop/mobile/CLI.
+            sirix_shell_mode: Some("ask"),
+        })
+        .await;
+
+    assert_eq!(
+        requirement,
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec_str(&[
+                "rg",
+                "approval_policy",
+                ".",
+            ]))),
+        }
+    );
+}
+
 struct ExecApprovalRequirementScenario {
     /// Source for the Starlark `.rules` file.
     policy_src: Option<String>,

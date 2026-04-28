@@ -23,6 +23,7 @@ pub enum RuntimeLogSource {
     FlutterDesktop,
     DesktopBackend,
     ServerBackend,
+    SirixCli,
 }
 
 impl RuntimeLogSource {
@@ -32,6 +33,7 @@ impl RuntimeLogSource {
             Self::FlutterDesktop => "flutter-desktop.log",
             Self::DesktopBackend => "desktop-backend.log",
             Self::ServerBackend => "server-backend.log",
+            Self::SirixCli => "sirix-cli.log",
         }
     }
 }
@@ -134,7 +136,9 @@ mod tests {
             .expect("append should recreate deleted log directories");
 
         assert!(
-            run_dir.join(RuntimeLogSource::ServerBackend.file_name()).is_file(),
+            run_dir
+                .join(RuntimeLogSource::ServerBackend.file_name())
+                .is_file(),
             "append should recreate the runtime log file after the directory was deleted"
         );
 

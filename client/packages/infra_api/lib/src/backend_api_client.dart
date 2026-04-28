@@ -110,6 +110,7 @@ abstract class BackendApiClient {
     required String agentId,
     required String decision,
     required String scope,
+    String? approvalKind,
     String? prefix,
   });
 }

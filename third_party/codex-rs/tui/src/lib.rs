@@ -141,6 +141,7 @@ mod selection_list;
 mod session_log;
 mod shimmer;
 mod sirix_local_api;
+mod sirix_runtime_logger;
 mod skills_helpers;
 mod slash_command;
 mod status;
@@ -961,6 +962,12 @@ pub async fn run_main(
         .with(otel_logger_layer)
         .with(otel_tracing_layer)
         .try_init();
+
+    // Sirix Desktop starts CLI sessions with SIRIX_LOCAL_API_BASE.  Initialize a
+    // small runtime-log bridge after tracing is ready so approval/debug logs can
+    // be correlated with desktop/backend runtime logs even if the TUI exits
+    // before the local codex-tui file is collected.
+    sirix_runtime_logger::init_from_env();
 
     run_ratatui_app(
         cli,

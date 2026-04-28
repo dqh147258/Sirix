@@ -13,9 +13,10 @@ use std::{
     env,
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, ExitStatus},
 };
 
+use chrono::Utc;
 use crossterm::{
     cursor, execute, style,
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
@@ -27,7 +28,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
-use cli_approval::CliApprovalPrompt;
+use cli_approval::{ApprovalInputAction, CliApprovalPrompt};
 use cli_support::{
     current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
     local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
@@ -68,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
             let current_terminal_id = reusable_current_terminal_id();
             let launch = launch_session(port, current_terminal_id.as_deref()).await?;
             if launch.reuse_current_terminal {
-                run_codex_in_current_terminal(&launch)
+                run_codex_in_current_terminal(&launch).await
             } else {
                 attach_session(port, &launch.terminal_id).await
             }
@@ -304,7 +305,7 @@ async fn launch_session(
     })
 }
 
-fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result<()> {
+async fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result<()> {
     let current = launch
         .current_terminal_launch
         .as_ref()
@@ -352,14 +353,107 @@ fn run_codex_in_current_terminal(launch: &LaunchSessionResult) -> anyhow::Result
         }
     }
 
-    let status = command
-        .status()
-        .context("failed to spawn AI runtime in current terminal")?;
-    restore_current_terminal_after_runtime_exit()?;
+    report_current_terminal_runtime_event(
+        current,
+        "INFO",
+        "[SIRIX_WRAPPER_RUNTIME] AI runtime starting",
+        serde_json::json!({
+            "executable": resolved_executable.display().to_string(),
+            "workspace_root": current.workspace_root.clone(),
+        }),
+    )
+    .await;
+
+    let status = match command.status() {
+        Ok(status) => status,
+        Err(error) => {
+            report_current_terminal_runtime_event(
+                current,
+                "ERROR",
+                "[SIRIX_WRAPPER_RUNTIME] AI runtime spawn failed",
+                serde_json::json!({
+                    "executable": resolved_executable.display().to_string(),
+                    "workspace_root": current.workspace_root.clone(),
+                    "error": error.to_string(),
+                }),
+            )
+            .await;
+            return Err(error).context("failed to spawn AI runtime in current terminal");
+        }
+    };
+    let restore_result = restore_current_terminal_after_runtime_exit();
     if status.success() {
-        return Ok(());
+        report_current_terminal_runtime_event(
+            current,
+            "INFO",
+            "[SIRIX_WRAPPER_RUNTIME] AI runtime exited successfully",
+            runtime_exit_context(current, status),
+        )
+        .await;
+        return restore_result;
     }
+    report_current_terminal_runtime_event(
+        current,
+        "ERROR",
+        "[SIRIX_WRAPPER_RUNTIME] AI runtime exited abnormally",
+        runtime_exit_context(current, status),
+    )
+    .await;
+    restore_result?;
     anyhow::bail!("AI runtime exited with status {status}");
+}
+
+async fn report_current_terminal_runtime_event(
+    current: &CurrentTerminalLaunch,
+    level: &str,
+    message: &str,
+    context: serde_json::Value,
+) {
+    let endpoint = format!(
+        "{}/runtime/logs",
+        current.local_api_base.trim_end_matches('/')
+    );
+    if current.local_api_base.trim().is_empty() {
+        return;
+    }
+    let payload = serde_json::json!({
+        "source": "sirix_cli",
+        "entries": [{
+            "timestamp": Utc::now().to_rfc3339(),
+            "level": level,
+            "message": message,
+            "context": context,
+        }],
+    });
+    if let Err(error) = reqwest::Client::new()
+        .post(endpoint)
+        .json(&payload)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+    {
+        eprintln!("[sirix][WARN] failed to report runtime event: {error}");
+    }
+}
+
+fn runtime_exit_context(current: &CurrentTerminalLaunch, status: ExitStatus) -> serde_json::Value {
+    let mut context = serde_json::json!({
+        "terminal_id": current.terminal_id.clone(),
+        "ai_session_id": current.ai_session_id.clone(),
+        "terminal_kind": current.terminal_kind.clone(),
+        "workspace_root": current.workspace_root.clone(),
+        "codex_home": current.codex_home.clone(),
+        "exit_code": status.code(),
+        "success": status.success(),
+    });
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        context["signal"] = status.signal().into();
+    }
+
+    context
 }
 
 fn restore_current_terminal_after_runtime_exit() -> anyhow::Result<()> {
@@ -526,6 +620,8 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
     let mut size_rx = spawn_terminal_size_watcher(last_size);
     let mut attached_once = false;
     let mut approval_prompt = CliApprovalPrompt::new(port, "sirix");
+    approval_prompt.set_terminal_width(last_size.cols);
+    let mut pending_terminal_output = Vec::<u8>::new();
 
     write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
 
@@ -533,13 +629,21 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
         tokio::select! {
             Some(bytes) = stdin_rx.recv() => {
                 if approval_prompt.has_pending() {
-                    if let Err(error) = approval_prompt
+                    match approval_prompt
                         .handle_stdin_bytes(&mut stdout, bytes.as_slice())
                         .await
+                        .context("failed to handle approval input")?
                     {
-                        break Err(error.context("failed to handle approval input"));
+                        ApprovalInputAction::Consumed => {
+                                if !approval_prompt.has_pending() {
+                                    flush_buffered_terminal_output(&mut stdout, &mut pending_terminal_output)?;
+                                }
+                                continue
+                            },
+                        ApprovalInputAction::DetachRequested => {
+                            break Ok(TerminalDetachReason::UserDetached)
+                        }
                     }
-                    continue;
                 }
                 if let Err(error) = write
                     .send(Message::Text(
@@ -557,6 +661,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                 }
             }
             Some(current_size) = size_rx.recv() => {
+                approval_prompt.set_terminal_width(current_size.cols);
                 if let Err(error) = write_resize(
                     &mut write,
                     terminal_id,
@@ -574,20 +679,28 @@ async fn attach_session(port: u16, terminal_id: &str) -> anyhow::Result<()> {
                         if message_marks_terminal_ready(&text) {
                             attached_once = true;
                         }
+                        let had_pending_approval = approval_prompt.has_pending();
                         if handle_terminal_message(
                             &mut stdout,
                             &text,
                             &mut viewer_presence_epoch,
                             &mut approval_prompt,
+                            &mut pending_terminal_output,
                         )? {
                             break Ok(TerminalDetachReason::SessionClosed);
                         }
+                        if had_pending_approval && !approval_prompt.has_pending() {
+                            flush_buffered_terminal_output(&mut stdout, &mut pending_terminal_output)?;
+                        }
                     }
                     Some(Ok(Message::Binary(bytes))) => {
-                        if let Err(error) = stdout.write_all(&bytes) {
+                        if approval_prompt.has_pending() {
+                            pending_terminal_output.extend_from_slice(&bytes);
+                        } else if let Err(error) = stdout.write_all(&bytes) {
                             break Err(anyhow::Error::new(error).context("failed to write binary websocket frame"));
+                        } else {
+                            stdout.flush().ok();
                         }
-                        stdout.flush().ok();
                     }
                     Some(Ok(Message::Close(_))) | None => break Ok(TerminalDetachReason::TransportClosed),
                     Some(Ok(_)) => {}
@@ -658,6 +771,7 @@ where
 enum TerminalDetachReason {
     SessionClosed,
     TransportClosed,
+    UserDetached,
 }
 
 fn is_graceful_terminal_disconnect(error: &anyhow::Error) -> bool {
@@ -705,6 +819,11 @@ fn restore_local_terminal(
                 )
                 .context("failed to write transport closed message")?;
         }
+        TerminalDetachReason::UserDetached => {
+            stdout
+                .write_all(b"[sirix] shared terminal detached by user.\r\n")
+                .context("failed to write user detached message")?;
+        }
     }
     stdout.flush().ok();
     Ok(())
@@ -715,6 +834,7 @@ fn handle_terminal_message(
     raw: &str,
     viewer_presence_epoch: &mut Option<u64>,
     approval_prompt: &mut CliApprovalPrompt,
+    pending_terminal_output: &mut Vec<u8>,
 ) -> anyhow::Result<bool> {
     let decoded = serde_json::from_str::<serde_json::Value>(raw)
         .with_context(|| format!("failed to decode websocket payload: {raw}"))?;
@@ -740,10 +860,20 @@ fn handle_terminal_message(
                 let bytes = BASE64
                     .decode(data)
                     .context("failed to decode terminal frame")?;
-                stdout
-                    .write_all(&bytes)
-                    .context("failed to write terminal output")?;
-                stdout.flush().ok();
+                if approval_prompt.has_pending() {
+                    // While the local approval menu is visible, keep remote PTY
+                    // bytes out of the screen. Otherwise Codex/MCP startup
+                    // output can move the cursor, making a later menu repaint
+                    // clear the wrong rows and leaving duplicate approval views.
+                    // The bytes are replayed after this endpoint or another
+                    // endpoint resolves the shared approval request.
+                    pending_terminal_output.extend_from_slice(&bytes);
+                } else {
+                    stdout
+                        .write_all(&bytes)
+                        .context("failed to write terminal output")?;
+                    stdout.flush().ok();
+                }
             }
             Ok(false)
         }
@@ -793,6 +923,21 @@ fn handle_terminal_message(
         }
         _ => Ok(false),
     }
+}
+
+fn flush_buffered_terminal_output(
+    stdout: &mut io::Stdout,
+    pending_terminal_output: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    if pending_terminal_output.is_empty() {
+        return Ok(());
+    }
+    stdout
+        .write_all(pending_terminal_output.as_slice())
+        .context("failed to replay terminal output buffered during approval")?;
+    pending_terminal_output.clear();
+    stdout.flush().ok();
+    Ok(())
 }
 
 fn message_marks_terminal_ready(raw: &str) -> bool {

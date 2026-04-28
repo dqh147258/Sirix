@@ -1,24 +1,36 @@
 use std::collections::VecDeque;
+use std::fmt;
 use std::io::Write;
 
 use anyhow::Context;
 
 use crate::cli_support::local_http_url;
 
-/// Sirix raw terminal approval UI.
-///
-/// Desktop/Mobile already consume the unified `ai.approval.request` /
-/// `ai.approval.resolved` event stream.  The standalone `sirix` and
-/// `sirix-terminal` binaries attach to the same websocket, but they run in raw
-/// terminal mode and must explicitly intercept keystrokes while an approval is
-/// pending.  Keeping that logic here prevents the two CLI entrypoints from
-/// drifting into different approval protocols.
+const ANSI_RESET: &str = "\x1b[0m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_CYAN_BOLD: &str = "\x1b[1m\x1b[36m";
+const ANSI_SHOW_CURSOR: &str = "\x1b[?25h";
+const ANSI_CLEAR_LINE: &str = "\x1b[2K";
+
+/// Raw terminal approval UI shared by `sirix` and `sirix-terminal`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovalInputAction {
+    Consumed,
+    DetachRequested,
+}
+
 pub(crate) struct CliApprovalPrompt {
     port: u16,
     client_name: &'static str,
     http: reqwest::Client,
     active: Option<ApprovalRequest>,
     queue: VecDeque<ApprovalRequest>,
+    prefix_selection: Option<PendingPrefixSelection>,
+    selected_idx: usize,
+    terminal_width: u16,
+    last_rendered_row_count: usize,
 }
 
 impl CliApprovalPrompt {
@@ -29,11 +41,20 @@ impl CliApprovalPrompt {
             http: reqwest::Client::new(),
             active: None,
             queue: VecDeque::new(),
+            prefix_selection: None,
+            selected_idx: 0,
+            terminal_width: 120,
+            last_rendered_row_count: 0,
         }
     }
 
     pub(crate) fn has_pending(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub(crate) fn set_terminal_width(&mut self, width: u16) {
+        // Clear by visual rows, so soft-wrapped Codex-style labels do not leave stale panes.
+        self.terminal_width = width.max(1);
     }
 
     pub(crate) fn handle_request_event<W: Write>(
@@ -49,10 +70,12 @@ impl CliApprovalPrompt {
         }
         if self.active.is_none() {
             self.active = Some(request);
+            self.selected_idx = 0;
             self.render_active(stdout)?;
         } else {
             self.queue.push_back(request);
-            self.render_queue_notice(stdout)?;
+            // Repaint the menu; append-only queue notices are easily corrupted by PTY frames.
+            self.render_active(stdout)?;
         }
         Ok(())
     }
@@ -79,26 +102,29 @@ impl CliApprovalPrompt {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
 
+        let queue_len_before = self.queue.len();
         self.queue.retain(|request| {
             !request.matches_resolution(request_id, ai_session_id, agent_id, capability_key)
         });
+        let queue_changed = self.queue.len() != queue_len_before;
         if self.active.as_ref().is_some_and(|request| {
             request.matches_resolution(request_id, ai_session_id, agent_id, capability_key)
         }) {
+            self.clear_rendered(stdout)?;
             let decision = body
                 .get("decision")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("resolved");
             writeln!(
                 stdout,
-                "\r\n\x1b[32m[{name}] approval {decision}; continuing.\x1b[0m",
+                "\r\n{ANSI_SHOW_CURSOR}[{name}] approval {decision}; continuing.",
                 name = self.client_name,
             )
             .context("failed to write approval resolution notice")?;
-            self.active = self.queue.pop_front();
-            if self.active.is_some() {
-                self.render_active(stdout)?;
-            }
+            self.finish_active_request(stdout)?;
+        } else if queue_changed && self.active.is_some() {
+            // Another endpoint resolved a queued request; keep the queue count honest.
+            self.render_active(stdout)?;
         }
         stdout.flush().ok();
         Ok(())
@@ -108,160 +134,192 @@ impl CliApprovalPrompt {
         &mut self,
         stdout: &mut W,
         bytes: &[u8],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<ApprovalInputAction> {
+        if self.input_requests_detach(bytes) {
+            self.clear_rendered(stdout)?;
+            writeln!(
+                stdout,
+                "\r\n{ANSI_SHOW_CURSOR}{ANSI_DIM}[{name}] approval left pending; detaching local terminal. Resolve it from another endpoint or reconnect.{ANSI_RESET}",
+                name = self.client_name,
+            )
+            .context("failed to write approval detach notice")?;
+            stdout.flush().ok();
+            return Ok(ApprovalInputAction::DetachRequested);
+        }
+
+        if self.apply_navigation_input(stdout, bytes)? {
+            return Ok(ApprovalInputAction::Consumed);
+        }
+
+        if self.prefix_selection.is_some() {
+            return self.handle_prefix_selection_input(stdout, bytes).await;
+        }
+
         let Some(choice) = self.choice_from_input(bytes) else {
-            self.render_short_hint(stdout)?;
-            return Ok(());
+            // Keep the Codex-style selection surface stable on unrelated keys.
+            write!(stdout, "\x07").context("failed to write approval input bell")?;
+            return Ok(ApprovalInputAction::Consumed);
         };
         let Some(request) = self.active.clone() else {
-            return Ok(());
+            return Ok(ApprovalInputAction::Consumed);
         };
+
+        if request.requires_prefix_selection(&choice) {
+            self.open_prefix_selection(request, choice, stdout)?;
+            return Ok(ApprovalInputAction::Consumed);
+        }
+
         let outcome_label = format!("{} {}", choice.decision, choice.scope);
-        match self.resolve_request(&request, &choice).await {
+        // Clear the local pane before submitting; backend state remains shared until resolve wins.
+        self.clear_rendered(stdout)?;
+        match self.resolve_request(&request, &choice, None).await {
             Ok(()) => {
                 writeln!(
                     stdout,
-                    "\r\n\x1b[32m[{name}] submitted approval: {outcome_label}.\x1b[0m",
+                    "\r\n{ANSI_SHOW_CURSOR}[{name}] submitted approval: {outcome_label}.",
                     name = self.client_name,
                 )
                 .context("failed to write approval submit notice")?;
-                self.active = self.queue.pop_front();
-                if self.active.is_some() {
-                    self.render_active(stdout)?;
-                }
+                self.finish_active_request(stdout)?;
             }
             Err(error) => {
-                // A 409/400 here commonly means another endpoint already
-                // resolved the same request.  Keep the message visible but do
-                // not blindly retry, otherwise stale CLI prompts could fight
-                // with Desktop/Mobile decisions.
                 writeln!(
                     stdout,
-                    "\r\n\x1b[31m[{name}] failed to submit approval: {error}\x1b[0m",
+                    "\r\n{ANSI_SHOW_CURSOR}{ANSI_RED}[{name}] failed to submit approval: {error}{ANSI_RESET}",
                     name = self.client_name,
                 )
                 .context("failed to write approval error")?;
-                writeln!(
-                    stdout,
-                    "\x1b[33m[{name}] approval is still pending; choose again or wait for another endpoint to resolve it.\x1b[0m",
-                    name = self.client_name,
-                )
-                .context("failed to write approval retry hint")?;
-                self.render_active(stdout)?;
+                if is_stale_resolution_error(&error) {
+                    // Another endpoint likely won the resolve race; clear only this stale UI.
+                    writeln!(
+                        stdout,
+                        "{ANSI_DIM}[{name}] cleared stale local approval prompt; reconnect or use another endpoint if approval is still required.{ANSI_RESET}",
+                        name = self.client_name,
+                    )
+                    .context("failed to write approval stale hint")?;
+                    self.finish_active_request(stdout)?;
+                } else {
+                    writeln!(
+                        stdout,
+                        "{ANSI_DIM}[{name}] approval is still pending; choose again or wait for another endpoint to resolve it.{ANSI_RESET}",
+                        name = self.client_name,
+                    )
+                    .context("failed to write approval retry hint")?;
+                    self.render_active(stdout)?;
+                }
             }
         }
         stdout.flush().ok();
-        Ok(())
+        Ok(ApprovalInputAction::Consumed)
     }
 
     fn contains_request(&self, request: &ApprovalRequest) -> bool {
+        // `request_id` is the approval identity. A shell command may legitimately
+        // produce multiple sequential approvals with the same capability key
+        // (for example capability authorization followed by command/prefix
+        // approval), so capability-only de-duplication would incorrectly skip
+        // the second gate and let execution continue too early.
         self.active
             .as_ref()
-            .is_some_and(|active| active.dedupe_key() == request.dedupe_key())
+            .is_some_and(|active| active.conflicts_with(request))
             || self
                 .queue
                 .iter()
-                .any(|queued| queued.dedupe_key() == request.dedupe_key())
+                .any(|queued| queued.conflicts_with(request))
     }
 
-    fn render_active<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
-        let Some(request) = self.active.as_ref() else {
-            return Ok(());
+    fn render_active<W: Write>(&mut self, stdout: &mut W) -> anyhow::Result<()> {
+        let lines = if let Some(selection) = self.prefix_selection.as_ref() {
+            if self.selected_idx >= selection.prefixes.len() {
+                self.selected_idx = 0;
+            }
+            selection.overlay_lines(self.selected_idx)
+        } else {
+            let Some(request) = self.active.as_ref() else {
+                return Ok(());
+            };
+            let choices = request.choices();
+            if self.selected_idx >= choices.len() {
+                self.selected_idx = 0;
+            }
+            let selected_idx = self.selected_idx;
+            self.overlay_lines(request, &choices, selected_idx)
         };
-        writeln!(
-            stdout,
-            "\r\n\x1b[33m[{name}] approval required\x1b[0m",
-            name = self.client_name,
-        )
-        .context("failed to write approval prompt")?;
-        writeln!(stdout, "  capability: {}", request.capability_key)
-            .context("failed to write approval capability")?;
-        if let Some(kind) = request.approval_kind.as_deref() {
-            writeln!(stdout, "  kind: {kind}").context("failed to write approval kind")?;
+
+        // Match Codex bottom-pane behavior: repaint only the approval rows, never the screen.
+        self.clear_rendered(stdout)?;
+        for line in &lines {
+            write_overlay_line(stdout, format_args!("{line}"))?;
         }
-        if !request.agent_id.is_empty() || !request.model_id.is_empty() {
-            writeln!(
-                stdout,
-                "  agent/model: {} · {}",
-                request.agent_id, request.model_id
-            )
-            .context("failed to write approval agent")?;
-        }
-        if let Some(cwd) = request.cwd.as_deref().filter(|value| !value.is_empty()) {
-            writeln!(stdout, "  cwd: {cwd}").context("failed to write approval cwd")?;
-        }
-        if let Some(command) = request
-            .shell_command
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
-            writeln!(stdout, "  command: {command}").context("failed to write shell command")?;
-        }
-        if !request.shell_prefix_candidates.is_empty() {
-            writeln!(
-                stdout,
-                "  shell prefix: {}",
-                request.shell_prefix_candidates[0]
-            )
-            .context("failed to write shell prefix")?;
-        }
-        writeln!(stdout, "  choose:").context("failed to write approval choices")?;
-        for (idx, choice) in request.choices().iter().enumerate() {
-            writeln!(
-                stdout,
-                "    {}) {} {}",
-                idx + 1,
-                choice.decision,
-                choice.scope
-            )
-            .context("failed to write approval choice")?;
-        }
-        // Raw terminal mode delivers each key immediately.  Call out that Enter
-        // is not required so an extra newline does not get forwarded to the PTY
-        // after the approval prompt clears.
-        writeln!(
-            stdout,
-            "  press one listed number (no Enter); Esc/Ctrl-C = deny once"
-        )
-        .context("failed to write approval hint")?;
+        self.last_rendered_row_count = self.overlay_rendered_rows(&lines);
         stdout.flush().ok();
         Ok(())
     }
 
-    fn render_queue_notice<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
-        writeln!(
-            stdout,
-            "\r\n\x1b[33m[{name}] another approval is queued ({count} waiting).\x1b[0m",
-            name = self.client_name,
-            count = self.queue.len(),
-        )
-        .context("failed to write approval queue notice")?;
-        stdout.flush().ok();
+    fn clear_rendered<W: Write>(&mut self, stdout: &mut W) -> anyhow::Result<()> {
+        for _ in 0..self.last_rendered_row_count {
+            write!(stdout, "\x1b[1A\r{ANSI_CLEAR_LINE}")
+                .context("failed to clear approval overlay line")?;
+        }
+        if self.last_rendered_row_count > 0 {
+            write!(stdout, "\r").context("failed to reset approval overlay cursor")?;
+        }
+        self.last_rendered_row_count = 0;
         Ok(())
     }
 
-    fn render_short_hint<W: Write>(&self, stdout: &mut W) -> anyhow::Result<()> {
-        if let Some(request) = self.active.as_ref() {
-            writeln!(
-                stdout,
-                "\r\n\x1b[33m[{name}] approval pending for {}; press one listed number (no Enter), Esc, or Ctrl-C.\x1b[0m",
-                request.capability_key,
-                name = self.client_name,
-            )
-            .context("failed to write approval short hint")?;
+    fn apply_navigation_input<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        bytes: &[u8],
+    ) -> anyhow::Result<bool> {
+        let choices_len = if let Some(selection) = self.prefix_selection.as_ref() {
+            selection.prefixes.len()
+        } else {
+            let Some(request) = self.active.as_ref() else {
+                return Ok(false);
+            };
+            request.choices().len()
+        };
+        if choices_len == 0 {
+            return Ok(false);
         }
-        stdout.flush().ok();
-        Ok(())
+
+        let delta = match bytes {
+            b"\x1b[A" | b"k" => Some(-1isize),
+            b"\x1b[B" | b"j" => Some(1isize),
+            _ => None,
+        };
+        let Some(delta) = delta else {
+            return Ok(false);
+        };
+
+        if delta < 0 {
+            self.selected_idx = self
+                .selected_idx
+                .checked_sub(1)
+                .unwrap_or(choices_len.saturating_sub(1));
+        } else {
+            self.selected_idx = (self.selected_idx + 1) % choices_len;
+        }
+        self.render_active(stdout)?;
+        Ok(true)
     }
 
     fn choice_from_input(&self, bytes: &[u8]) -> Option<ApprovalChoice> {
         let request = self.active.as_ref()?;
         let first = bytes.first().copied()?;
-        if first == 0x03 || first == 0x1b {
+        if bytes == b"\r" || bytes == b"\n" {
+            return request.choices().get(self.selected_idx).copied();
+        }
+        if bytes == b"\x1b" {
             return Some(ApprovalChoice {
                 decision: "deny",
                 scope: "once",
             });
+        }
+        if let Some(choice) = self.choice_from_shortcut(bytes, request) {
+            return Some(choice);
         }
         let digit = char::from(first).to_digit(10)?;
         if digit == 0 {
@@ -271,10 +329,169 @@ impl CliApprovalPrompt {
         request.choices().get(idx).copied()
     }
 
+    fn choice_from_shortcut(
+        &self,
+        bytes: &[u8],
+        request: &ApprovalRequest,
+    ) -> Option<ApprovalChoice> {
+        let first = bytes.first().copied()?.to_ascii_lowercase();
+        let choices = request.choices();
+        match first {
+            b'y' => choices.iter().copied().find(|choice| {
+                choice.decision == "allow" && matches!(choice.scope, "once" | "session")
+            }),
+            b'a' => choices
+                .iter()
+                .copied()
+                .find(|choice| choice.decision == "allow" && choice.scope == "session")
+                .or_else(|| {
+                    choices
+                        .iter()
+                        .copied()
+                        .find(|choice| choice.decision == "allow")
+                }),
+            b'p' => choices
+                .iter()
+                .copied()
+                .find(|choice| choice.decision == "allow" && choice.scope == "workspace"),
+            b'g' => choices
+                .iter()
+                .copied()
+                .find(|choice| choice.decision == "allow" && choice.scope == "global"),
+            b'n' | b'd' => choices
+                .iter()
+                .copied()
+                .find(|choice| choice.decision == "deny"),
+            _ => None,
+        }
+    }
+
+    fn input_requests_detach(&self, bytes: &[u8]) -> bool {
+        // Ctrl-C detaches locally without resolving the shared Desktop/Mobile/CLI request.
+        bytes.first().copied() == Some(0x03)
+    }
+
+    fn open_prefix_selection<W: Write>(
+        &mut self,
+        request: ApprovalRequest,
+        choice: ApprovalChoice,
+        stdout: &mut W,
+    ) -> anyhow::Result<()> {
+        // Persistent shell approvals are intentionally two-stage in every
+        // surface: first choose the authorization scope, then choose the exact
+        // command prefix that will be remembered. Auto-picking the first prefix
+        // would make the command continue before the user has completed the
+        // second gate, which is the bug this state explicitly prevents.
+        self.prefix_selection = Some(PendingPrefixSelection {
+            prefixes: request.shell_prefix_candidates.clone(),
+            request,
+            choice,
+        });
+        self.selected_idx = 0;
+        self.render_active(stdout)
+    }
+
+    async fn handle_prefix_selection_input<W: Write>(
+        &mut self,
+        stdout: &mut W,
+        bytes: &[u8],
+    ) -> anyhow::Result<ApprovalInputAction> {
+        let Some(selection) = self.prefix_selection.clone() else {
+            return Ok(ApprovalInputAction::Consumed);
+        };
+
+        let selected_prefix = if bytes == b"\r" || bytes == b"\n" {
+            selection.prefixes.get(self.selected_idx).cloned()
+        } else {
+            let Some(first) = bytes.first().copied() else {
+                return Ok(ApprovalInputAction::Consumed);
+            };
+            let Some(digit) = char::from(first).to_digit(10) else {
+                write!(stdout, "\x07").context("failed to write approval input bell")?;
+                return Ok(ApprovalInputAction::Consumed);
+            };
+            let Some(idx) = usize::try_from(digit)
+                .ok()
+                .and_then(|value| value.checked_sub(1))
+            else {
+                write!(stdout, "\x07").context("failed to write approval input bell")?;
+                return Ok(ApprovalInputAction::Consumed);
+            };
+            selection.prefixes.get(idx).cloned()
+        };
+
+        let Some(selected_prefix) = selected_prefix else {
+            write!(stdout, "\x07").context("failed to write approval input bell")?;
+            return Ok(ApprovalInputAction::Consumed);
+        };
+
+        let outcome_label = format!(
+            "{} {} ({selected_prefix})",
+            selection.choice.decision, selection.choice.scope
+        );
+        self.clear_rendered(stdout)?;
+        match self
+            .resolve_request(
+                &selection.request,
+                &selection.choice,
+                Some(selected_prefix.as_str()),
+            )
+            .await
+        {
+            Ok(()) => {
+                writeln!(
+                    stdout,
+                    "\r\n{ANSI_SHOW_CURSOR}[{name}] submitted approval: {outcome_label}.",
+                    name = self.client_name,
+                )
+                .context("failed to write approval submit notice")?;
+                self.finish_active_request(stdout)?;
+            }
+            Err(error) => {
+                writeln!(
+                    stdout,
+                    "\r\n{ANSI_SHOW_CURSOR}{ANSI_RED}[{name}] failed to submit approval: {error}{ANSI_RESET}",
+                    name = self.client_name,
+                )
+                .context("failed to write approval error")?;
+                if is_stale_resolution_error(&error) {
+                    writeln!(
+                        stdout,
+                        "{ANSI_DIM}[{name}] cleared stale local approval prompt; reconnect or use another endpoint if approval is still required.{ANSI_RESET}",
+                        name = self.client_name,
+                    )
+                    .context("failed to write approval stale hint")?;
+                    self.finish_active_request(stdout)?;
+                } else {
+                    writeln!(
+                        stdout,
+                        "{ANSI_DIM}[{name}] approval is still pending; choose again or wait for another endpoint to resolve it.{ANSI_RESET}",
+                        name = self.client_name,
+                    )
+                    .context("failed to write approval retry hint")?;
+                    self.render_active(stdout)?;
+                }
+            }
+        }
+        stdout.flush().ok();
+        Ok(ApprovalInputAction::Consumed)
+    }
+
+    fn finish_active_request<W: Write>(&mut self, stdout: &mut W) -> anyhow::Result<()> {
+        self.prefix_selection = None;
+        self.active = self.queue.pop_front();
+        self.selected_idx = 0;
+        if self.active.is_some() {
+            self.render_active(stdout)?;
+        }
+        Ok(())
+    }
+
     async fn resolve_request(
         &self,
         request: &ApprovalRequest,
         choice: &ApprovalChoice,
+        selected_prefix: Option<&str>,
     ) -> anyhow::Result<()> {
         let url = local_http_url(self.port, "/ai/sessions/approvals/resolve");
         let response = self
@@ -287,7 +504,8 @@ impl CliApprovalPrompt {
                 agent_id: (!request.agent_id.is_empty()).then_some(request.agent_id.as_str()),
                 decision: choice.decision,
                 scope: choice.scope,
-                prefix: request.prefix_for_scope(choice.scope),
+                approval_kind: request.approval_kind.as_deref(),
+                prefix: selected_prefix.or_else(|| request.prefix_for_scope(choice.scope)),
             })
             .send()
             .await
@@ -333,6 +551,10 @@ impl ApprovalRequest {
     }
 
     fn dedupe_key(&self) -> String {
+        // Request ids are generated by the approval authority and are the only
+        // stable identity across the raw CLI, Desktop, mobile and embedded TUI.
+        // Falling back to capability is only for defensive parsing of legacy
+        // events that lacked request ids; normal events always carry one.
         if !self.request_id.is_empty() {
             return format!("request:{}", self.request_id);
         }
@@ -340,6 +562,10 @@ impl ApprovalRequest {
             "capability:{}:{}:{}",
             self.ai_session_id, self.agent_id, self.capability_key
         )
+    }
+
+    fn conflicts_with(&self, other: &Self) -> bool {
+        self.dedupe_key() == other.dedupe_key()
     }
 
     fn matches_resolution(
@@ -379,11 +605,28 @@ impl ApprovalRequest {
         self.shell_prefix_candidates.first().map(String::as_str)
     }
 
+    fn requires_prefix_selection(&self, choice: &ApprovalChoice) -> bool {
+        self.is_shell()
+            && !choice.scope.eq_ignore_ascii_case("once")
+            && !self.shell_prefix_candidates.is_empty()
+    }
+
     fn is_shell(&self) -> bool {
         self.approval_kind
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case("shell"))
-            || self.capability_key == "builtin.shell"
+    }
+
+    fn prompt_title(&self) -> &'static str {
+        // Match Codex approval_overlay titles instead of showing a Sirix-only
+        // banner. The raw CLI still uses Sirix's shared approval transport, but
+        // the visible approval question should read like Codex so option colors
+        // and hierarchy are perceived consistently across endpoints.
+        if self.is_shell() {
+            "Would you like to run the following command?"
+        } else {
+            "Would you like to allow this capability?"
+        }
     }
 }
 
@@ -391,6 +634,38 @@ impl ApprovalRequest {
 struct ApprovalChoice {
     decision: &'static str,
     scope: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPrefixSelection {
+    request: ApprovalRequest,
+    choice: ApprovalChoice,
+    prefixes: Vec<String>,
+}
+
+impl PendingPrefixSelection {
+    fn overlay_lines(&self, selected_idx: usize) -> Vec<String> {
+        let mut lines = vec![
+            format!("  {ANSI_BOLD}Choose the command prefix to persist.{ANSI_RESET}"),
+            String::new(),
+        ];
+        if let Some(command) = self.request.shell_command.as_deref() {
+            lines.push(format!("  $ {command}"));
+            lines.push(String::new());
+        }
+        for (idx, prefix) in self.prefixes.iter().enumerate() {
+            let label = format!("{}. {prefix}", idx + 1);
+            if idx == selected_idx {
+                lines.push(format!("  {ANSI_CYAN_BOLD}{label}{ANSI_RESET}"));
+            } else {
+                lines.push(format!("  {label}"));
+            }
+        }
+        lines.push(format!(
+            "  {ANSI_DIM}number/enter{ANSI_RESET} selects · {ANSI_DIM}↑/↓ or j/k{ANSI_RESET} moves · {ANSI_DIM}Ctrl-C{ANSI_RESET} detaches"
+        ));
+        lines
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -401,6 +676,7 @@ struct ResolveApprovalPayload<'a> {
     agent_id: Option<&'a str>,
     decision: &'a str,
     scope: &'a str,
+    approval_kind: Option<&'a str>,
     prefix: Option<&'a str>,
 }
 
@@ -410,6 +686,18 @@ fn string_field(body: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
+}
+
+fn write_overlay_line<W: Write>(stdout: &mut W, args: fmt::Arguments<'_>) -> anyhow::Result<()> {
+    // Use CR + clear-line + CRLF for every overlay row. This keeps rendering
+    // stable across macOS/Linux/Windows terminals in raw mode, including PTYs
+    // where `\n` alone does not imply carriage return.
+    write!(stdout, "\r\x1b[K").context("failed to prepare approval overlay line")?;
+    stdout
+        .write_fmt(args)
+        .context("failed to write approval overlay line")?;
+    write!(stdout, "\x1b[K\r\n").context("failed to finish approval overlay line")?;
+    Ok(())
 }
 
 fn string_array_field(body: &serde_json::Value, key: &str) -> Vec<String> {
@@ -422,6 +710,14 @@ fn string_array_field(body: &serde_json::Value, key: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .collect()
+}
+
+fn is_stale_resolution_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<reqwest::Error>())
+        .filter_map(reqwest::Error::status)
+        .any(|status| matches!(status.as_u16(), 400 | 404 | 409))
 }
 
 fn parse_supported_scopes(body: &serde_json::Value) -> Vec<&'static str> {
@@ -445,148 +741,9 @@ fn parse_supported_scopes(body: &serde_json::Value) -> Vec<&'static str> {
     }
 }
 
+#[path = "cli_approval_display.rs"]
+mod display;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_capability_request_choices() {
-        let body = serde_json::json!({
-            "ai_session_id": "s",
-            "request_id": "r",
-            "capability_key": "skill.implementation-planner",
-            "supported_scopes": ["once", "workspace"],
-        });
-        let request = ApprovalRequest::from_payload(&body).expect("request");
-        let choices = request.choices();
-        assert_eq!(choices.len(), 4);
-        assert_eq!(choices[0].decision, "allow");
-        assert_eq!(choices[0].scope, "once");
-        assert_eq!(choices[3].decision, "deny");
-        assert_eq!(choices[3].scope, "workspace");
-    }
-
-    #[test]
-    fn shell_prefix_only_applies_to_persistent_scopes() {
-        let body = serde_json::json!({
-            "ai_session_id": "s",
-            "request_id": "r",
-            "capability_key": "builtin.shell",
-            "approval_kind": "shell",
-            "supported_scopes": ["once", "session"],
-            "shell_prefix_candidates": ["npm test"],
-        });
-        let request = ApprovalRequest::from_payload(&body).expect("request");
-        assert_eq!(request.prefix_for_scope("once"), None);
-        assert_eq!(request.prefix_for_scope("session"), Some("npm test"));
-    }
-
-    #[test]
-    fn resolved_event_promotes_next_queued_request() {
-        let mut prompt = CliApprovalPrompt::new(9, "test");
-        let mut stdout = Vec::new();
-        prompt
-            .handle_request_event(&mut stdout, &request_body("request-1", "skill.alpha"))
-            .expect("first request should render");
-        prompt
-            .handle_request_event(&mut stdout, &request_body("request-2", "skill.beta"))
-            .expect("second request should queue");
-
-        assert_eq!(active_request_id(&prompt), Some("request-1"));
-        assert_eq!(prompt.queue.len(), 1);
-
-        prompt
-            .handle_resolved_event(
-                &mut stdout,
-                &serde_json::json!({
-                    "request_id": "request-1",
-                    "decision": "allow",
-                }),
-            )
-            .expect("resolution should advance queue");
-
-        assert_eq!(active_request_id(&prompt), Some("request-2"));
-        assert_eq!(prompt.queue.len(), 0);
-        let rendered = String::from_utf8(stdout).expect("approval prompt should be utf8");
-        assert!(rendered.contains("capability: skill.beta"));
-        assert!(rendered.contains("no Enter"));
-    }
-
-    #[test]
-    fn resolved_event_removes_matching_queued_request_without_touching_active() {
-        let mut prompt = CliApprovalPrompt::new(9, "test");
-        let mut stdout = Vec::new();
-        prompt
-            .handle_request_event(&mut stdout, &request_body("request-1", "skill.alpha"))
-            .expect("first request should render");
-        prompt
-            .handle_request_event(&mut stdout, &request_body("request-2", "skill.beta"))
-            .expect("second request should queue");
-
-        prompt
-            .handle_resolved_event(
-                &mut stdout,
-                &serde_json::json!({
-                    "request_id": "request-2",
-                    "decision": "deny",
-                }),
-            )
-            .expect("queued resolution should be accepted");
-
-        assert_eq!(active_request_id(&prompt), Some("request-1"));
-        assert_eq!(prompt.queue.len(), 0);
-    }
-
-    #[test]
-    fn request_id_match_takes_precedence_over_capability_fields() {
-        let request = request("request-1", "skill.alpha");
-
-        assert!(request.matches_resolution(
-            "request-1",
-            "wrong-session",
-            "wrong-agent",
-            "skill.beta"
-        ));
-        assert!(!request.matches_resolution("request-2", "session-1", "agent-1", "skill.alpha"));
-        assert!(request.matches_resolution("", "session-1", "agent-1", "skill.alpha"));
-    }
-
-    #[test]
-    fn duplicate_request_event_is_not_queued_twice() {
-        let mut prompt = CliApprovalPrompt::new(9, "test");
-        let mut stdout = Vec::new();
-        let body = request_body("request-1", "skill.alpha");
-
-        prompt
-            .handle_request_event(&mut stdout, &body)
-            .expect("first request should render");
-        prompt
-            .handle_request_event(&mut stdout, &body)
-            .expect("duplicate request should be ignored");
-
-        assert_eq!(active_request_id(&prompt), Some("request-1"));
-        assert_eq!(prompt.queue.len(), 0);
-    }
-
-    fn active_request_id(prompt: &CliApprovalPrompt) -> Option<&str> {
-        prompt
-            .active
-            .as_ref()
-            .map(|request| request.request_id.as_str())
-    }
-
-    fn request(request_id: &str, capability_key: &str) -> ApprovalRequest {
-        ApprovalRequest::from_payload(&request_body(request_id, capability_key)).expect("request")
-    }
-
-    fn request_body(request_id: &str, capability_key: &str) -> serde_json::Value {
-        serde_json::json!({
-            "ai_session_id": "session-1",
-            "request_id": request_id,
-            "capability_key": capability_key,
-            "agent_id": "agent-1",
-            "model_id": "model-1",
-            "supported_scopes": ["once", "session"],
-        })
-    }
-}
+#[path = "cli_approval_tests.rs"]
+mod tests;

@@ -11,6 +11,7 @@ use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
 use crate::sandboxing::ExecOptions;
 use crate::sandboxing::execute_env;
+use crate::sirix_tool_approval::effective_approval_policy_for_sirix;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ExecApprovalRequirement;
@@ -186,6 +187,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
     }
 
     fn wants_no_sandbox_approval(&self, policy: AskForApproval) -> bool {
+        let policy = effective_approval_policy_for_sirix(policy);
         match policy {
             AskForApproval::Never => false,
             AskForApproval::Granular(granular_config) => granular_config.allows_sandbox_approval(),

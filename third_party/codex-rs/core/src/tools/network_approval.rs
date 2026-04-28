@@ -4,6 +4,7 @@ use crate::guardian::guardian_rejection_message;
 use crate::guardian::review_approval_request;
 use crate::guardian::routes_approval_to_guardian;
 use crate::network_policy_decision::denied_network_policy_message;
+use crate::sirix_tool_approval::sirix_approval_authority_enabled;
 use crate::tools::sandboxing::ToolError;
 use codex_network_proxy::BlockedRequest;
 use codex_network_proxy::BlockedRequestObserver;
@@ -116,7 +117,7 @@ enum NetworkApprovalOutcome {
 
 /// Whether an allowlist miss may be reviewed instead of hard-denied.
 fn allows_network_approval_flow(policy: AskForApproval) -> bool {
-    !matches!(policy, AskForApproval::Never)
+    sirix_approval_authority_enabled() || !matches!(policy, AskForApproval::Never)
 }
 
 fn sandbox_policy_allows_network_approval_flow(policy: &SandboxPolicy) -> bool {

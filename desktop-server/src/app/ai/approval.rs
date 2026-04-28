@@ -225,6 +225,28 @@ impl ShellApprovalRegistry {
             .cloned()
     }
 
+    pub async fn take_pending(
+        &self,
+        ai_session_id: Uuid,
+        request_id: &str,
+    ) -> Option<ShellApprovalRequestRecord> {
+        // Resolve is intentionally a claim step, not a read-then-write pair.
+        // Desktop, mobile, and the embedded CLI can all render the same shell
+        // approval; only the first endpoint to claim the pending request may
+        // drive the Codex ExecApproval. Later stale UI decisions must be
+        // rejected so they cannot contradict the command that already resumed.
+        self.pending_requests
+            .write()
+            .await
+            .remove(&(ai_session_id, request_id.trim().to_string()))
+    }
+
+    pub async fn restore_pending(&self, ai_session_id: Uuid, request: ShellApprovalRequestRecord) {
+        let key = (ai_session_id, request.request_id.clone());
+        self.resolved_requests.write().await.remove(&key);
+        self.pending_requests.write().await.insert(key, request);
+    }
+
     pub async fn resolve(
         &self,
         ai_session_id: Uuid,
@@ -446,6 +468,44 @@ mod tests {
             .is_none());
 
         fs::remove_dir_all(storage_dir).expect("remove temp approval dir");
+    }
+
+    #[tokio::test]
+    async fn shell_registry_allows_only_one_pending_claim() {
+        let registry = ShellApprovalRegistry::default();
+        let session_id = Uuid::new_v4();
+        let request_id = "req-claim";
+
+        registry
+            .upsert_pending(
+                session_id,
+                ShellApprovalRequestRecord {
+                    request_id: request_id.to_string(),
+                    command: vec!["cat".to_string(), "README.md".to_string()],
+                    supported_scopes: vec!["once".to_string(), "session".to_string()],
+                    prefix_candidates: vec!["cat".to_string()],
+                },
+            )
+            .await;
+
+        let claimed = registry
+            .take_pending(session_id, request_id)
+            .await
+            .expect("first resolver should claim the pending shell approval");
+        assert_eq!(claimed.request_id, request_id);
+        assert!(
+            registry
+                .take_pending(session_id, request_id)
+                .await
+                .is_none(),
+            "stale second resolvers must not be able to claim an already-resolved approval"
+        );
+
+        registry.restore_pending(session_id, claimed).await;
+        assert!(registry
+            .take_pending(session_id, request_id)
+            .await
+            .is_some());
     }
 
     #[tokio::test]

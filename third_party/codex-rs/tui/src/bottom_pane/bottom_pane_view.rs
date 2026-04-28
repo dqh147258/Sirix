@@ -1,6 +1,7 @@
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
+use codex_protocol::ThreadId;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use crossterm::event::KeyEvent;
 
@@ -68,6 +69,16 @@ pub(crate) trait BottomPaneView: Renderable {
         request: ApprovalRequest,
     ) -> Option<ApprovalRequest> {
         Some(request)
+    }
+
+    /// Mark a pending exec approval as resolved by another endpoint.
+    ///
+    /// Approval requests may be shown simultaneously in the TUI and in Sirix's
+    /// Desktop/mobile surfaces. This hook lets the owning modal remove stale
+    /// choices after one surface wins, preventing a later contradictory choice
+    /// from sending a second approval for the same command.
+    fn dismiss_exec_approval(&mut self, _thread_id: ThreadId, _approval_id: &str) -> bool {
+        false
     }
 
     /// Try to handle request_user_input; return the original value if not

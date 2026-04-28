@@ -24,7 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
-use cli_approval::CliApprovalPrompt;
+use cli_approval::{ApprovalInputAction, CliApprovalPrompt};
 use cli_support::{
     current_terminal_size, ensure_desktop_server, ensure_login_prompt, local_http_url,
     local_ws_url, spawn_stdin_reader, spawn_terminal_size_watcher, RawModeGuard, TerminalSize,
@@ -233,6 +233,8 @@ async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<(
     let mut size_rx = spawn_terminal_size_watcher(last_size);
     let mut attached_once = false;
     let mut approval_prompt = CliApprovalPrompt::new(port, "sirix-terminal");
+    approval_prompt.set_terminal_width(last_size.cols);
+    let mut pending_terminal_output = Vec::<u8>::new();
 
     let attach_result: anyhow::Result<TerminalDetachReason> = async {
         write_resize(&mut write, terminal_id, last_size, viewer_presence_epoch).await?;
@@ -240,11 +242,21 @@ async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<(
             tokio::select! {
                 Some(bytes) = stdin_rx.recv() => {
                     if approval_prompt.has_pending() {
-                        approval_prompt
+                        match approval_prompt
                             .handle_stdin_bytes(&mut stdout, bytes.as_slice())
                             .await
-                            .context("failed to handle approval input")?;
-                        continue;
+                            .context("failed to handle approval input")?
+                        {
+                            ApprovalInputAction::Consumed => {
+                                if !approval_prompt.has_pending() {
+                                    flush_buffered_terminal_output(&mut stdout, &mut pending_terminal_output)?;
+                                }
+                                continue
+                            },
+                            ApprovalInputAction::DetachRequested => {
+                                break Ok(TerminalDetachReason::UserDetached)
+                            }
+                        }
                     }
                     if let Err(error) = write
                         .send(Message::Text(
@@ -262,6 +274,7 @@ async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<(
                     }
                 }
                 Some(current_size) = size_rx.recv() => {
+                    approval_prompt.set_terminal_width(current_size.cols);
                     if let Err(error) = write_resize(
                         &mut write,
                         terminal_id,
@@ -279,20 +292,28 @@ async fn attach_session(port: u16, terminal_id: &str) -> (bool, anyhow::Result<(
                             if message_marks_terminal_ready(&text) {
                                 attached_once = true;
                             }
+                            let had_pending_approval = approval_prompt.has_pending();
                             if handle_terminal_message(
                                 &mut stdout,
                                 &text,
                                 &mut viewer_presence_epoch,
                                 &mut approval_prompt,
+                                &mut pending_terminal_output,
                             )? {
                                 break Ok(TerminalDetachReason::SessionClosed);
                             }
+                            if had_pending_approval && !approval_prompt.has_pending() {
+                                flush_buffered_terminal_output(&mut stdout, &mut pending_terminal_output)?;
+                            }
                         }
                         Some(Ok(Message::Binary(bytes))) => {
-                            if let Err(error) = stdout.write_all(&bytes) {
+                            if approval_prompt.has_pending() {
+                                pending_terminal_output.extend_from_slice(&bytes);
+                            } else if let Err(error) = stdout.write_all(&bytes) {
                                 break Err(anyhow::Error::new(error).context("failed to write binary websocket frame"));
+                            } else {
+                                stdout.flush().ok();
                             }
-                            stdout.flush().ok();
                         }
                         Some(Ok(Message::Close(_))) | None => break Ok(TerminalDetachReason::TransportClosed),
                         Some(Ok(_)) => {}
@@ -370,6 +391,7 @@ where
 enum TerminalDetachReason {
     SessionClosed,
     TransportClosed,
+    UserDetached,
 }
 
 fn is_graceful_terminal_disconnect(error: &anyhow::Error) -> bool {
@@ -412,6 +434,11 @@ fn restore_local_terminal(
                 )
                 .context("failed to write transport closed message")?;
         }
+        TerminalDetachReason::UserDetached => {
+            stdout
+                .write_all(b"[sirix-terminal] shared terminal detached by user.\r\n")
+                .context("failed to write user detached message")?;
+        }
     }
     stdout.flush().ok();
     Ok(())
@@ -422,6 +449,7 @@ fn handle_terminal_message(
     raw: &str,
     viewer_presence_epoch: &mut Option<u64>,
     approval_prompt: &mut CliApprovalPrompt,
+    pending_terminal_output: &mut Vec<u8>,
 ) -> anyhow::Result<bool> {
     let decoded = serde_json::from_str::<serde_json::Value>(raw)
         .with_context(|| format!("failed to decode websocket payload: {raw}"))?;
@@ -447,10 +475,20 @@ fn handle_terminal_message(
                 let bytes = BASE64
                     .decode(data)
                     .context("failed to decode terminal frame")?;
-                stdout
-                    .write_all(&bytes)
-                    .context("failed to write terminal output")?;
-                stdout.flush().ok();
+                if approval_prompt.has_pending() {
+                    // While the local approval menu is visible, keep remote PTY
+                    // bytes out of the screen. Otherwise Codex/MCP startup
+                    // output can move the cursor, making a later menu repaint
+                    // clear the wrong rows and leaving duplicate approval views.
+                    // The bytes are replayed after this endpoint or another
+                    // endpoint resolves the shared approval request.
+                    pending_terminal_output.extend_from_slice(&bytes);
+                } else {
+                    stdout
+                        .write_all(&bytes)
+                        .context("failed to write terminal output")?;
+                    stdout.flush().ok();
+                }
             }
             Ok(false)
         }
@@ -500,6 +538,21 @@ fn handle_terminal_message(
         }
         _ => Ok(false),
     }
+}
+
+fn flush_buffered_terminal_output(
+    stdout: &mut io::Stdout,
+    pending_terminal_output: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    if pending_terminal_output.is_empty() {
+        return Ok(());
+    }
+    stdout
+        .write_all(pending_terminal_output.as_slice())
+        .context("failed to replay terminal output buffered during approval")?;
+    pending_terminal_output.clear();
+    stdout.flush().ok();
+    Ok(())
 }
 
 fn message_marks_terminal_ready(raw: &str) -> bool {

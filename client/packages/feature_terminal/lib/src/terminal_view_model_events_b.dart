@@ -209,6 +209,7 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
           agentId: request.agentId,
           decision: decision,
           scope: scope,
+          approvalKind: request.approvalKind,
           prefix: prefix,
         );
       } else {
@@ -220,6 +221,7 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
           agentId: request.agentId,
           decision: decision,
           scope: scope,
+          approvalKind: request.approvalKind,
           prefix: prefix,
         );
       }
@@ -249,10 +251,13 @@ abstract class _TerminalViewModelEventsBBase extends _TerminalViewModelEventsABa
       pendingApprovalRequests: state.pendingApprovalRequests
           .where(
             (request) {
-              if (normalizedRequestId.isNotEmpty &&
-                  request.requestId != null &&
-                  request.requestId == normalizedRequestId) {
-                return false;
+              if (normalizedRequestId.isNotEmpty) {
+                // Request id is the authoritative identity. Multiple pending
+                // approvals may share `builtin.shell` while representing
+                // different gates (capability authorization vs command/prefix
+                // approval), so a resolved event for one id must not remove the
+                // other just because the capability key matches.
+                return request.requestId != normalizedRequestId;
               }
               return !(request.aiSessionId == aiSessionId &&
                   (agentId == null || request.agentId == agentId) &&

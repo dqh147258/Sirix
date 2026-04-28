@@ -105,6 +105,7 @@ pub struct ResolveApprovalRequest {
     pub agent_id: Option<String>,
     pub decision: ApprovalDecision,
     pub scope: ApprovalScope,
+    pub approval_kind: Option<String>,
     pub prefix: Option<String>,
 }
 
@@ -818,7 +819,7 @@ pub async fn resolve_approval(
         .filter(|value| !value.is_empty())
         .unwrap_or(record.agent_id.as_str());
 
-    if capability_key == "builtin.shell" {
+    if should_resolve_as_shell_command_approval(&state, record.ai_session_id, &payload).await {
         let request_id = payload
             .request_id
             .as_deref()
@@ -964,6 +965,46 @@ pub async fn resolve_approval(
     );
 
     Ok(Json(serde_json::json!({"ok": true})))
+}
+
+async fn should_resolve_as_shell_command_approval(
+    state: &AppState,
+    ai_session_id: uuid::Uuid,
+    payload: &ResolveApprovalRequest,
+) -> bool {
+    if payload.capability_key.trim() != "builtin.shell" {
+        return false;
+    }
+
+    if payload
+        .approval_kind
+        .as_deref()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("shell"))
+    {
+        return true;
+    }
+
+    let Some(request_id) = payload
+        .request_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+
+    // Older clients did not echo `approval_kind` on resolve. Route those
+    // requests by the registry that owns the pending id so a shell command
+    // approval still uses shell-prefix semantics, while a distinct
+    // `builtin.shell` capability authorization remains in the generic
+    // capability registry. Once a shell id is already consumed, the explicit
+    // `approval_kind=shell` path above still returns the stale/conflict result
+    // instead of falling through to the generic registry.
+    state
+        .shell_approval_registry
+        .pending_request(ai_session_id, request_id)
+        .await
+        .is_some()
 }
 
 pub async fn create_session_shell_approval_request(
@@ -1173,10 +1214,12 @@ async fn resolve_shell_approval_inner(
 ) -> Result<(), ApiError> {
     let pending = state
         .shell_approval_registry
-        .pending_request(record.ai_session_id, request_id)
+        .take_pending(record.ai_session_id, request_id)
         .await
         .ok_or_else(|| {
-            ApiError::not_found(format!("shell approval request not found: {request_id}"))
+            ApiError::conflict(format!(
+                "shell approval request is no longer pending: {request_id}"
+            ))
         })?;
 
     if !shell_scope_supported(&pending.supported_scopes, scope) {
@@ -1186,11 +1229,19 @@ async fn resolve_shell_approval_inner(
         )));
     }
 
-    let normalized_prefix = normalize_shell_prefix_for_resolution(&pending, scope, prefix)
-        .map_err(ApiError::internal)?;
+    let normalized_prefix = match normalize_shell_prefix_for_resolution(&pending, scope, prefix) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            state
+                .shell_approval_registry
+                .restore_pending(record.ai_session_id, pending)
+                .await;
+            return Err(ApiError::internal(error));
+        }
+    };
 
     if let Some(prefix) = normalized_prefix.as_deref() {
-        persist_shell_rule_for_scope(
+        if let Err(error) = persist_shell_rule_for_scope(
             state,
             record.ai_session_id,
             StdPath::new(&record.cwd),
@@ -1199,7 +1250,32 @@ async fn resolve_shell_approval_inner(
             prefix,
         )
         .await
-        .map_err(ApiError::internal)?;
+        {
+            state
+                .shell_approval_registry
+                .restore_pending(record.ai_session_id, pending)
+                .await;
+            return Err(ApiError::internal(error));
+        }
+    }
+
+    if record.mirrored_to_backend {
+        if let Err(error) = sync_shell_approval_to_backend(
+            state,
+            record.ai_session_id,
+            request_id,
+            decision,
+            scope,
+            normalized_prefix.as_deref(),
+        )
+        .await
+        {
+            state
+                .shell_approval_registry
+                .restore_pending(record.ai_session_id, pending)
+                .await;
+            return Err(ApiError::internal(error));
+        }
     }
 
     state
@@ -1214,19 +1290,6 @@ async fn resolve_shell_approval_inner(
             },
         )
         .await;
-
-    if record.mirrored_to_backend {
-        sync_shell_approval_to_backend(
-            state,
-            record.ai_session_id,
-            request_id,
-            decision,
-            scope,
-            normalized_prefix.as_deref(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-    }
 
     let _ = state.local_events.send(
         serde_json::json!({
@@ -2432,6 +2495,13 @@ impl ApiError {
         }
     }
 
+    fn conflict(message: String) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message,
+        }
+    }
+
     pub(crate) fn internal(error: anyhow::Error) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
@@ -2897,18 +2967,9 @@ fn resolve_shell_capability_mode(
     cwd: &StdPath,
     agent: &crate::app::ai::config::AgentConfig,
 ) -> anyhow::Result<ApprovalMode> {
-    // Shell commands are evaluated later against prefix rules in the generated
-    // exec-policy file. This API endpoint only needs the merged fallback mode
-    // (`allow / ask / deny`) that applies when no prefix rule matches.
-    Ok(match agent.approval_mode {
-        ApprovalMode::Allow => ApprovalMode::Allow,
-        ApprovalMode::Deny => ApprovalMode::Deny,
-        ApprovalMode::Ask => {
-            store
-                .effective_shell_rules_for_agent(cwd, agent, &ShellRulesConfig::default())?
-                .mode
-        }
-    })
+    // Match session runtime / role generation: shell fallback mode follows
+    // Global < Agent < Workspace, while prefix rules remain in exec-policy.
+    store.shell_fallback_mode_for_agent(cwd, agent)
 }
 
 fn resolve_named_capability_mode(
@@ -3058,6 +3119,7 @@ async fn sync_approval_to_backend(
                 ApprovalScope::Workspace => "workspace",
                 ApprovalScope::Global => "global",
             },
+            "approval_kind": null,
         }))
         .send()
         .await?
@@ -3407,6 +3469,36 @@ mod tests {
             resolve_named_capability_mode(&rules, "builtin.apply_patch"),
             ApprovalMode::Deny
         );
+    }
+
+    #[test]
+    fn resolve_shell_capability_mode_uses_agent_authorization_directly() {
+        let root =
+            std::env::temp_dir().join(format!("sirix-api-shell-mode-{}", uuid::Uuid::new_v4()));
+        let store = crate::app::ai::config::SirixConfigStore::for_test_home(root.join("home"));
+        let workspace = root.join("workspace");
+        let mut agent = SirixConfig::default()
+            .agents
+            .into_iter()
+            .next()
+            .expect("default config should seed an agent");
+        agent.id = "code-searcher".to_string();
+        agent.approval_mode = ApprovalMode::Ask;
+
+        assert_eq!(
+            resolve_shell_capability_mode(&store, workspace.as_path(), &agent)
+                .expect("shell mode should resolve"),
+            ApprovalMode::Ask,
+            "a sub-agent set to Ask must not be downgraded by broader global shell rules"
+        );
+
+        agent.approval_mode = ApprovalMode::Deny;
+        assert_eq!(
+            resolve_shell_capability_mode(&store, workspace.as_path(), &agent)
+                .expect("shell mode should resolve"),
+            ApprovalMode::Deny
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

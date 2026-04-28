@@ -16,11 +16,17 @@ struct RuntimeLogEntry {
     context: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone)]
+struct PendingRuntimeLogEntry {
+    source: String,
+    entry: RuntimeLogEntry,
+}
+
 pub struct RuntimeLogger {
     enabled: AtomicBool,
     endpoint: String,
     client: Client,
-    pending: Mutex<VecDeque<RuntimeLogEntry>>,
+    pending: Mutex<VecDeque<PendingRuntimeLogEntry>>,
 }
 
 impl RuntimeLogger {
@@ -53,6 +59,30 @@ impl RuntimeLogger {
         self.log("ERROR", message.into(), None);
     }
 
+    /// Queue a log entry that originated outside the desktop-server process
+    /// but should share its backend runtime-log transport.  This is used by the
+    /// Sirix CLI running inside a managed PTY: the CLI only knows the local
+    /// Desktop API URL, while desktop-server already knows the backend runtime
+    /// log endpoint and retry policy.
+    pub fn ingest_external(
+        &self,
+        source: impl Into<String>,
+        level: Option<String>,
+        message: String,
+        context: Option<serde_json::Value>,
+        timestamp: Option<chrono::DateTime<Utc>>,
+    ) {
+        let level = level.unwrap_or_else(|| "INFO".to_string());
+        self.enqueue(
+            source.into(),
+            level.to_uppercase(),
+            message,
+            context,
+            timestamp.unwrap_or_else(Utc::now),
+            /*echo_to_stdout*/ true,
+        );
+    }
+
     fn log(&self, level: &str, message: String, context: Option<serde_json::Value>) {
         if !self.enabled.load(Ordering::Relaxed) {
             return;
@@ -60,14 +90,39 @@ impl RuntimeLogger {
 
         println!("[DESKTOP_BACKEND][{level}] {message}");
 
+        self.enqueue(
+            "desktop_backend".to_string(),
+            level.to_string(),
+            message,
+            context,
+            Utc::now(),
+            /*echo_to_stdout*/ false,
+        );
+    }
+
+    fn enqueue(
+        &self,
+        source: String,
+        level: String,
+        message: String,
+        context: Option<serde_json::Value>,
+        timestamp: chrono::DateTime<Utc>,
+        echo_to_stdout: bool,
+    ) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        if echo_to_stdout {
+            println!("[{}][{}] {}", source.to_uppercase(), level, message);
+        }
         let entry = RuntimeLogEntry {
-            timestamp: Utc::now(),
-            level: level.to_string(),
+            timestamp,
+            level,
             message,
             context,
         };
         let mut pending = self.pending.lock().expect("runtime logger mutex poisoned");
-        pending.push_back(entry);
+        pending.push_back(PendingRuntimeLogEntry { source, entry });
         while pending.len() > 5000 {
             pending.pop_front();
         }
@@ -100,18 +155,35 @@ impl RuntimeLogger {
             return Ok(());
         }
 
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(&serde_json::json!({
-                "source": "desktop_backend",
-                "entries": entries,
-            }))
-            .send()
-            .await?;
+        let mut grouped: Vec<(String, Vec<RuntimeLogEntry>)> = Vec::new();
+        for pending_entry in &entries {
+            if let Some((_, group_entries)) = grouped
+                .iter_mut()
+                .find(|(source, _)| source == &pending_entry.source)
+            {
+                group_entries.push(pending_entry.entry.clone());
+            } else {
+                grouped.push((
+                    pending_entry.source.clone(),
+                    vec![pending_entry.entry.clone()],
+                ));
+            }
+        }
 
-        if !response.status().is_success() {
-            anyhow::bail!("backend returned status {}", response.status());
+        for (source, source_entries) in grouped {
+            let response = self
+                .client
+                .post(&self.endpoint)
+                .json(&serde_json::json!({
+                    "source": source,
+                    "entries": source_entries,
+                }))
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                anyhow::bail!("backend returned status {}", response.status());
+            }
         }
 
         let mut pending = self.pending.lock().expect("runtime logger mutex poisoned");

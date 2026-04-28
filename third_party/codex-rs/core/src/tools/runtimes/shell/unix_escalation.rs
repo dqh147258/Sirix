@@ -437,8 +437,13 @@ impl CoreShellActionProvider {
                 EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
             }
             Decision::Prompt => {
-                if execve_prompt_is_rejected_by_policy(self.approval_policy, &decision_source)
-                    .is_some()
+                // Sirix owns approvals in embedded sessions. Keep Codex's
+                // legacy policy checks for standalone Codex, but never let
+                // them deny a request before Sirix publishes it to the shared
+                // desktop/mobile/CLI approval registry.
+                if !crate::sirix_tool_approval::sirix_approval_authority_enabled()
+                    && execve_prompt_is_rejected_by_policy(self.approval_policy, &decision_source)
+                        .is_some()
                 {
                     EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
                 } else {

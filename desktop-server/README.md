@@ -16,12 +16,15 @@ Rust 桌面代理服务，负责：
 ./scripts/run-desktop-server.sh
 ./scripts/run-desktop-server.sh --clear-logs
 ./scripts/run-desktop-server.sh --release
+./scripts/run-desktop-server.sh --background
 ```
 
 说明：
 
 - 默认启动 Debug scene；附带 `--release` 时切到 Release scene。
 - `--clear-logs` 会清理当前 scene 对应的 backend runtime logs，便于重新观察桌面代理联调日志。
+- `--background` 会把 desktop-server 放到后台运行，并把日志写入 `${SIRIX_HOME}/runtime/logs/desktop-server.log`。
+- 启动脚本会同时构建 `desktop-server`、`sirix`、`sirix-terminal` 与 `sirix-runtime`，并把 scene-aware shim 安装到 `${SIRIX_HOME}/bin`。
 
 若需要直接在 `desktop-server/` 目录手动运行：
 
@@ -59,6 +62,36 @@ Linux 说明：
 
 - `SIRIX_SCENE=debug|release` 会为 `backend.base_url`、默认 `device_id`、本地 WS 端口段注入 scene 默认值。
 - `SIRIX_HOME` 默认按 scene 选择：Debug `~/.sirix-debug`，Release `~/.sirix`。
+
+## Sirix CLI
+
+`desktop-server` workspace 产出三个本地二进制：`desktop-server`、`sirix`、`sirix-terminal`。推荐用仓库根目录脚本构建安装：
+
+```bash
+./scripts/build-sirix-cli.sh
+./scripts/build-sirix-cli.sh --release
+```
+
+安装位置：
+
+- Debug：`~/.sirix-debug/bin`
+- Release：`~/.sirix/bin`
+
+常用命令：
+
+```bash
+sirix
+sirix list
+sirix resume <ai_session_id|terminal_id>
+sirix-terminal
+```
+
+说明：
+
+- `sirix` 会探测本地 desktop-server；未运行时会尝试启动同目录下的 `desktop-server`。
+- `sirix` 用于创建或恢复 Sirix AI coding session，session 会镜像到 Desktop / Mobile。
+- `sirix-terminal` 会在系统 Terminal 中启动一个共享 shell PTY，并通过本地 WS 挂到 desktop-server；Desktop / Mobile 可以同步查看、输入、resize 和关闭。
+- `sirix-terminal` 会给子 shell 注入 `SIRIX_TERMINAL_SESSION_ID`、`SIRIX_TERMINAL_KIND=hosted_shell`、`SIRIX_HOME` 和 scene bin `PATH`，因此不要在 hosted shell 内再次启动 `sirix-terminal`。
 
 ## 本地接口
 

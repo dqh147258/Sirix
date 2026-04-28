@@ -52,13 +52,17 @@ flutter run -t apps/desktop_app/lib/main.dart -d linux
 ```bash
 ./scripts/run-mobile-client.sh
 ./scripts/run-desktop-client.sh
+./scripts/run-client.sh
 ```
 
 说明：
 
 - 两个脚本默认都走 Debug scene；附带脚本级 `--release` 时切到 Release scene。
-- 两个脚本都支持 `--clear-logs`，会在启动前清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`。
+- `run-mobile-client.sh` / `run-desktop-client.sh` 都支持 `--clear-logs`，会在启动前清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`。
+- `-u`、`--update-deps`、`--pub-get` 会在启动前执行 `flutter pub get`。
 - `./scripts/run-desktop-client.sh` 未显式传 `-d` 时，会按宿主机自动补 `-d macos` 或 `-d linux`。
+- Flutter 自身的 `--release`、`--profile`、`-d` 等参数需要放在脚本分隔符 `--` 之后，例如 `./scripts/run-desktop-client.sh -- -d macos`。
+- `run-client.sh` 会读取 `flutter devices --machine`，交互选择设备后自动转发到移动端或桌面端启动脚本；`--list` 只列出可用设备，不启动。
 - Linux 首次使用前，请确认 `flutter config --enable-linux-desktop` 已开启。
 
 ## 运行参数（--dart-define）

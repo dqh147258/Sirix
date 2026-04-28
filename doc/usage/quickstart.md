@@ -12,17 +12,23 @@
 ## 2. 推荐启动顺序
 
 1. 启动基础服务与 backend：`./scripts/dev-up.sh`
-2. 启动 `desktop-server`：`cd desktop-server && cargo run`
+2. 启动 `desktop-server`：`./scripts/run-desktop-server.sh`
 3. 安装 Darwin 侧 Pod 依赖：
    - `cd client/ios && pod install`
    - `cd client/macos && pod install`
-4. 启动 Flutter 桌面端：`cd client && flutter run -t apps/desktop_app/lib/main.dart -d macos`
-5. 启动 Flutter 移动端：`cd client && flutter run -t apps/mobile_app/lib/main.dart`
+4. 启动 Flutter 桌面端：`./scripts/run-desktop-client.sh`
+5. 启动 Flutter 移动端：`./scripts/run-mobile-client.sh`
+
+也可以直接使用统一控制台：
+
+```bash
+./scripts/dev-tui.sh
+```
 
 实时日志：
 
 - `./scripts/dev-logs.sh backend-server`
-- `cd desktop-server && RUST_LOG=trace cargo run`
+- `~/.sirix-debug/runtime/logs/desktop-server.log`（使用 `./scripts/run-desktop-server.sh --background` 时）
 
 ## 2.1 控制链路 Smoke 验证
 
@@ -68,19 +74,48 @@
 `client/packages/infra_api/lib/src/providers.dart` 使用以下 `--dart-define`：
 
 - `SIRIX_USE_MOCK`（默认 `true`）
+- `SIRIX_SCENE`（默认 `debug`；脚本级 `--release` 会注入 `release`）
 - `SIRIX_SERVER_HOST`（默认 `192.168.0.36`，用于推导 backend 地址）
-- `SIRIX_API_BASE_URL`（默认空；未显式指定时自动使用 `http://${SIRIX_SERVER_HOST}:8080`）
+- `SIRIX_API_BASE_URL`（默认空；未显式指定时按 scene 使用 `SIRIX_SERVER_HOST` + backend 端口，Debug `46110` / Release `46120`）
 - `SIRIX_DESKTOP_SERVER_HOST`（默认 `127.0.0.1`）
-- `SIRIX_DESKTOP_SERVER_PORT_START`（默认 `9700`）
-- `SIRIX_DESKTOP_SERVER_PORT_END`（默认 `9710`）
+- `SIRIX_DESKTOP_SERVER_PORT_START`（默认 Debug `46111` / Release `46121`）
+- `SIRIX_DESKTOP_SERVER_PORT_END`（默认 Debug `46119` / Release `46129`）
 
 示例：
 
 ```bash
 flutter run -t apps/mobile_app/lib/main.dart \
+  --dart-define=SIRIX_SCENE=debug \
   --dart-define=SIRIX_USE_MOCK=false \
   --dart-define=SIRIX_SERVER_HOST=192.168.0.36
 ```
+
+脚本级参数说明：
+
+- `./scripts/run-mobile-client.sh` / `./scripts/run-desktop-client.sh` 默认使用 Debug scene，`--release` 切到 Release scene。
+- `--update-deps` 会先执行 `flutter pub get`。
+- Flutter 自身的 `--release`、`--profile`、`-d` 等参数要放在脚本分隔符 `--` 之后。
+
+## 3.3 Sirix CLI 与共享 Terminal
+
+构建安装：
+
+```bash
+./scripts/build-sirix-cli.sh
+```
+
+常用命令：
+
+```bash
+sirix
+sirix list
+sirix resume <ai_session_id|terminal_id>
+sirix-terminal
+```
+
+- `sirix` 启动 Sirix AI coding session，并镜像到 Desktop / Mobile。
+- `sirix-terminal` 在系统 Terminal 中启动共享 shell PTY，Desktop / Mobile 可以同步查看和输入。
+- CLI shim 安装在当前 scene 的 `${SIRIX_HOME}/bin`，Debug 默认 `~/.sirix-debug/bin`，Release 默认 `~/.sirix/bin`。
 
 ## 4. 用户流程（当前实现）
 

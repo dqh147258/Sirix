@@ -24,9 +24,20 @@ CARGO_HOME=/tmp/cargo-home cargo run
 
 ```bash
 ./scripts/dev-up.sh
+./scripts/dev-up.sh --release
+./scripts/dev-up.sh --expose-deps
+./scripts/dev-restart.sh --clear-logs
 ./scripts/dev-logs.sh backend-server
 ./scripts/dev-down.sh
 ```
+
+说明：
+
+- 根目录脚本会转发到 `backend-server/deploy/scripts/*`，默认使用 Debug scene。
+- `--release` 切到 Release scene；Debug backend 端口是 `46110`，Release backend 端口是 `46120`。
+- `--expose-deps` 会额外发布 Postgres / Redis / Coturn 宿主机端口，方便本机工具直连。
+- `--build` / `--pull` 需要显式传入；普通 `dev-up.sh` / `dev-restart.sh` 不再默认 rebuild / pull。
+- `dev-reset.sh` 等价于 `dev-restart.sh --reset-data`，会删除当前 scene 的 Compose volumes。
 
 ## 已落地接口（MVP）
 

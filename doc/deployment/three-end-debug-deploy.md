@@ -36,6 +36,7 @@
 ./scripts/dev-up.sh
 ./scripts/dev-up.sh --clear-logs
 ./scripts/dev-up.sh --release
+./scripts/dev-up.sh --expose-deps
 ./scripts/dev-logs.sh backend-server
 ```
 
@@ -45,6 +46,7 @@
 
 - 默认启动 Debug scene；附带 `--release` 时切到 Release scene。
 - `--clear-logs` 会清理当前 scene 对应的 `backend-server/deploy/runtime-logs/<scene>/`，方便只观察本轮启动日志。
+- `--expose-deps` 会额外发布 Postgres / Redis / Coturn 宿主机端口，便于本机工具直连。
 - `dev-up.sh` / `dev-restart.sh` 默认不再强制 rebuild / pull；若需要重建 backend 镜像，用 `--build`，若需要主动更新依赖镜像或构建基底，再额外附带 `--pull`。
 - backend-server 现在会在写 runtime logs 前自动补齐缺失目录，因此清理日志目录后再次启动不会因为目录丢失而写日志失败。
 
@@ -60,10 +62,13 @@
 ```bash
 ./scripts/run-desktop-server.sh
 ./scripts/run-desktop-server.sh --clear-logs
+./scripts/run-desktop-server.sh --background
 
 cd desktop-server
 CARGO_HOME=/tmp/cargo-home cargo run
 ```
+
+`run-desktop-server.sh` 会同时构建并安装 `desktop-server`、`sirix`、`sirix-terminal` 与 `sirix-runtime`。安装位置按 scene 隔离：Debug 为 `~/.sirix-debug/bin`，Release 为 `~/.sirix/bin`。
 
 关键配置文件：`desktop-server/config.toml`
 
@@ -98,11 +103,12 @@ flutter run -t apps/mobile_app/lib/main.dart \
   --dart-define=SIRIX_SERVER_HOST=192.168.0.36
 ```
 
-### 桌面端（macOS / Windows）
+### 桌面端（macOS / Linux / Windows）
 
 ```bash
-./scripts/run-desktop-client.sh -d macos
+./scripts/run-desktop-client.sh
 ./scripts/run-desktop-client.sh --clear-logs -- -d macos
+./scripts/run-desktop-client.sh -- --profile
 ```
 
 或手动：
@@ -117,6 +123,34 @@ flutter run -t apps/desktop_app/lib/main.dart -d macos \
   --dart-define=SIRIX_DESKTOP_SERVER_PORT_START=46111 \
   --dart-define=SIRIX_DESKTOP_SERVER_PORT_END=46119
 ```
+
+脚本说明：
+
+- `run-mobile-client.sh` / `run-desktop-client.sh` 默认使用 Debug scene，脚本级 `--release` 切到 Release scene。
+- Flutter 自身的 `--release`、`--profile`、`-d` 等参数必须放在脚本分隔符 `--` 之后。
+- `run-client.sh` 可交互选择当前 Flutter 设备，并自动转发到移动端或桌面端启动脚本。
+
+## 3.4 Sirix CLI 与共享 Terminal
+
+CLI 构建安装：
+
+```bash
+./scripts/build-sirix-cli.sh
+./scripts/build-sirix-cli.sh --release
+```
+
+常用命令：
+
+```bash
+sirix
+sirix list
+sirix resume <ai_session_id|terminal_id>
+sirix-terminal
+```
+
+- `sirix` 启动 Sirix AI coding session，并把会话镜像到 Desktop / Mobile。
+- `sirix-terminal` 在系统 Terminal 中启动共享 shell PTY，Desktop / Mobile 可以同步查看、输入、resize 和关闭。
+- 两个命令都会通过本地 desktop-server 工作；未登录时会提示本地登录或注册。
 
 ## 4. 三端功能验收清单（MVP）
 
